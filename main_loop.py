@@ -130,7 +130,12 @@ def run_worker(
     workdir: Path,
     max_turns: int,
 ) -> str:
-    """Run a tool-calling worker loop and return final assistant text."""
+    """Run a multi-turn tool-calling worker loop and return final assistant text.
+
+    Stop only when either:
+      1) the model returns no tool call and `solution.md` already exists, or
+      2) max_turns is reached.
+    """
     user_prompt = (
         "You are solving one RL task. Use bash when useful. "
         "All files must be created in the provided working directory. "
@@ -165,7 +170,24 @@ def run_worker(
         tool_calls = get_tool_calls(response)
         if not tool_calls:
             final_text = _extract_text_from_response(response)
-            break
+            if (workdir / "solution.md").exists():
+                break
+
+            conversation.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": (
+                                "Continue. You must write your final answer to "
+                                "solution.md in the working directory before finishing."
+                            ),
+                        }
+                    ],
+                }
+            )
+            continue
 
         for call in tool_calls:
             args: dict[str, Any]
