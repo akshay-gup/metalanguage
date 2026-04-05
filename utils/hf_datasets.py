@@ -1,4 +1,4 @@
-"""Utilities for downloading Hugging Face datasets to local files."""
+"""Utilities for downloading and serving Hugging Face datasets."""
 
 from __future__ import annotations
 
@@ -53,3 +53,69 @@ def download_hf_dataset_to_file(
                 break
 
     return destination.resolve()
+
+
+class HFDatasetDataLoader:
+    """Simple batch data loader backed by a Hugging Face dataset split.
+
+    This class is intentionally framework-agnostic so it can be used with
+    PyTorch, JAX, or custom training loops.
+    """
+
+    def __init__(
+        self,
+        *,
+        dataset_name: str,
+        split: str = "train",
+        config_name: str | None = None,
+        batch_size: int = 32,
+        shuffle: bool = True,
+        seed: int = 42,
+        streaming: bool = False,
+        drop_last: bool = False,
+        transform: Any | None = None,
+        **load_dataset_kwargs: Any,
+    ) -> None:
+        if batch_size <= 0:
+            raise ValueError("batch_size must be > 0")
+
+        self.batch_size = batch_size
+        self.drop_last = drop_last
+        self.transform = transform
+        self.streaming = streaming
+
+        self.dataset = load_dataset(
+            path=dataset_name,
+            name=config_name,
+            split=split,
+            streaming=streaming,
+            **load_dataset_kwargs,
+        )
+
+        if shuffle:
+            if streaming:
+                self.dataset = self.dataset.shuffle(buffer_size=10_000, seed=seed)
+            else:
+                self.dataset = self.dataset.shuffle(seed=seed)
+
+    def __iter__(self):
+        batch: list[dict[str, Any]] = []
+        for row in self.dataset:
+            item = self.transform(row) if self.transform else row
+            batch.append(item)
+            if len(batch) == self.batch_size:
+                yield batch
+                batch = []
+
+        if batch and not self.drop_last:
+            yield batch
+
+    def __len__(self) -> int:
+        if self.streaming:
+            raise TypeError("Length is not available for streaming datasets.")
+
+        dataset_len = len(self.dataset)
+        if self.drop_last:
+            return dataset_len // self.batch_size
+
+        return (dataset_len + self.batch_size - 1) // self.batch_size
