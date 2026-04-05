@@ -106,19 +106,30 @@ def _extract_text_from_response(response_json: dict[str, Any]) -> str:
 
 
 def _run_bash_tool(command: str, working_directory: str) -> dict[str, Any]:
-    proc = subprocess.run(
-        command,
-        shell=True,
-        cwd=working_directory,
-        text=True,
-        capture_output=True,
-    )
-    return {
-        "exit_code": proc.returncode,
-        "stdout": proc.stdout,
-        "stderr": proc.stderr,
-        "working_directory": working_directory,
-    }
+    try:
+        proc = subprocess.run(
+            command,
+            shell=True,
+            cwd=working_directory,
+            text=True,
+            capture_output=True,
+            timeout=30,
+        )
+        return {
+            "exit_code": proc.returncode,
+            "stdout": proc.stdout,
+            "stderr": proc.stderr,
+            "working_directory": working_directory,
+            "timed_out": False,
+        }
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "exit_code": 124,
+            "stdout": exc.stdout or "",
+            "stderr": (exc.stderr or "") + "\nCommand timed out after 30 seconds.",
+            "working_directory": working_directory,
+            "timed_out": True,
+        }
 
 
 def run_worker(
@@ -190,28 +201,59 @@ def run_worker(
             continue
 
         for call in tool_calls:
+            call_id = call.get("call_id")
+            if not isinstance(call_id, str) or not call_id:
+                conversation.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": (
+                                    "Your previous tool call was malformed (missing call_id). "
+                                    "Please retry with a valid run_bash function call."
+                                ),
+                            }
+                        ],
+                    }
+                )
+                continue
+
             args: dict[str, Any]
             raw_args = call.get("arguments", "{}")
             if isinstance(raw_args, str):
-                args = json.loads(raw_args)
+                try:
+                    args = json.loads(raw_args)
+                except json.JSONDecodeError:
+                    args = {}
             elif isinstance(raw_args, dict):
                 args = raw_args
             else:
                 args = {}
 
             command = str(args.get("command", "")).strip()
-            if not command:
-                tool_result = {"error": "missing command"}
+            if call.get("name") != "run_bash":
+                tool_result = {"error": f"unsupported tool '{call.get('name')}'"}
+            elif not command:
+                tool_result = {"error": "missing or malformed 'command' argument"}
             else:
                 wd = str(args.get("working_directory") or workdir)
-                wd = wd if Path(wd).resolve().is_relative_to(workdir.resolve()) else str(workdir)
-                tool_result = _run_bash_tool(command=command, working_directory=wd)
+                try:
+                    resolved_wd = Path(wd).resolve()
+                    safe_wd = (
+                        str(resolved_wd)
+                        if resolved_wd.is_relative_to(workdir.resolve())
+                        else str(workdir)
+                    )
+                except Exception:
+                    safe_wd = str(workdir)
+                tool_result = _run_bash_tool(command=command, working_directory=safe_wd)
 
             conversation.append(call)
             conversation.append(
                 {
                     "type": "function_call_output",
-                    "call_id": call["call_id"],
+                    "call_id": call_id,
                     "output": json.dumps(tool_result),
                 }
             )
