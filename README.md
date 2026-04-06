@@ -12,11 +12,10 @@ Open ended RSI
 
 ## Episode runner
 
-- `main_loop.py`: runs one RLVR-style episode end-to-end:
-  1. sample one task from HF dataset,
+- `main_loop.py`: runs RLVR-style episodes end-to-end:
+  1. by default, sample one task from HF dataset (or process all tasks with `--all-tasks`),
   2. create ephemeral temp workspace and write task.json,
   3. run OpenRouter worker with `run_bash` tool access to produce `solution.md`,
   4. score solution via `utils/reward.py`,
   5. append run metadata to a growing JSONL log,
-  6. print one-line summary.
-
+  6. print one-line summary per task.

@@ -43,28 +43,13 @@ def _first_present(row: dict[str, Any], keys: list[str]) -> Any:
     return None
 
 
-def sample_task(
+def _task_from_row(
     *,
-    dataset_name: str,
-    split: str,
-    config_name: str | None,
-    seed: int,
+    row: dict[str, Any],
     question_key: str | None,
     answer_key: str | None,
     id_key: str | None,
 ) -> Task:
-    loader = HFDatasetDataLoader(
-        dataset_name=dataset_name,
-        split=split,
-        config_name=config_name,
-        batch_size=1,
-        shuffle=True,
-        seed=seed,
-    )
-
-    batch = next(iter(loader))
-    row = batch[0]
-
     q = _first_present(row, [question_key] if question_key else [])
     if q is None:
         q = _first_present(row, ["question", "problem", "prompt", "input"])
@@ -89,6 +74,68 @@ def sample_task(
         tid = f"row_{digest}"
 
     return Task(task_id=str(tid), question=str(q), answer=str(a), raw=row)
+
+
+def sample_task(
+    *,
+    dataset_name: str,
+    split: str,
+    config_name: str | None,
+    seed: int,
+    question_key: str | None,
+    answer_key: str | None,
+    id_key: str | None,
+) -> Task:
+    loader = HFDatasetDataLoader(
+        dataset_name=dataset_name,
+        split=split,
+        config_name=config_name,
+        batch_size=1,
+        shuffle=True,
+        seed=seed,
+    )
+
+    batch = next(iter(loader))
+    row = batch[0]
+
+    return _task_from_row(
+        row=row,
+        question_key=question_key,
+        answer_key=answer_key,
+        id_key=id_key,
+    )
+
+
+def iter_tasks(
+    *,
+    dataset_name: str,
+    split: str,
+    config_name: str | None,
+    seed: int,
+    question_key: str | None,
+    answer_key: str | None,
+    id_key: str | None,
+    max_tasks: int | None = None,
+):
+    loader = HFDatasetDataLoader(
+        dataset_name=dataset_name,
+        split=split,
+        config_name=config_name,
+        batch_size=1,
+        shuffle=True,
+        seed=seed,
+    )
+
+    for index, batch in enumerate(loader):
+        if max_tasks is not None and index >= max_tasks:
+            break
+        row = batch[0]
+        yield _task_from_row(
+            row=row,
+            question_key=question_key,
+            answer_key=answer_key,
+            id_key=id_key,
+        )
 
 
 def _extract_text_from_response(response_json: dict[str, Any]) -> str:
@@ -305,6 +352,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--answer-key", default=None)
     parser.add_argument("--id-key", default=None)
     parser.add_argument("--max-turns", type=int, default=10)
+    parser.add_argument(
+        "--all-tasks",
+        action="store_true",
+        help="Process all tasks in the split instead of one sampled task.",
+    )
+    parser.add_argument(
+        "--max-tasks",
+        type=int,
+        default=None,
+        help="Optional cap on number of tasks when --all-tasks is set.",
+    )
     parser.add_argument("--runs-log", default="logs/runs.jsonl")
     parser.add_argument("--outputs-dir", default="logs/episodes")
     parser.add_argument(
@@ -327,20 +385,6 @@ def main() -> None:
     if not api_key:
         raise RuntimeError("OPENROUTER_API_KEY is required.")
 
-    task = sample_task(
-        dataset_name=args.dataset_name,
-        split=args.split,
-        config_name=args.config_name,
-        seed=args.seed,
-        question_key=args.question_key,
-        answer_key=args.answer_key,
-        id_key=args.id_key,
-    )
-
-    temp_dir = Path(args.fixed_temp_dir)
-    shutil.rmtree(temp_dir, ignore_errors=True)
-    temp_dir.mkdir(parents=True, exist_ok=True)
-
     rollout_root = Path(args.rollout_temp_root)
     rollout_root.mkdir(parents=True, exist_ok=True)
 
@@ -351,68 +395,99 @@ def main() -> None:
         if previous_path.exists():
             previous_rollout_dir = previous_path
 
-    next_rollout_dir = rollout_root / _sanitize_for_path(task.task_id)
-    shutil.rmtree(next_rollout_dir, ignore_errors=True)
-    next_rollout_dir.mkdir(parents=True, exist_ok=True)
+    if args.all_tasks:
+        tasks = iter_tasks(
+            dataset_name=args.dataset_name,
+            split=args.split,
+            config_name=args.config_name,
+            seed=args.seed,
+            question_key=args.question_key,
+            answer_key=args.answer_key,
+            id_key=args.id_key,
+            max_tasks=args.max_tasks,
+        )
+    else:
+        tasks = [
+            sample_task(
+                dataset_name=args.dataset_name,
+                split=args.split,
+                config_name=args.config_name,
+                seed=args.seed,
+                question_key=args.question_key,
+                answer_key=args.answer_key,
+                id_key=args.id_key,
+            )
+        ]
 
-    task_file = temp_dir / "task.json"
-    task_file.write_text(
-        json.dumps(
-            {
-                "task_id": task.task_id,
-                "question": task.question,
-                "ground_truth": task.answer,
-                "dataset_row": task.raw,
-                "previous_rollout_dir": str(previous_rollout_dir) if previous_rollout_dir else None,
-                "next_rollout_dir": str(next_rollout_dir),
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
+    for task_index, task in enumerate(tasks):
+        temp_dir = Path(args.fixed_temp_dir)
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        temp_dir.mkdir(parents=True, exist_ok=True)
 
-    worker_text = run_worker(
-        api_key=api_key,
-        model=args.model,
-        question=task.question,
-        task_id=task.task_id,
-        workdir=temp_dir,
-        previous_rollout_dir=previous_rollout_dir,
-        next_rollout_dir=next_rollout_dir,
-        max_turns=args.max_turns,
-    )
+        next_rollout_dir = rollout_root / f"{task_index:06d}_{_sanitize_for_path(task.task_id)}"
+        shutil.rmtree(next_rollout_dir, ignore_errors=True)
+        next_rollout_dir.mkdir(parents=True, exist_ok=True)
 
-    solution_path = temp_dir / "solution.md"
-    if not solution_path.exists():
-        fallback = worker_text if worker_text else "\\boxed{}"
-        solution_path.write_text(fallback + "\n", encoding="utf-8")
+        task_file = temp_dir / "task.json"
+        task_file.write_text(
+            json.dumps(
+                {
+                    "task_id": task.task_id,
+                    "question": task.question,
+                    "ground_truth": task.answer,
+                    "dataset_row": task.raw,
+                    "previous_rollout_dir": str(previous_rollout_dir) if previous_rollout_dir else None,
+                    "next_rollout_dir": str(next_rollout_dir),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
 
-    solution_text = solution_path.read_text(encoding="utf-8")
-    reward = compute_score_bigmath(solution_text, task.answer, {"problem_id": task.task_id})
-    solved = bool(reward >= 1.0)
+        worker_text = run_worker(
+            api_key=api_key,
+            model=args.model,
+            question=task.question,
+            task_id=task.task_id,
+            workdir=temp_dir,
+            previous_rollout_dir=previous_rollout_dir,
+            next_rollout_dir=next_rollout_dir,
+            max_turns=args.max_turns,
+        )
 
-    output_dir = persist_episode_outputs(temp_dir, Path(args.outputs_dir), task.task_id)
-    latest_ptr.write_text(str(next_rollout_dir), encoding="utf-8")
+        solution_path = temp_dir / "solution.md"
+        if not solution_path.exists():
+            fallback = worker_text if worker_text else "\\boxed{}"
+            solution_path.write_text(fallback + "\n", encoding="utf-8")
 
-    record = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "generation": args.generation,
-        "seed": args.seed,
-        "task_id": task.task_id,
-        "solved": solved,
-        "reward": reward,
-        "output_path": str(output_dir),
-        "dataset_name": args.dataset_name,
-        "split": args.split,
-        "model": args.model,
-    }
-    append_run_log(Path(args.runs_log), record)
+        solution_text = solution_path.read_text(encoding="utf-8")
+        reward = compute_score_bigmath(solution_text, task.answer, {"problem_id": task.task_id})
+        solved = bool(reward >= 1.0)
 
-    print(
-        f"gen={args.generation} seed={args.seed} task_id={task.task_id} "
-        f"solved={solved} output={output_dir}"
-    )
+        output_dir = persist_episode_outputs(temp_dir, Path(args.outputs_dir), task.task_id)
+        latest_ptr.write_text(str(next_rollout_dir), encoding="utf-8")
+        previous_rollout_dir = next_rollout_dir
+
+        record = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "generation": args.generation,
+            "seed": args.seed,
+            "task_index": task_index,
+            "task_id": task.task_id,
+            "solved": solved,
+            "reward": reward,
+            "output_path": str(output_dir),
+            "dataset_name": args.dataset_name,
+            "split": args.split,
+            "model": args.model,
+        }
+        append_run_log(Path(args.runs_log), record)
+
+        print(
+            f"gen={args.generation} seed={args.seed} task_index={task_index} task_id={task.task_id} "
+            f"solved={solved} output={output_dir}"
+        )
 
 
 if __name__ == "__main__":
