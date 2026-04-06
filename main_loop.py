@@ -18,7 +18,6 @@ import json
 import os
 import shutil
 import subprocess
-import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -132,6 +131,19 @@ def _run_bash_tool(command: str, working_directory: str) -> dict[str, Any]:
         }
 
 
+def _sanitize_for_path(value: str) -> str:
+    safe = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in value.strip())
+    return safe or "unknown_task"
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except Exception:
+        return False
+
+
 def run_worker(
     *,
     api_key: str,
@@ -139,6 +151,8 @@ def run_worker(
     question: str,
     task_id: str,
     workdir: Path,
+    previous_rollout_dir: Path | None,
+    next_rollout_dir: Path,
     max_turns: int,
 ) -> str:
     """Run a multi-turn tool-calling worker loop and return final assistant text.
@@ -153,6 +167,8 @@ def run_worker(
         "Write your final answer to solution.md in this exact format: \\boxed{...}.\n\n"
         f"Task ID: {task_id}\n"
         f"Working directory: {workdir}\n"
+        f"Previous rollout directory (read-only context): {previous_rollout_dir}\n"
+        f"Next rollout directory (write carryover files here): {next_rollout_dir}\n"
         f"Question:\n{question}\n"
     )
 
@@ -240,11 +256,14 @@ def run_worker(
                 wd = str(args.get("working_directory") or workdir)
                 try:
                     resolved_wd = Path(wd).resolve()
-                    safe_wd = (
-                        str(resolved_wd)
-                        if resolved_wd.is_relative_to(workdir.resolve())
-                        else str(workdir)
-                    )
+                    allowed_roots = [workdir.resolve(), next_rollout_dir.resolve()]
+                    if previous_rollout_dir is not None:
+                        allowed_roots.append(previous_rollout_dir.resolve())
+                    safe_wd = str(workdir)
+                    for root in allowed_roots:
+                        if _is_within(resolved_wd, root):
+                            safe_wd = str(resolved_wd)
+                            break
                 except Exception:
                     safe_wd = str(workdir)
                 tool_result = _run_bash_tool(command=command, working_directory=safe_wd)
@@ -288,6 +307,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-turns", type=int, default=10)
     parser.add_argument("--runs-log", default="logs/runs.jsonl")
     parser.add_argument("--outputs-dir", default="logs/episodes")
+    parser.add_argument(
+        "--fixed-temp-dir",
+        default="logs/tmp/current_episode",
+        help="Fixed working directory reused across tasks.",
+    )
+    parser.add_argument(
+        "--rollout-temp-root",
+        default="logs/tmp/rollout_chain",
+        help="Root path for per-task carryover directories.",
+    )
     return parser.parse_args()
 
 
@@ -308,42 +337,63 @@ def main() -> None:
         id_key=args.id_key,
     )
 
-    with tempfile.TemporaryDirectory(prefix="episode_") as tmp:
-        temp_dir = Path(tmp)
-        task_file = temp_dir / "task.json"
-        task_file.write_text(
-            json.dumps(
-                {
-                    "task_id": task.task_id,
-                    "question": task.question,
-                    "ground_truth": task.answer,
-                    "dataset_row": task.raw,
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
+    temp_dir = Path(args.fixed_temp_dir)
+    shutil.rmtree(temp_dir, ignore_errors=True)
+    temp_dir.mkdir(parents=True, exist_ok=True)
 
-        worker_text = run_worker(
-            api_key=api_key,
-            model=args.model,
-            question=task.question,
-            task_id=task.task_id,
-            workdir=temp_dir,
-            max_turns=args.max_turns,
-        )
+    rollout_root = Path(args.rollout_temp_root)
+    rollout_root.mkdir(parents=True, exist_ok=True)
 
-        solution_path = temp_dir / "solution.md"
-        if not solution_path.exists():
-            fallback = worker_text if worker_text else "\\boxed{}"
-            solution_path.write_text(fallback + "\n", encoding="utf-8")
+    latest_ptr = rollout_root / "latest_rollout_dir.txt"
+    previous_rollout_dir: Path | None = None
+    if latest_ptr.exists():
+        previous_path = Path(latest_ptr.read_text(encoding="utf-8").strip())
+        if previous_path.exists():
+            previous_rollout_dir = previous_path
 
-        solution_text = solution_path.read_text(encoding="utf-8")
-        reward = compute_score_bigmath(solution_text, task.answer, {"problem_id": task.task_id})
-        solved = bool(reward >= 1.0)
+    next_rollout_dir = rollout_root / _sanitize_for_path(task.task_id)
+    shutil.rmtree(next_rollout_dir, ignore_errors=True)
+    next_rollout_dir.mkdir(parents=True, exist_ok=True)
 
-        output_dir = persist_episode_outputs(temp_dir, Path(args.outputs_dir), task.task_id)
+    task_file = temp_dir / "task.json"
+    task_file.write_text(
+        json.dumps(
+            {
+                "task_id": task.task_id,
+                "question": task.question,
+                "ground_truth": task.answer,
+                "dataset_row": task.raw,
+                "previous_rollout_dir": str(previous_rollout_dir) if previous_rollout_dir else None,
+                "next_rollout_dir": str(next_rollout_dir),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    worker_text = run_worker(
+        api_key=api_key,
+        model=args.model,
+        question=task.question,
+        task_id=task.task_id,
+        workdir=temp_dir,
+        previous_rollout_dir=previous_rollout_dir,
+        next_rollout_dir=next_rollout_dir,
+        max_turns=args.max_turns,
+    )
+
+    solution_path = temp_dir / "solution.md"
+    if not solution_path.exists():
+        fallback = worker_text if worker_text else "\\boxed{}"
+        solution_path.write_text(fallback + "\n", encoding="utf-8")
+
+    solution_text = solution_path.read_text(encoding="utf-8")
+    reward = compute_score_bigmath(solution_text, task.answer, {"problem_id": task.task_id})
+    solved = bool(reward >= 1.0)
+
+    output_dir = persist_episode_outputs(temp_dir, Path(args.outputs_dir), task.task_id)
+    latest_ptr.write_text(str(next_rollout_dir), encoding="utf-8")
 
     record = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
