@@ -466,6 +466,18 @@ def main() -> None:
     parent_pool: list[Path] = [previous_rollout_dir] if previous_rollout_dir is not None else []
     rng = random.Random(args.seed)
 
+    def _build_parent_pool(successes: list[Path], target_size: int) -> list[Path]:
+        """Construct the next-task parent pool.
+
+        If we have fewer successful workspaces than rollouts, sample with replacement
+        so every child rollout has an assigned parent.
+        """
+        if not successes or target_size <= 0:
+            return []
+        if len(successes) >= target_size:
+            return rng.sample(successes, target_size)
+        return [rng.choice(successes) for _ in range(target_size)]
+
     if args.all_tasks:
         tasks = iter_tasks(
             dataset_name=args.dataset_name,
@@ -494,7 +506,9 @@ def main() -> None:
         successful_rollouts: list[Path] = []
 
         for rollout_index in range(args.num_rollouts):
-            sampled_parent: Path | None = rng.choice(parent_pool) if parent_pool else None
+            sampled_parent: Path | None = (
+                parent_pool[rollout_index % len(parent_pool)] if parent_pool else None
+            )
 
             temp_dir = Path(args.fixed_temp_dir) / f"{task_index:06d}" / f"rollout_{rollout_index:03d}"
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -575,8 +589,8 @@ def main() -> None:
             )
 
         if successful_rollouts:
-            parent_pool = successful_rollouts
-            latest_ptr.write_text(str(successful_rollouts[0]), encoding="utf-8")
+            parent_pool = _build_parent_pool(successful_rollouts, args.num_rollouts)
+            latest_ptr.write_text(str(parent_pool[0]), encoding="utf-8")
         else:
             parent_pool = []
 
