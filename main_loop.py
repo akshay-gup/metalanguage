@@ -340,6 +340,64 @@ def append_run_log(log_path: Path, record: dict[str, Any]) -> None:
         fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def ensure_local_world_repo(repo_path: Path) -> None:
+    """Ensure a local persistent git repo exists with an initial commit."""
+    repo_path.mkdir(parents=True, exist_ok=True)
+    git_dir = repo_path / ".git"
+
+    if not git_dir.exists():
+        subprocess.run(
+            ["git", "init", "-b", "main"],
+            cwd=repo_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    subprocess.run(
+        ["git", "config", "user.name", "metalanguage-bot"],
+        cwd=repo_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "bot@local"],
+        cwd=repo_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    has_commits = subprocess.run(
+        ["git", "rev-parse", "--verify", "HEAD"],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+    ).returncode == 0
+
+    if not has_commits:
+        genesis_file = repo_path / "WORLD.md"
+        genesis_file.write_text(
+            "# Local world repo\n\nPersistent local git substrate for rollout lineage.\n",
+            encoding="utf-8",
+        )
+        subprocess.run(
+            ["git", "add", "WORLD.md"],
+            cwd=repo_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "world: genesis"],
+            cwd=repo_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run one RLVR episode.")
     parser.add_argument("--dataset-name", required=True)
@@ -384,6 +442,8 @@ def main() -> None:
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
         raise RuntimeError("OPENROUTER_API_KEY is required.")
+
+    ensure_local_world_repo(Path("logs/world_repo"))
 
     rollout_root = Path(args.rollout_temp_root)
     rollout_root.mkdir(parents=True, exist_ok=True)
