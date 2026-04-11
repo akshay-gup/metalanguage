@@ -16,6 +16,7 @@ import argparse
 import hashlib
 import json
 import os
+import random
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -406,6 +407,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", required=True)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--generation", type=int, default=0)
+    parser.add_argument(
+        "--num-rollouts",
+        type=int,
+        default=1,
+        help="Number of rollouts to run per task.",
+    )
     parser.add_argument("--question-key", default=None)
     parser.add_argument("--answer-key", default=None)
     parser.add_argument("--id-key", default=None)
@@ -438,6 +445,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.num_rollouts <= 0:
+        raise ValueError("--num-rollouts must be > 0")
 
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
@@ -454,6 +463,8 @@ def main() -> None:
         previous_path = Path(latest_ptr.read_text(encoding="utf-8").strip())
         if previous_path.exists():
             previous_rollout_dir = previous_path
+    parent_pool: list[Path] = [previous_rollout_dir] if previous_rollout_dir is not None else []
+    rng = random.Random(args.seed)
 
     if args.all_tasks:
         tasks = iter_tasks(
@@ -480,74 +491,94 @@ def main() -> None:
         ]
 
     for task_index, task in enumerate(tasks):
-        temp_dir = Path(args.fixed_temp_dir)
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        temp_dir.mkdir(parents=True, exist_ok=True)
+        successful_rollouts: list[Path] = []
 
-        next_rollout_dir = rollout_root / f"{task_index:06d}_{_sanitize_for_path(task.task_id)}"
-        shutil.rmtree(next_rollout_dir, ignore_errors=True)
-        next_rollout_dir.mkdir(parents=True, exist_ok=True)
+        for rollout_index in range(args.num_rollouts):
+            sampled_parent: Path | None = rng.choice(parent_pool) if parent_pool else None
 
-        task_file = temp_dir / "task.json"
-        task_file.write_text(
-            json.dumps(
-                {
-                    "task_id": task.task_id,
-                    "question": task.question,
-                    "ground_truth": task.answer,
-                    "dataset_row": task.raw,
-                    "previous_rollout_dir": str(previous_rollout_dir) if previous_rollout_dir else None,
-                    "next_rollout_dir": str(next_rollout_dir),
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
+            temp_dir = Path(args.fixed_temp_dir) / f"{task_index:06d}" / f"rollout_{rollout_index:03d}"
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            temp_dir.mkdir(parents=True, exist_ok=True)
 
-        worker_text = run_worker(
-            api_key=api_key,
-            model=args.model,
-            question=task.question,
-            task_id=task.task_id,
-            workdir=temp_dir,
-            previous_rollout_dir=previous_rollout_dir,
-            next_rollout_dir=next_rollout_dir,
-            max_turns=args.max_turns,
-        )
+            next_rollout_dir = rollout_root / (
+                f"{task_index:06d}_{_sanitize_for_path(task.task_id)}_rollout_{rollout_index:03d}"
+            )
+            shutil.rmtree(next_rollout_dir, ignore_errors=True)
+            next_rollout_dir.mkdir(parents=True, exist_ok=True)
 
-        solution_path = temp_dir / "solution.md"
-        if not solution_path.exists():
-            fallback = worker_text if worker_text else "\\boxed{}"
-            solution_path.write_text(fallback + "\n", encoding="utf-8")
+            task_file = temp_dir / "task.json"
+            task_file.write_text(
+                json.dumps(
+                    {
+                        "task_id": task.task_id,
+                        "question": task.question,
+                        "ground_truth": task.answer,
+                        "dataset_row": task.raw,
+                        "previous_rollout_dir": str(sampled_parent) if sampled_parent else None,
+                        "next_rollout_dir": str(next_rollout_dir),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
 
-        solution_text = solution_path.read_text(encoding="utf-8")
-        reward = compute_score_bigmath(solution_text, task.answer, {"problem_id": task.task_id})
-        solved = bool(reward >= 1.0)
+            worker_text = run_worker(
+                api_key=api_key,
+                model=args.model,
+                question=task.question,
+                task_id=task.task_id,
+                workdir=temp_dir,
+                previous_rollout_dir=sampled_parent,
+                next_rollout_dir=next_rollout_dir,
+                max_turns=args.max_turns,
+            )
 
-        output_dir = persist_episode_outputs(temp_dir, Path(args.outputs_dir), task.task_id)
-        latest_ptr.write_text(str(next_rollout_dir), encoding="utf-8")
-        previous_rollout_dir = next_rollout_dir
+            solution_path = temp_dir / "solution.md"
+            if not solution_path.exists():
+                fallback = worker_text if worker_text else "\\boxed{}"
+                solution_path.write_text(fallback + "\n", encoding="utf-8")
 
-        record = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "generation": args.generation,
-            "seed": args.seed,
-            "task_index": task_index,
-            "task_id": task.task_id,
-            "solved": solved,
-            "reward": reward,
-            "output_path": str(output_dir),
-            "dataset_name": args.dataset_name,
-            "split": args.split,
-            "model": args.model,
-        }
-        append_run_log(Path(args.runs_log), record)
+            solution_text = solution_path.read_text(encoding="utf-8")
+            reward = compute_score_bigmath(solution_text, task.answer, {"problem_id": task.task_id})
+            solved = bool(reward >= 1.0)
 
-        print(
-            f"gen={args.generation} seed={args.seed} task_index={task_index} task_id={task.task_id} "
-            f"solved={solved} output={output_dir}"
-        )
+            output_dir = persist_episode_outputs(
+                temp_dir,
+                Path(args.outputs_dir),
+                f"{task.task_id}_rollout_{rollout_index:03d}",
+            )
+            if solved:
+                successful_rollouts.append(next_rollout_dir)
+
+            record = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "generation": args.generation,
+                "seed": args.seed,
+                "task_index": task_index,
+                "rollout_index": rollout_index,
+                "task_id": task.task_id,
+                "parent_rollout_dir": str(sampled_parent) if sampled_parent else None,
+                "next_rollout_dir": str(next_rollout_dir),
+                "solved": solved,
+                "reward": reward,
+                "output_path": str(output_dir),
+                "dataset_name": args.dataset_name,
+                "split": args.split,
+                "model": args.model,
+            }
+            append_run_log(Path(args.runs_log), record)
+
+            print(
+                f"gen={args.generation} seed={args.seed} task_index={task_index} rollout_index={rollout_index} "
+                f"task_id={task.task_id} solved={solved} output={output_dir}"
+            )
+
+        if successful_rollouts:
+            parent_pool = successful_rollouts
+            latest_ptr.write_text(str(successful_rollouts[0]), encoding="utf-8")
+        else:
+            parent_pool = []
 
 
 if __name__ == "__main__":
