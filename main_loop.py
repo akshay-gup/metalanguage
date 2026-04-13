@@ -152,8 +152,14 @@ def _extract_text_from_response(response_json: dict[str, Any]) -> str:
     return "\n".join(parts).strip()
 
 
-def _run_bash_tool(command: str, working_directory: str) -> dict[str, Any]:
+def _run_bash_tool(command: str, working_directory: str, rollout_username: str | None = None) -> dict[str, Any]:
     try:
+        git_identity = rollout_username or Path(working_directory).name
+        env = os.environ.copy()
+        env.setdefault("GIT_AUTHOR_NAME", git_identity)
+        env.setdefault("GIT_COMMITTER_NAME", git_identity)
+        env.setdefault("GIT_AUTHOR_EMAIL", f"{git_identity}@local")
+        env.setdefault("GIT_COMMITTER_EMAIL", f"{git_identity}@local")
         proc = subprocess.run(
             command,
             shell=True,
@@ -161,6 +167,7 @@ def _run_bash_tool(command: str, working_directory: str) -> dict[str, Any]:
             text=True,
             capture_output=True,
             timeout=30,
+            env=env,
         )
         return {
             "exit_code": proc.returncode,
@@ -201,6 +208,7 @@ def run_worker(
     workdir: Path,
     previous_rollout_dir: Path | None,
     next_rollout_dir: Path,
+    rollout_username: str,
     max_turns: int,
 ) -> str:
     """Run a multi-turn tool-calling worker loop and return final assistant text."""
@@ -286,7 +294,11 @@ def run_worker(
                             break
                 except Exception:
                     safe_wd = str(workdir)
-                tool_result = _run_bash_tool(command=command, working_directory=safe_wd)
+                tool_result = _run_bash_tool(
+                    command=command,
+                    working_directory=safe_wd,
+                    rollout_username=rollout_username,
+                )
 
             conversation.append(call)
             conversation.append(
@@ -419,6 +431,7 @@ def main() -> None:
     args = parse_args()
     if args.num_rollouts <= 0:
         raise ValueError("--num-rollouts must be > 0")
+    rollout_usernames = [f"rollout_user_{idx:03d}" for idx in range(args.num_rollouts)]
 
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
@@ -478,6 +491,7 @@ def main() -> None:
         successful_rollouts: list[Path] = []
 
         for rollout_index in range(args.num_rollouts):
+            rollout_username = rollout_usernames[rollout_index]
             sampled_parent: Path | None = (
                 parent_pool[rollout_index % len(parent_pool)] if parent_pool else None
             )
@@ -487,7 +501,7 @@ def main() -> None:
             temp_dir.mkdir(parents=True, exist_ok=True)
 
             next_rollout_dir = rollout_root / (
-                f"{task_index:06d}_{_sanitize_for_path(task.task_id)}_rollout_{rollout_index:03d}"
+                f"{task_index:06d}_{_sanitize_for_path(task.task_id)}_{_sanitize_for_path(rollout_username)}"
             )
             shutil.rmtree(next_rollout_dir, ignore_errors=True)
             next_rollout_dir.mkdir(parents=True, exist_ok=True)
@@ -502,6 +516,7 @@ def main() -> None:
                         "dataset_row": task.raw,
                         "previous_rollout_dir": str(sampled_parent) if sampled_parent else None,
                         "next_rollout_dir": str(next_rollout_dir),
+                        "rollout_username": rollout_username,
                     },
                     ensure_ascii=False,
                     indent=2,
@@ -517,6 +532,7 @@ def main() -> None:
                 workdir=temp_dir,
                 previous_rollout_dir=sampled_parent,
                 next_rollout_dir=next_rollout_dir,
+                rollout_username=rollout_username,
                 max_turns=args.max_turns,
             )
 
@@ -543,6 +559,7 @@ def main() -> None:
                 "seed": args.seed,
                 "task_index": task_index,
                 "rollout_index": rollout_index,
+                "rollout_username": rollout_username,
                 "task_id": task.task_id,
                 "parent_rollout_dir": str(sampled_parent) if sampled_parent else None,
                 "next_rollout_dir": str(next_rollout_dir),
@@ -557,7 +574,7 @@ def main() -> None:
 
             print(
                 f"gen={args.generation} seed={args.seed} task_index={task_index} rollout_index={rollout_index} "
-                f"task_id={task.task_id} solved={solved} output={output_dir}"
+                f"rollout_username={rollout_username} task_id={task.task_id} solved={solved} output={output_dir}"
             )
 
         if successful_rollouts:

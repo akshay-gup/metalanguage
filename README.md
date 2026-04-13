@@ -14,7 +14,7 @@ Open ended RSI
 
 - `main_loop.py`: runs RLVR-style episodes end-to-end:
   1. by default, sample one task from HF dataset (or process all tasks with `--all-tasks`),
-  2. run `--num-rollouts` child rollouts per task in isolated temp workspaces,
+  2. run `--num-rollouts` child rollouts per task in isolated temp workspaces (each with an auto-assigned unique rollout username),
   3. sample each child's parent (with replacement) from the prior task's successful rollouts,
   4. run OpenRouter worker with `run_bash` tool access to produce `solution.md`,
   5. score solution via `utils/reward.py`,
