@@ -203,27 +203,16 @@ def run_worker(
     next_rollout_dir: Path,
     max_turns: int,
 ) -> str:
-    """Run a multi-turn tool-calling worker loop and return final assistant text.
-
-    Stop only when either:
-      1) the model returns no tool call and `solution.md` already exists, or
-      2) max_turns is reached.
-    """
-    user_prompt = (
-        "You are solving one RL task. Use bash when useful. "
-        "All files must be created in the provided working directory. "
-        "Write your final answer to solution.md in this exact format: \\boxed{...}.\n\n"
-        f"Task ID: {task_id}\n"
-        f"Working directory: {workdir}\n"
-        f"Previous rollout directory (read-only context): {previous_rollout_dir}\n"
-        f"Next rollout directory (write carryover files here): {next_rollout_dir}\n"
-        f"Question:\n{question}\n"
-    )
-
+    """Run a multi-turn tool-calling worker loop and return final assistant text."""
     conversation: list[dict[str, Any]] = [
         {
             "role": "user",
-            "content": [{"type": "input_text", "text": user_prompt}],
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": f"Look at the workspace and proceed. Working directory: {workdir}",
+                }
+            ],
         }
     ]
 
@@ -245,24 +234,7 @@ def run_worker(
         tool_calls = get_tool_calls(response)
         if not tool_calls:
             final_text = _extract_text_from_response(response)
-            if (workdir / "solution.md").exists():
-                break
-
-            conversation.append(
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "input_text",
-                            "text": (
-                                "Continue. You must write your final answer to "
-                                "solution.md in the working directory before finishing."
-                            ),
-                        }
-                    ],
-                }
-            )
-            continue
+            break
 
         for call in tool_calls:
             call_id = call.get("call_id")
