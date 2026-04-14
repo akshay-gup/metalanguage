@@ -325,6 +325,53 @@ def append_run_log(log_path: Path, record: dict[str, Any]) -> None:
         fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def load_existing_run_records(log_path: Path) -> list[dict[str, Any]]:
+    if not log_path.exists():
+        return []
+
+    records: list[dict[str, Any]] = []
+    with log_path.open("r", encoding="utf-8") as fh:
+        for line in fh:
+            raw = line.strip()
+            if not raw:
+                continue
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                records.append(parsed)
+    return records
+
+
+def load_parent_pool(parent_pool_path: Path) -> list[Path]:
+    if not parent_pool_path.exists():
+        return []
+    try:
+        raw = json.loads(parent_pool_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(raw, list):
+        return []
+
+    paths: list[Path] = []
+    for item in raw:
+        if not isinstance(item, str) or not item:
+            continue
+        p = Path(item)
+        if p.exists():
+            paths.append(p)
+    return paths
+
+
+def save_parent_pool(parent_pool_path: Path, parent_pool: list[Path]) -> None:
+    parent_pool_path.parent.mkdir(parents=True, exist_ok=True)
+    parent_pool_path.write_text(
+        json.dumps([str(path) for path in parent_pool], ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
 def ensure_local_world_repo(repo_path: Path) -> None:
     """Ensure a local persistent git repo exists with an initial commit."""
     repo_path.mkdir(parents=True, exist_ok=True)
@@ -424,6 +471,11 @@ def parse_args() -> argparse.Namespace:
         default="logs/tmp/rollout_chain",
         help="Root path for per-task carryover directories.",
     )
+    parser.add_argument(
+        "--no-resume",
+        action="store_true",
+        help="Disable resume logic and always start a fresh run.",
+    )
     return parser.parse_args()
 
 
@@ -443,12 +495,15 @@ def main() -> None:
     rollout_root.mkdir(parents=True, exist_ok=True)
 
     latest_ptr = rollout_root / "latest_rollout_dir.txt"
+    parent_pool_path = rollout_root / "latest_parent_pool.json"
     previous_rollout_dir: Path | None = None
     if latest_ptr.exists():
         previous_path = Path(latest_ptr.read_text(encoding="utf-8").strip())
         if previous_path.exists():
             previous_rollout_dir = previous_path
-    parent_pool: list[Path] = [previous_rollout_dir] if previous_rollout_dir is not None else []
+    parent_pool: list[Path] = load_parent_pool(parent_pool_path)
+    if not parent_pool and previous_rollout_dir is not None:
+        parent_pool = [previous_rollout_dir]
     rng = random.Random(args.seed)
 
     def _build_parent_pool(successes: list[Path], target_size: int) -> list[Path]:
@@ -487,10 +542,51 @@ def main() -> None:
             )
         ]
 
+    runs_log_path = Path(args.runs_log)
+    existing_records: list[dict[str, Any]] = []
+    if not args.no_resume:
+        all_records = load_existing_run_records(runs_log_path)
+        existing_records = [
+            rec
+            for rec in all_records
+            if rec.get("dataset_name") == args.dataset_name
+            and rec.get("split") == args.split
+            and rec.get("model") == args.model
+            and rec.get("seed") == args.seed
+            and rec.get("generation") == args.generation
+            and rec.get("num_rollouts") == args.num_rollouts
+            and rec.get("config_name") == args.config_name
+        ]
+
+    existing_by_task: dict[int, dict[int, dict[str, Any]]] = {}
+    for rec in existing_records:
+        task_idx = rec.get("task_index")
+        rollout_idx = rec.get("rollout_index")
+        if not isinstance(task_idx, int) or not isinstance(rollout_idx, int):
+            continue
+        if rollout_idx < 0 or rollout_idx >= args.num_rollouts:
+            continue
+        per_task = existing_by_task.setdefault(task_idx, {})
+        existing = per_task.get(rollout_idx)
+        if existing is None:
+            per_task[rollout_idx] = rec
+
     for task_index, task in enumerate(tasks):
         successful_rollouts: list[Path] = []
+        existing_task_records = existing_by_task.get(task_index, {})
+
+        if len(existing_task_records) >= args.num_rollouts:
+            continue
 
         for rollout_index in range(args.num_rollouts):
+            existing = existing_task_records.get(rollout_index)
+            if existing is not None:
+                if bool(existing.get("solved")):
+                    next_dir = existing.get("next_rollout_dir")
+                    if isinstance(next_dir, str) and next_dir:
+                        successful_rollouts.append(Path(next_dir))
+                continue
+
             rollout_username = rollout_usernames[rollout_index]
             sampled_parent: Path | None = (
                 parent_pool[rollout_index % len(parent_pool)] if parent_pool else None
@@ -569,8 +665,10 @@ def main() -> None:
                 "dataset_name": args.dataset_name,
                 "split": args.split,
                 "model": args.model,
+                "num_rollouts": args.num_rollouts,
+                "config_name": args.config_name,
             }
-            append_run_log(Path(args.runs_log), record)
+            append_run_log(runs_log_path, record)
 
             print(
                 f"gen={args.generation} seed={args.seed} task_index={task_index} rollout_index={rollout_index} "
@@ -580,8 +678,10 @@ def main() -> None:
         if successful_rollouts:
             parent_pool = _build_parent_pool(successful_rollouts, args.num_rollouts)
             latest_ptr.write_text(str(parent_pool[0]), encoding="utf-8")
+            save_parent_pool(parent_pool_path, parent_pool)
         else:
             parent_pool = []
+            save_parent_pool(parent_pool_path, parent_pool)
 
 
 if __name__ == "__main__":

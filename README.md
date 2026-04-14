@@ -20,3 +20,8 @@ Open ended RSI
   5. score solution via `utils/reward.py`,
   6. retain only successful rollout workspaces as parent candidates for the next task,
   7. append run metadata to a growing JSONL log and print one-line summary per rollout.
+- Resume behavior:
+  - runs automatically resume from existing `--runs-log` entries that match dataset/split/model/seed/generation/config/rollout-count;
+  - completed rollouts are skipped, partial tasks continue from missing rollout indices;
+  - parent lineage candidates are persisted under `--rollout-temp-root/latest_parent_pool.json`, so resume restores the exact parent pool without replaying old tasks;
+  - disable this with `--no-resume`.
