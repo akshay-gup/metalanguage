@@ -7,10 +7,9 @@ Version: v0.1 prose draft
 Source materials:
 
 - `Cognitive language.docx`
-- `Cognitive_Language_Paper_Draft.md`
 
-This draft treats the DOCX as source material and the reconciliation draft as
-scaffolding. It is written as a paper-facing argument rather than as notes.
+This draft treats the DOCX as source material. Earlier reconciliation notes are
+preserved in Git history; this Markdown file is now the only working document.
 
 Document stance:
 
@@ -20,15 +19,23 @@ constraints, and open questions while the experiments are still incomplete. The
 current main sections give the cleanest synthesis so far, but material should
 not be deleted merely because it is speculative, redundant, or not yet ready for
 publication. For now, unresolved material should be retained, labeled, and moved
-to appendices or open-issue sections.
+to later research-document sections or open-issue sections.
 
 Working editing policy:
 
 - Preserve information unless it is known to be wrong.
 - If a claim is uncertain, label its status instead of removing it.
 - Keep negative experimental results because they are part of the theory.
-- Separate "current synthesis" from "retained branches."
+- Separate "current synthesis" from "expanded branches."
 - Defer aggressive compression until the experimental picture is more complete.
+
+Document organization:
+
+- Sections 1-11 give the current synthesis in readable prose.
+- Sections 12-17 keep definitions, source inventory, experiments, retained
+  branches, and open questions in the main document flow.
+- Sections 18-22 expand the theory and architecture with source details that
+  should remain visible while experiments continue.
 
 ## Abstract-Like Current Summary
 
@@ -593,7 +600,7 @@ earn prominence through consumer-written evidence, regulatory documents improve
 navigation, and useful process conventions stabilize without being fully
 specified in advance.
 
-## 11. Conclusion
+## 11. Current Synthesis
 
 Open-ended recursive self-improvement should not be reduced to a single model
 editing itself. The systems that have actually accumulated recursive complexity
@@ -617,7 +624,7 @@ verification, and downstream consequences. Under those pressures, compact
 process language is not an aesthetic goal. It is the structure that makes
 cumulative continuation possible.
 
-## Appendix A: Working Definitions
+## 12. Working Definitions
 
 Language:
 
@@ -675,7 +682,7 @@ The emergent set of compact external conventions, files, references, modules,
 tests, maps, and procedures by which fresh LLM episodes reconstruct useful
 working state and continue improvement.
 
-## Appendix B: Citation Targets
+## 13. Citation Targets
 
 This draft still needs formal citations. Likely citation clusters:
 
@@ -689,9 +696,9 @@ This draft still needs formal citations. Likely citation clusters:
 - Darwin Godel Machine and related evolutionary agent systems
 - software repositories, version control, and open-source cultural production
 
-## Appendix C: Source Structure Inventory
+## 14. Source Structure Inventory
 
-This appendix preserves the larger shape of the source document so branches are
+This section preserves the larger shape of the source document so branches are
 not lost while drafting. The current paper-like synthesis should be treated as
 one view over this inventory, not a replacement for it.
 
@@ -891,7 +898,7 @@ Part XXI, The Machine:
 - The minimal machine implements substrate and constraint, but not the full
   population ecology.
 
-Appendix, Open-Ended RSI as Hereditary Cultural Ecology:
+Original source section, Open-Ended RSI as Hereditary Cultural Ecology:
 
 - Open-ended RSI is better modeled as ecological heredity over persistent
   external state than as a lone self-modifying reasoner.
@@ -905,13 +912,13 @@ Appendix, Open-Ended RSI as Hereditary Cultural Ecology:
 - Open-endedness requires both inheritance channels and ecological feedback from
   prior success.
 
-## Appendix D: Experiment Ledger
+## 15. Experiment Ledger
 
 These results are retained because the negative outcomes constrain the theory.
 They should not be compressed away until follow-up experiments clarify which
 failure modes are structural and which are implementation-specific.
 
-### D.1 Persistent Canvas Substrate
+### 15.1 Persistent Canvas Substrate
 
 Hypothesis:
 
@@ -944,7 +951,7 @@ Interpretation:
 The substrate existed, but it was not necessary. The model could ignore it and
 still operate. This supports the necessity-gap diagnosis.
 
-### D.2 Dynamic Module Injection Dataset
+### 15.2 Dynamic Module Injection Dataset
 
 Hypothesis:
 
@@ -977,7 +984,7 @@ Interpretation:
 Injection can change local behavior, but does not by itself create stable
 heredity or selective dependence.
 
-### D.3 Module Extraction from Successful Traces, Random Injection
+### 15.3 Module Extraction from Successful Traces, Random Injection
 
 Hypothesis:
 
@@ -1003,7 +1010,7 @@ Interpretation:
 Modules may compress text but still fail to causally improve solution quality.
 Compression is not the same as cumulative process evolution.
 
-### D.4 Module Extraction plus Ranked Injection
+### 15.4 Module Extraction plus Ranked Injection
 
 Hypothesis:
 
@@ -1028,7 +1035,7 @@ Interpretation:
 Ranking did not solve causal attribution. Injection prominence did not imply
 useful process dependence.
 
-### D.5 Usage-Based Module Scoring
+### 15.5 Usage-Based Module Scoring
 
 Hypothesis:
 
@@ -1054,7 +1061,7 @@ Interpretation:
 Usage rate alone is too weak and too indirect. It does not guarantee causal
 application or downstream value.
 
-### D.6 Module Analytics and Summarization
+### 15.6 Module Analytics and Summarization
 
 Goal:
 
@@ -1075,7 +1082,7 @@ Interpretation:
 
 Measurement exposed the gap between nominal reuse and useful reuse.
 
-### D.7 Selection-Shaped Compositional Vocabulary
+### 15.7 Selection-Shaped Compositional Vocabulary
 
 Hypothesis:
 
@@ -1109,7 +1116,7 @@ Adoption-based pressure can select generic, mentionable modules rather than
 causally useful modules. This motivated shifting from adoption-based to
 success-based selection.
 
-### D.8 Usage-Weighted Filtered Injection
+### 15.8 Usage-Weighted Filtered Injection
 
 Goal:
 
@@ -1162,7 +1169,7 @@ The scoring function measured correlation between mention and success, not
 causation from module to success. The model learned to mention modules without
 using them. Reward signal was mostly noise.
 
-### D.9 Workspace Write-Triggered Context Reset
+### 15.9 Workspace Write-Triggered Context Reset
 
 Hypothesis:
 
@@ -1224,33 +1231,33 @@ create reusable process culture. The missing pieces appear to be naming,
 selection, ranking, bounded inheritance, archive filtering, and cross-problem
 necessity.
 
-## Appendix E: Retained Theoretical Branches
+## 16. Retained Theoretical Branches
 
 These branches are not all ready for a concise formal paper, but they should be
 kept visible for now.
 
-### E.1 Boundary Principle
+### 16.1 Boundary Principle
 
 Cumulative complexity requires stabilized boundaries. A boundary makes a
 substructure identifiable, reusable, preservable, and composable. LLM outputs
 currently have many attractors, such as templates and proof moves, but fewer
 identity-bearing modules with lineage.
 
-### E.2 Secondary Gradients
+### 16.2 Secondary Gradients
 
 Primary selection creates survival. Secondary selection creates architecture.
 Once many variants pass the primary filter, constraints among passers create new
 fitness gradients. These gradients can favor fidelity, modularity,
 compositionality, robustness, and efficient reuse.
 
-### E.3 Transmission-Gap Principle
+### 16.3 Transmission-Gap Principle
 
 Vocabulary emerges when useful structure must cross a separation. DNA-protein
 separation forces genetic encoding. Speaker-listener separation forces words.
 Fresh-context LLM rollouts force process artifacts only if internal state is
 destroyed and future continuation depends on external traces.
 
-### E.4 Reader Constraint
+### 16.4 Reader Constraint
 
 The same kind of machinery should write and read the recursively accumulating
 substrate. If an LLM writes rigid scripts that are then only read by a Python
@@ -1258,34 +1265,34 @@ interpreter, the model-reader feedback loop weakens. Tools are fine when the
 model chooses and interprets their use; rigid workflow scripts can bypass the
 cognitive layer.
 
-### E.5 Process Precedes Substrate
+### 16.5 Process Precedes Substrate
 
 The active process historically exists before the persistent substrate it later
 depends on. This supports designing for active LLM use first, then letting the
 substrate format stabilize under the model's constraint profile.
 
-### E.6 Cross-Layer Native Formats
+### 16.6 Cross-Layer Native Formats
 
 Each recursive layer operates on outputs of the previous layer but develops a
 native representational format suited to its own constraints. LLM-native process
 language need not look like human narrative text. It may become denser, more
 indexed, and more reconstruction-oriented.
 
-### E.7 Sexual and Social Selection Analogy
+### 16.7 Sexual and Social Selection Analogy
 
 Human language and culture may have been accelerated by social and sexual
 selection because fluency, wit, narrative control, teaching, and prestige became
 high-variance signals. This is relevant as an analogy for AI reputation and
 archive uptake, but it is not essential to the core architecture.
 
-### E.8 Pre-RNA and Autocatalytic Chemistry
+### 16.8 Pre-RNA and Autocatalytic Chemistry
 
 Pre-RNA chemistry may already show variation, selection, and proto-retention in
 reaction networks, surfaces, cycles, and compartments. This supports the idea
 that patterns can exist before clean vocabulary. It is useful background but may
-belong in a later appendix.
+belong in a later retained-branch section.
 
-### E.9 Open-Endedness Versus Domain-Specific Accumulation
+### 16.9 Open-Endedness Versus Domain-Specific Accumulation
 
 The minimal machine should not be claimed to produce full open-endedness by
 itself. A more defensible short-term target is domain-specific accumulation of
@@ -1293,7 +1300,7 @@ process artifacts that improve solve rates within a bounded bucket. Broader
 open-endedness likely requires ecological consequence, shifting tasks,
 competition, scarcity, and cross-lineage recombination.
 
-## Appendix F: Open Questions
+## 17. Open Questions
 
 1. What task ecology makes inherited process genuinely necessary rather than
    optional?
@@ -1334,14 +1341,14 @@ competition, scarcity, and cross-lineage recombination.
 
 15. What counts as falsification for the near-term version of the theory?
 
-## Appendix G: Source Completeness Addendum
+## 18. Design Conditions and Source Integration
 
-This appendix is a preservation layer added after auditing the DOCX against this
-working document. The main synthesis above keeps the argument readable; this
-section keeps source ideas visible when they were only partially represented in
-the synthesis.
+This section is a preservation and integration layer added after auditing the
+DOCX against this working document. The first eleven sections keep the argument
+readable; the sections below keep source ideas visible when they need more
+development before being folded into the main synthesis.
 
-### G.1 Preconditions and Forcing Constraints
+### 18.1 Preconditions and Forcing Constraints
 
 The source lists a concrete recipe for emergent cognitive language. These are
 not all equally proven, but they should remain available as design levers:
@@ -1375,7 +1382,7 @@ The forcing constraints are more specific:
   epsilon, softmax, Thompson sampling, or equivalent mechanisms to avoid early
   lock-in.
 
-### G.2 Token-Bound Failure Modes
+### 18.2 Token-Bound Failure Modes
 
 The DOCX includes a failure table for current LLM systems. Preserve these as
 diagnostic targets:
@@ -1393,7 +1400,7 @@ diagnostic targets:
 - Global drift comes from absent theme or commitment tracking and points toward
   planners, checkpoints, or equivalent global-state mechanisms.
 
-### G.3 Human Development and LLM RL Equivalents
+### 18.3 Human Development and LLM RL Equivalents
 
 The source connects language emergence to childhood and skill formation. Human
 cognition becomes system-like through a rough ladder:
@@ -1412,7 +1419,7 @@ This implies an experimental curriculum, not only a static memory mechanism. A
 system may need staged pressure for chunking, interface formation, abstraction,
 library creation, and protocol stabilization.
 
-### G.4 Layered Emergence and Comparative Status
+### 18.4 Layered Emergence and Comparative Status
 
 The source positions current LLMs between proto-syntax and early discourse:
 
@@ -1441,7 +1448,7 @@ The DNA / human language / LLM comparison should be retained:
 This comparison is not a proof by analogy. It is a checklist of missing
 functional roles.
 
-### G.5 The Big Four as Layer-Specific Machinery
+### 18.5 The Big Four as Layer-Specific Machinery
 
 The source warns against treating role, CoT, ICL, and structure as failed copies
 of human mechanisms. They are native solutions to the LLM constraint profile:
@@ -1473,7 +1480,7 @@ This matters because the eventual LLM-native process format should not be
 assumed to resemble human narrative writing. It may be denser, more indexed, and
 optimized for fast reconstruction by bounded parallel readers.
 
-### G.6 Fidelity Scope and Human CoT Before Writing
+### 18.6 Fidelity Scope and Human CoT Before Writing
 
 The source distinguishes fidelity scope by layer:
 
@@ -1490,7 +1497,9 @@ selectable, refinable, and therefore capable of supporting cumulative
 abstraction. LLM CoT resembles pre-literate reasoning unless it is externalized
 into a persistent selected substrate.
 
-### G.7 Boundary and Selection Regimes
+## 19. Convergence, Boundaries, and Layer Transitions
+
+### 19.1 Boundary and Selection Regimes
 
 Boundary principle:
 
@@ -1511,7 +1520,7 @@ The key transition is from existence to retention of advantage. Complexity
 explodes when loss of useful structure becomes costly enough that machinery for
 preservation, modularity, and reuse is selected.
 
-### G.8 Pre-RNA Hand-Off and Boundary Hardening
+### 19.2 Pre-RNA Hand-Off and Boundary Hardening
 
 The source does not claim certainty about early DNA mechanics. The robust
 pattern is:
@@ -1529,7 +1538,7 @@ from analog retention of mixture similarity to more digital sequence copying.
 No intent is required: any templated heredity that improves its own reproduction
 becomes an absorbing advantage.
 
-### G.9 Secondary Gradients and Crisis Pattern
+### 19.3 Secondary Gradients and Crisis Pattern
 
 The source's crisis pattern:
 
@@ -1558,7 +1567,7 @@ Human language bottlenecks:
 - Coordination: shared conventions reduce adoption and interpretation costs,
   selecting for standardization, dictionaries, schooling, and repair norms.
 
-### G.10 MNFL Constraint-to-Structure Mapping
+### 19.4 MNFL Constraint-to-Structure Mapping
 
 The source's stronger convergence claim maps each constraint to a boundary
 property:
@@ -1577,7 +1586,7 @@ learnability. Continuous systems drift under noise. Flat systems fail bounded
 memory. Idiosyncratic systems fail learnability. Pure iconic systems fail
 abstraction.
 
-### G.11 Negative Cases and Edge Cases
+### 19.5 Negative Cases and Edge Cases
 
 The source includes cases that solved narrow walls without open-ended
 compositional explosion:
@@ -1612,7 +1621,7 @@ These cases are important because they prevent overclaiming: compositionality
 can emerge and still stop if the domain is closed or accumulation pressure is
 weak.
 
-### G.12 Substrate Stabilization and Universality
+### 19.6 Substrate Stabilization and Universality
 
 The source argues that substrate-replicator systems often pass through an early
 coevolutionary phase, after which the substrate stabilizes and most explosion
@@ -1638,7 +1647,7 @@ first good-enough solution that achieves network dominance. This is relevant to
 LLM process culture: early conventions may freeze through dependency and
 network effects, not through optimal design.
 
-### G.13 Cross-Layer Interface Versus Native Format
+### 19.7 Cross-Layer Interface Versus Native Format
 
 Each layer perceives outputs of the previous layer but develops a native format:
 
@@ -1654,7 +1663,9 @@ semantics even if tokens are their sensory channel. They may recombine existing
 tokens into conventions with roles beyond ordinary English, just as CoT markers
 already do.
 
-### G.14 Vehicle, Use, and Two-Fold Selection
+## 20. Selection Units and Externalization
+
+### 20.1 Vehicle, Use, and Two-Fold Selection
 
 The source distinguishes pre-cellular chemistry from post-cellular life through
 the emergence of a vehicle. Pre-cellular chemistry has replication-rate
@@ -1674,7 +1685,7 @@ learn unit spreads poorly. A catchy but useless unit may spread briefly and then
 die. This maps to AI process artifacts: they must improve local work and remain
 reconstructible by future agents.
 
-### G.15 Co-Evolution Rather Than Encoding Pre-Existing Complexity
+### 20.2 Co-Evolution Rather Than Encoding Pre-Existing Complexity
 
 The source rejects the idea that complex structure exists first and then gets
 encoded wholesale. Historical pattern:
@@ -1690,7 +1701,7 @@ complete process language in advance. Start with simple transmissible structures
 under real selection and let complexity grow with fidelity, necessity, and
 reuse.
 
-### G.16 Bottleneck Design and Generalization Limits
+### 20.3 Bottleneck Design and Generalization Limits
 
 The source cautions that spontaneous phase transition to general compositional
 language is rare. Domain-specific units may stabilize first and remain locked
@@ -1702,7 +1713,7 @@ The competitive-programming or math-testbed framing should therefore be treated
 as a domain-specific accumulation test, not a claim that a full general language
 will emerge automatically.
 
-### G.17 Externalization Ladder and Nested Selection
+### 20.4 Externalization Ladder and Nested Selection
 
 The source's hierarchy:
 
@@ -1733,7 +1744,7 @@ Each layer externalizes what the previous layer could not evaluate well:
 - DNA/organisms -> language externalizes cognitive and social structure.
 - Human/LLM reasoning -> tape externalizes inference and process traces.
 
-### G.18 Blind Search, Structured Search, and Routing Around Slow Loops
+### 20.5 Blind Search, Structured Search, and Routing Around Slow Loops
 
 The source distinguishes variation mechanisms:
 
@@ -1751,7 +1762,7 @@ Each new recursive layer bypasses slower loops rather than fixing them:
 This supports the claim that the target is not only better gradient learning,
 but a faster external process-evolution layer.
 
-### G.19 Visibility Threshold
+### 20.6 Visibility Threshold
 
 A structure can evolve only when it is visible to selection. Visibility requires
 persistence, replication or reconstruction, and variation. Useful structures
@@ -1767,7 +1778,9 @@ Examples below threshold:
 The LLM target is to move reasoning procedures above the visibility threshold by
 externalizing them into persistent, reconstructible artifacts.
 
-### G.20 Field Landscape Details
+## 21. Field Landscape and Machine Details
+
+### 21.1 Field Landscape Details
 
 The source surveys current systems as partial pieces:
 
@@ -1791,7 +1804,7 @@ The source surveys current systems as partial pieces:
 Current systems often have strong inner loops and persistent substrates, but
 selection remains too much at whole-agent or whole-trajectory level.
 
-### G.21 Reader Constraint Details
+### 21.2 Reader Constraint Details
 
 Self-referential recursion requires writer and reader to be the same type of
 machinery. If the LLM writes Python and only Python reads it, then syntactic
@@ -1805,7 +1818,7 @@ Natural-language prompts, docs, indices, and model-readable conventions remain
 inside the recursive loop because future models reinterpret them. Tools are
 still useful when the model decides when and how to use them.
 
-### G.22 Language as Side Effect
+### 21.3 Language as Side Effect
 
 The source emphasizes that language did not evolve for recursion directly.
 Genetic coding evolved for immediate replication and protein construction.
@@ -1824,7 +1837,7 @@ Do not engineer recursion directly as the first objective. Engineer practical
 communicative pressure between instances. If recursion emerges, the hypothesis
 is supported. If it does not, the result is informative.
 
-### G.23 Machine Formal Details
+### 21.4 Machine Formal Details
 
 The machine section in the DOCX includes formal details that should stay
 available:
@@ -1862,7 +1875,7 @@ Length-generalization claim:
 This is not only a memory-forcing mechanism; it is also a computational scaling
 argument for long reasoning through persistent state.
 
-### G.24 Part-Level Selection on the Tape
+### 21.5 Part-Level Selection on the Tape
 
 Files satisfy the boundary criteria:
 
@@ -1881,7 +1894,7 @@ flat while visibility is selective. Pseudogenes can remain in genomes; obsolete
 words can remain in dictionaries. The key pressure is bounded reading, not
 perfect garbage collection.
 
-### G.25 Noise and Fidelity on the Tape
+### 21.6 Noise and Fidelity on the Tape
 
 The source notes that the tape has near-perfect storage fidelity: files do not
 degrade by themselves. Variation instead comes from stochastic model sampling.
@@ -1905,9 +1918,11 @@ full population ecology. If progress plateaus, additional pressures such as
 multi-agent competition, adversarial dynamics, scarcity, and coordination may be
 needed.
 
-### G.26 Hereditary Ecology Core Mapping
+## 22. Hereditary Ecology and Architecture Details
 
-The appendix's core mapping should remain explicit:
+### 22.1 Hereditary Ecology Core Mapping
+
+The source ecology section's core mapping should remain explicit:
 
 Biology:
 
@@ -1936,7 +1951,7 @@ The AI seed is not DNA. It is closer to apprenticeship notes, lab notebooks,
 oral tradition, a monastery rule, a research group's inherited style, a startup
 playbook, or local operating doctrine.
 
-### G.27 Fixed Constructor and Mutable Culture
+### 22.2 Fixed Constructor and Mutable Culture
 
 The source separates relatively fixed objects from mutable inheritance.
 
@@ -1967,7 +1982,7 @@ The design principle remains:
 fix the constructor; fix the minimal protocol; fix the scarcity; let culture
 evolve.
 
-### G.28 Evolutionary Baselines and Limits
+### 22.3 Evolutionary Baselines and Limits
 
 DGM-like systems validate the population-search intuition: archive plus
 branching plus empirical selection can outperform one-shot self-improvement.
@@ -1988,7 +2003,7 @@ The deeper bottleneck is fixed ecology, not fixed chemistry. Static benchmarks
 permit improvement without consequence. Open-endedness requires consequences
 that feed back into what later structures must become.
 
-### G.29 Transmission, Storage, Carryover, Seed, and Archive
+### 22.4 Transmission, Storage, Carryover, Seed, and Archive
 
 Storage is not transmission. Transmission happens only when externally stored
 structure causally shapes later runs and a descendant form of it is retained
@@ -2015,7 +2030,7 @@ Fitness intuition:
 Selection on reuse alone risks pure memetics. Selection on task score alone
 risks benchmark plateau. The channels must interact but remain distinguishable.
 
-### G.30 Architecture Evolution
+### 22.5 Architecture Evolution
 
 The source describes an architectural progression:
 
@@ -2032,7 +2047,7 @@ The source describes an architectural progression:
 This reinforces that the workspace is an ephemeral lifetime phenotype, not the
 inherited object.
 
-### G.31 Ecology, Competition, and Engineered Drives
+### 22.6 Ecology, Competition, and Engineered Drives
 
 Open-endedness tends to require dynamic landscapes, parasites or exploiters,
 resource structure, competition for continuation, scarce attention, costly
@@ -2063,7 +2078,7 @@ The ecology-level drive is strongest. The desired transition is from "the prompt
 tells me to leave useful artifacts" to "leaving useful artifacts changes what
 future agents read, trust, build on, and continue."
 
-### G.32 Process Manifold and Policy-Level Heredity
+### 22.7 Process Manifold and Policy-Level Heredity
 
 AI heredity may not look like discrete biological genes. It may involve movement
 through a high-dimensional process manifold:
@@ -2091,7 +2106,7 @@ Important process-level structures include:
 - stopping conditions
 - archive retrieval policies
 
-### G.33 Representation Freedom and Protocol
+### 22.8 Representation Freedom and Protocol
 
 Files and functions capture state, code, and parts, but not always control
 logic. Skill-like formats may help because they create boundaries, interfaces,
@@ -2116,7 +2131,7 @@ Agents should be free to invent files, notes, scripts, DSLs, manifests, skills,
 dependency graphs, branch rituals, evaluator packages, retrieval guides, and
 hybrid formats.
 
-### G.34 Current Multi-Agent and Inference-Time Systems
+### 22.9 Current Multi-Agent and Inference-Time Systems
 
 The source treats several contemporary systems as evidence for strong
 interpreter capability rather than complete transmission ecology:
@@ -2136,7 +2151,7 @@ interpreter capability rather than complete transmission ecology:
 These systems support the "strong interpreter" side of the thesis. They do not
 provide the missing transmission ecology.
 
-### G.35 Confidence, Reuse, and Grounding
+### 22.10 Confidence, Reuse, and Grounding
 
 Reuse can point in the right direction only under the right causal structure.
 Confidence, low surprisal, or self-consistency can be useful local signals, but
@@ -2154,7 +2169,7 @@ Reuse becomes meaningful when:
 Reuse must be corrected by validation, cost, provenance, downstream performance,
 decay, perturbation tests, and consumer-written reputation.
 
-### G.36 Dual Inheritance Metrics
+### 22.11 Dual Inheritance Metrics
 
 Vertical inheritance asks whether a direct lineage can continue. It selects for:
 
@@ -2186,7 +2201,7 @@ These axes should not be collapsed:
 Vertical persistence can allocate direct continuation. Global adoption can
 allocate archive prominence.
 
-### G.37 Measuring Fitness
+### 22.12 Measuring Fitness
 
 Vertical fitness is retrospective and multigenerational. A good seed is not one
 that merely copies itself, but one that lets fresh descendants reconstruct the
@@ -2207,7 +2222,7 @@ successfully adapted, and retained because they keep helping. Useful measures:
 Producer-written claims can provide provenance and local notes, but durable
 public reputation should come mainly from downstream consumers.
 
-### G.38 Git Ecology Mechanics
+### 22.13 Git Ecology Mechanics
 
 Git is storage before it is ecology. It becomes ecology when:
 
@@ -2233,7 +2248,7 @@ Future agents should not read the whole repo. They should start from bounded
 recommendations: private lineage seed, selected archive hits, provenance trails,
 usage traces, dependency pointers, and trust markers.
 
-### G.39 Two Views of Cultural Evolution
+### 22.14 Two Views of Cultural Evolution
 
 Agent-centered view:
 
@@ -2255,7 +2270,7 @@ Artifact-centered view:
 The same system needs both views because artifacts shape agents and agents
 produce artifacts.
 
-### G.40 What Is Under Differential Pressure
+### 22.15 What Is Under Differential Pressure
 
 Selection acts on whatever has heritable variation and affects its future
 representation in the system. Depending on layer, this can be genes, organisms,
@@ -2279,7 +2294,7 @@ AI mapping:
 - Agent policy: reconstructed behavior induced by constitution, seed, and
   archive retrieval; indirectly selected through the artifacts that recreate it.
 
-### G.41 Cross-Inheritance Filters
+### 22.16 Cross-Inheritance Filters
 
 Cross-inheritance without filters becomes memetic pollution. Filters are needed
 because integration is costly, failure is asymmetric, benefit is uncertain, and
@@ -2302,7 +2317,7 @@ These are analogues of biological compatibility constraints, regulation,
 immune-like filtering, and human peer review, teaching, institutions, citation,
 curricula, and professional norms.
 
-### G.42 Minimal Practical System Picture
+### 22.17 Minimal Practical System Picture
 
 The source's minimal system:
 
@@ -2330,7 +2345,7 @@ Four-layer version:
 - Lineage seed / vertical culture.
 - Git archive / public culture.
 
-### G.43 Differential Persistence and Consequence
+### 22.18 Differential Persistence and Consequence
 
 The deepest commonality is differential persistence: a structure persists when
 it causes more future instances of itself, or functionally continuous
@@ -2358,7 +2373,7 @@ Desired loop:
 5. Resulting successes reshape the competitive and archival environment.
 6. New gradients appear.
 
-### G.44 Practical Problem-Pool Experiment Details
+### 22.19 Practical Problem-Pool Experiment Details
 
 The source proposes a concrete file layout:
 
@@ -2397,7 +2412,7 @@ record what helped or misled it.
 The system should not reward only solved-problem count. It should also reward
 whether artifacts later runs can actually reuse are produced.
 
-### G.45 Revised Core Summary from the Source Appendix
+### 22.20 Revised Core Summary from the Source Ecology Section
 
 Preserved final thesis:
 
@@ -2418,7 +2433,7 @@ The agent-centered view asks which lineages continue. The artifact-centered view
 asks which artifacts keep getting reconstructed. Both are required because
 agents and artifacts reproduce each other.
 
-### G.46 Specific Source Details Retained
+### 22.21 Specific Source Details Retained
 
 This section catches smaller claims and examples from the DOCX that are easy to
 lose during synthesis.
