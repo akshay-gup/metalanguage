@@ -372,6 +372,11 @@ selects whole trajectories rather than persistent subparts. Without discrete
 inherited units, recurring patterns remain attractors in the model's behavior,
 not replicators with identity and lineage.
 
+This is also how the source interprets RLVR's effect on CoT: CoT effectiveness
+was latent at scale, and selecting for correct answers reinforced traces that
+helped reach correctness. RLVR can therefore make episodic reasoning more
+reliable without yet creating heritable process parts.
+
 The goal is to move from trajectory-level selection to process-culture
 selection. A successful trajectory should leave behind bounded transmissible
 objects that future trajectories can reconstruct and improve. Those objects
@@ -801,7 +806,20 @@ Part X, The Universal Pattern:
 
 - Variation, selection, retention, and accumulation recur across genes,
   synapses, language, writing, code, and AI systems.
-- Clarifies substrate, chunks, and composition rules.
+- Foundational system types are distinguished by timescale and substrate:
+  evolutionary systems such as genes and immune systems learn across
+  generations; neural systems such as brains learn within a lifetime;
+  collective/cultural systems learn across individuals through social learning
+  and institutions; artificial systems can mirror any of these with the right
+  substrate and pressure.
+- The clean hierarchy is: proto-chemistry -> protocells -> RNA/DNA as heritable
+  memory -> nervous systems as within-life learning -> complex brains -> social
+  intelligence -> cumulative culture -> symbolic language and reason -> AI as
+  copyable, editable minds.
+- Clarifies substrate, chunks, and composition rules: the substrate is the
+  medium, chunks are discrete stored or operated units such as genes, words, or
+  functions, and composition rules are how chunks combine, such as regulation,
+  grammar, logic, APIs, or imports.
 - Stable, referencable, composable units are necessary for cumulative growth.
 
 Part XI, Scale, Depth, and Demonstration:
@@ -1266,7 +1284,10 @@ kept visible for now.
 Cumulative complexity requires stabilized boundaries. A boundary makes a
 substructure identifiable, reusable, preservable, and composable. LLM outputs
 currently have many attractors, such as templates and proof moves, but fewer
-identity-bearing modules with lineage.
+identity-bearing modules with lineage. The source's current-chunk examples are
+rhetorical scaffolds, format templates, proof moves, tool-call rituals, and
+safety boilerplate: recurrent motifs that can be useful, but are not yet stable
+replicators.
 
 ### 16.2 Secondary Gradients
 
@@ -1281,6 +1302,12 @@ Vocabulary emerges when useful structure must cross a separation. DNA-protein
 separation forces genetic encoding. Speaker-listener separation forces words.
 Fresh-context LLM rollouts force process artifacts only if internal state is
 destroyed and future continuation depends on external traces.
+
+The negative cases matter. Pre-cellular chemistry has recurring patterns, but
+the molecule does not refer to something else; it simply is the structure.
+Standard RLVR has the same model and same weights across attempts, so there is
+no transmission gap that forces vocabulary-like artifacts. Without separation,
+there can be patterns without reference and attractors without inherited words.
 
 ### 16.4 Reader Constraint
 
@@ -1483,6 +1510,13 @@ of human mechanisms. They are native solutions to the LLM constraint profile:
 massive within-read bandwidth, bounded context, and almost no cross-read
 persistence.
 
+ICL and canvas should therefore be treated as complements rather than
+substitutes. Pushing ICL alone produces a stronger within-episode reasoner, a
+better "animal brain" in the source's shorthand, but it does not produce
+cumulative module evolution or stable internal dialects. RLVR supplies a
+selector; canvas supplies a population of persistent contexts and artifacts only
+if it is coupled to promotion, decay, and downstream consequence.
+
 Preserved mapping:
 
 - ICL is high-bandwidth within-read adaptation. It reconstructs local working
@@ -1614,6 +1648,16 @@ learnability. Continuous systems drift under noise. Flat systems fail bounded
 memory. Idiosyncratic systems fail learnability. Pure iconic systems fail
 abstraction.
 
+The source also keeps a structural-correspondence claim: language-like
+representations work because their parts can mirror stable structure in what
+they represent. Discrete reidentifiable objects become noun-like units;
+reusable properties become adjective-like units; combinable relations become
+verb- or preposition-like units; events become sentence-like structures; and
+part-whole structure becomes hierarchical syntax. The broader convergence list
+includes DNA, proteins, human language, mathematics, and programming as systems
+that independently use discrete units, composition rules, reusable parts, and
+hierarchy to scale representation.
+
 ### 19.5 Negative Cases and Edge Cases
 
 The source includes cases that solved narrow walls without open-ended
@@ -1713,6 +1757,13 @@ learn unit spreads poorly. A catchy but useless unit may spread briefly and then
 die. This maps to AI process artifacts: they must improve local work and remain
 reconstructible by future agents.
 
+The source's strongest formulation is that in human language, use and
+replication are coupled. A speaker uses a word to accomplish a goal now; a
+listener hears it and may adopt it later. The act that benefits the current
+speaker is also the act that transmits the word. AI process artifacts will be
+more selectable when current use and future transmission are similarly coupled,
+rather than separated into "solve now" and "write documentation later" phases.
+
 ### 20.2 Co-Evolution Rather Than Encoding Pre-Existing Complexity
 
 The source rejects the idea that complex structure exists first and then gets
@@ -1775,11 +1826,31 @@ own reasoning. "This tactic worked" and "this module contributed" are
 statements about the system from inside the system. This is the same functional
 operation as language in the broad sense.
 
+The source adds a stronger cross-layer claim: each layer can only assign credit
+one level down. A layer's own machinery cannot fully evaluate its own deepest
+parts until a higher representational layer makes those parts visible,
+copyable, and selectable. No layer bootstraps its own part-level selection from
+inside itself; evaluation capacity arrives from the layer above.
+
 Each layer externalizes what the previous layer could not evaluate well:
 
 - Chemistry -> DNA externalizes molecular structure.
 - DNA/organisms -> language externalizes cognitive and social structure.
 - Human/LLM reasoning -> tape externalizes inference and process traces.
+
+The source separates partial from full externalization. Earlier layers already
+perform some version of what later layers make copyable: DNA has recombination
+and regulatory interaction among genes before symbolic systems; human cognition
+has internal reasoning before persistent reasoning artifacts; LLMs have CoT
+traces before persistent procedural evolution. The next layer does not invent
+all structure from nothing. It makes pre-existing structure visible, replicable,
+and selectable.
+
+This leads to the compact sequence: structure exists, a copying channel appears,
+then selection begins. The machinery creates structure; the copying channel
+makes it evolutionarily visible. Recursive systems appear when internal
+computation of the previous layer becomes external and copyable, and those
+copies compete under transmission constraints.
 
 ### 20.5 Blind Search, Structured Search, and Routing Around Slow Loops
 
@@ -1887,6 +1958,22 @@ is supported. If it does not, the result is informative.
 The machine section in the DOCX includes formal details that should stay
 available:
 
+The AI inner loop has two timescales. Within-session plasticity is ICL: useful
+adaptation that dies with the episode. Across-session plasticity is RL or weight
+updating: slower changes to the reader/writer itself, analogous to synaptic
+plasticity, where weights are the chemistry but chemistry remains tunable by
+experience. The key distinction is inner versus outer, not ICL versus RL:
+inner-loop changes improve the reader/writer; outer-loop changes improve what
+is read and written, namely persistent artifacts and their revision rules.
+
+Bash is treated as a universal interface because it is one tool with one string
+parameter: the shell command. The model writes what it would type in a terminal,
+with no structured schema per operation and no translation layer between model
+knowledge and system action. Git, Python, grep, pytest, and file inspection are
+all programs invoked through the same shell. This matters because terminal
+sessions are already strongly represented in model pretraining, so the interface
+is partly already in the weights.
+
 - The tape is the repo.
 - The head is bash or an equivalent universal read/write/execute interface.
 - The deterministic transition function executes tests, scripts, compilers,
@@ -1894,6 +1981,13 @@ available:
 - The stochastic transition function is the model proposing patches or actions.
 - Selection scores stochastic outputs through deterministic execution and keeps
   winners.
+
+The biological mapping in the source is precise: chemistry is the deterministic
+transition, because given local inputs it executes molecular consequences;
+replication with variation is the stochastic transition; both operate on and
+are configured by the same molecular substrate. The AI machine mirrors this by
+letting deterministic execution and stochastic model proposal operate on the
+same tape.
 
 The GRPO mapping:
 
