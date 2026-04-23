@@ -145,6 +145,14 @@ single episode, organism, or mind. Recursion lives in the coupling: better
 readers and writers create better stored structure, and better stored structure
 makes future reading and writing more effective.
 
+The source also makes the origin claim directional. The active process appears
+before the persistent substrate that later carries its accumulation. RNA-like
+activity precedes DNA-like stable storage; brains precede writing. A process
+with a persistence bottleneck creates selection pressure for a substrate that
+resolves it. The substrate is not designed first while waiting for a process to
+arrive. Once both loops exist, causality becomes bidirectional, but the initial
+pressure runs from fragile process to stabilizing substrate.
+
 In biology, cellular machinery reads and expresses genetic material. Organisms
 act as transient interactors in an environment. Genomes persist across
 generations and change under selection. The genome can also encode machinery
@@ -208,11 +216,20 @@ reload useful state, choose actions, use tools, evaluate progress, and continue
 improvement.
 
 Self-reference is the key property. A wildfire can spread, and an erosion
-channel can deepen, but neither represents and modifies the rules of its own
-future operation. They amplify quantities. They do not build persistent parts
-that improve the production, preservation, or recombination of future parts.
-Biology and human culture cross a different threshold: their substrates can
-represent structures within the system itself.
+channel can deepen, and ice-albedo feedback can amplify a climate state, but
+none represents and modifies the rules of its own future operation. They amplify
+quantities. They do not build persistent parts that improve the production,
+preservation, or recombination of future parts. Biology and human culture cross
+a different threshold: their substrates can represent structures within the
+system itself.
+
+This is the ratchet distinction. Language is not just a label for communication;
+it is the manufacturing capability for reusable parts. Without a combinatorial
+system, a process cannot reliably produce discrete reusable units. Without
+reusable units, it cannot accumulate. The self-referential version of language
+then lets the system build parts about itself: not only tools for external
+tasks, but tools, procedures, tests, and conventions that improve how future
+parts are made, stored, retrieved, and composed.
 
 For AI, the equivalent threshold is not agent self-awareness. It is substrate
 self-reference. The persistent medium must be able to contain statements,
@@ -340,6 +357,13 @@ the transmission gap less binding, which may reduce pressure to externalize.
 The missing layer is selective persistence of process across fresh contexts.
 The system must make external artifacts necessary for continued success, and it
 must make poor artifacts costly.
+
+This also explains the absence of stable invented vocabularies, dialects, or
+jargon in ordinary LLM use. Models can produce local shorthand inside a context,
+but the shorthand is not transmitted through a persistent ecology with uptake
+pressure. External readability constraints often suppress compressed internal
+dialects: the model is rewarded for being legible to humans or benchmarks, not
+for developing a compact process language that later model instances inherit.
 
 This helps explain why reasoning domains with clear verification produce better
 chain-of-thought behavior. Verification supplies a selector. It tells the
@@ -790,8 +814,9 @@ Part XI, Scale, Depth, and Demonstration:
 Part XII, Proto-Language and Suppressed Emergence:
 
 - LLM quirks such as confident nonsense, hallucinated citations, drift,
-  verbosity, weak commitment tracking, and schema fragility are predicted
-  signatures of fluent symbol manipulation without persistent selection.
+  verbosity, weak commitment tracking, absent dialect or jargon formation,
+  schema fragility, and role leakage are predicted signatures of fluent symbol
+  manipulation without persistent selection.
 - The "big four" primitives are reinterpreted as layer-specific machinery:
   in-context learning, chain-of-thought, role, and structure.
 - LLMs have high within-read bandwidth but poor cross-read persistence.
@@ -1378,9 +1403,12 @@ The forcing constraints are more specific:
   at proposal time.
 - No privileged curator channel: winners are chosen by environment-mediated
   outcomes rather than manual approval.
-- Retrieval exploration: READ sometimes samples non-top variants through
-  epsilon, softmax, Thompson sampling, or equivalent mechanisms to avoid early
-  lock-in.
+- Retrieval exploration: READ sometimes samples non-top variants through Top-K
+  plus random tail, epsilon, softmax, Thompson sampling, or equivalent
+  mechanisms to avoid early lock-in.
+- Variant resurfacing: retrieval should sometimes combine top-ranked artifacts
+  with a random tail, so rare but potentially useful process variants do not
+  disappear before they have a chance to prove useful in changed contexts.
 
 ### 18.2 Token-Bound Failure Modes
 
@@ -1397,8 +1425,8 @@ diagnostic targets:
   structure and points toward incentives for reuse.
 - Lack of recovery loop comes from one-shot generation and points toward
   reflection plus verifiers.
-- Global drift comes from absent theme or commitment tracking and points toward
-  planners, checkpoints, or equivalent global-state mechanisms.
+- Global drift comes from an absent theme tracker or commitment tracker and
+  points toward planners, checkpoints, or equivalent global-state mechanisms.
 
 ### 18.3 Human Development and LLM RL Equivalents
 
@@ -1713,6 +1741,15 @@ The competitive-programming or math-testbed framing should therefore be treated
 as a domain-specific accumulation test, not a claim that a full general language
 will emerge automatically.
 
+The anthropological source claim is deliberately cautious: spoken language does
+not give a clean domain-specific-to-general curriculum. The record is murky, and
+competing origin theories do not support a simple gradual broadening story.
+Vervet-style alarm calls show that domain-specific proto-vocabulary can remain
+stuck at a handful of signals for very long periods. The relevant lesson for LLM
+experiments is that stable domain-specific units are a defensible target, but a
+general compositional phase transition should not be assumed from gradual task
+broadening alone.
+
 ### 20.4 Externalization Ladder and Nested Selection
 
 The source's hierarchy:
@@ -1761,6 +1798,14 @@ Each new recursive layer bypasses slower loops rather than fixing them:
 
 This supports the claim that the target is not only better gradient learning,
 but a faster external process-evolution layer.
+
+This is also the source's "fields keep deepening" claim. Human fields deepen
+because abstraction stacks and external tools improve, not because brains keep
+growing. As long as knowledge remains externally representable and substrates,
+verifiers, tools, and retrieval systems improve, there is no obvious local
+ceiling from fixed individual cognition alone. The AI analogue is that
+copyable, editable model episodes could deepen fields by routing around slow
+weight updates through substrate-level process accumulation.
 
 ### 20.6 Visibility Threshold
 
@@ -2066,6 +2111,14 @@ Human cultural evolution includes more than problem solving:
 - coercion
 - dependency
 - canon formation
+
+The source uses cases such as scientists, monks, artists, activists, and
+founders to make the point sharper: humans sometimes sacrifice biological
+reproduction for symbolic, institutional, scientific, religious, political, or
+artistic legacy. That does not mean cultural survival is unrelated to biological
+selection. It means motivational machinery selected under one regime can become
+capable of supporting another. AI rollouts do not inherit this machinery unless
+the system engineers it through prompt, seed, or ecology.
 
 AI rollouts do not naturally care about social survival. Possible drive layers:
 
@@ -2405,9 +2458,10 @@ The source proposes a concrete file layout:
   raw ephemeral work logs, mostly discarded or compressed
 ```
 
-Each generation should choose promising problems, solve or make progress,
-record evidence, write a bounded seed, nominate globally useful artifacts, and
-record what helped or misled it.
+Each generation can be framed operationally as a fresh worker. It should choose
+promising problems, solve or make progress, record evidence, write a bounded
+seed for descendants, nominate globally useful artifacts, and record what helped
+or misled it.
 
 The system should not reward only solved-problem count. It should also reward
 whether artifacts later runs can actually reuse are produced.
