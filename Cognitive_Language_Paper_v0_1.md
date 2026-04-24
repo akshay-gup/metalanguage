@@ -1,49 +1,14 @@
 # Cognitive Language and Artificial Cultural Evolution
 
-Living research document
-
-Version: v0.1 prose draft
-
-Source materials:
-
-- `Cognitive language.docx`
-
-This draft treats the DOCX as source material. Earlier reconciliation notes are
-preserved in Git history; this Markdown file is now the only working document.
-
-Document stance:
-
-This is not yet a concise formal paper. It is a broad research document intended
-to preserve the current theoretical branches, experimental failures, design
-constraints, and open questions while the experiments are still incomplete. The
-current main sections give the cleanest synthesis so far, but material should
-not be deleted merely because it is speculative, redundant, or not yet ready for
-publication. For now, unresolved material should be retained, labeled, and moved
-to later research-document sections or open-issue sections.
-
-Working editing policy:
-
-- Preserve information unless it is known to be wrong.
-- If a claim is uncertain, label its status instead of removing it.
-- Keep negative experimental results because they are part of the theory.
-- Separate "current synthesis" from "expanded threads."
-- Defer aggressive compression until the experimental picture is more complete.
-
-Document organization:
-
-- Sections 1-11 give the current synthesis in readable prose.
-- Sections 12-17 keep definitions, source inventory, experiments, retained
-  threads, and open questions in the main document flow.
-- Sections 18-22 expand the theory and architecture with source details that
-  should remain visible while experiments continue.
+Research draft v0.1
 
 ## Index Page: Thematic Structure
 
 I. Core Thesis
 
-- Abstract-Like Current Summary
+- Abstract
 - 1. Introduction
-- 11. Current Synthesis
+- 11. Synthesis
 
 II. Recursive Systems and Language
 
@@ -102,20 +67,20 @@ V. Artificial Cultural Evolution Architecture
 - 22.16 Cross-Inheritance Filters
 - 22.17 Minimal Practical System Picture
 - 22.18 Differential Persistence and Consequence
-- 22.20 Revised Core Summary from the Source Ecology Section
-- 22.21 Specific Source Details Retained
+- 22.20 Core Summary
+- 22.21 Additional Specific Details
 
 VI. Operational Substrate and Tooling
 
 - 8. Operational Substrate
 - 21.2 Reader Constraint Details
-- 21.4 Earlier Training-Oriented Machine Notes
+- 21.4 Optional Training and Execution Variants
 - 21.5 Part-Level Selection in the Repository
 - 21.6 Storage Fidelity and Operational Constraints
 
 VII. Experiments and Empirical Program
 
-- 6. Why Current Module Systems Plateau
+- 6. Why Module Systems Plateau
 - 9. Experimental Implications
 - 10. Predictions and Failure Modes
 - 15. Experiment Ledger
@@ -134,20 +99,20 @@ VIII. Landscape, Threads, and Reference
 
 - 12. Working Definitions
 - 13. Citation Targets
-- 14. Source Structure Inventory
-- 16. Retained Theoretical Threads
+- 14. Thematic Claim Inventory
+- 16. Open Theoretical Threads
 - 16.7 Sexual and Social Selection Analogy
 - 16.8 Pre-RNA and Autocatalytic Chemistry
 - 16.9 Open-Endedness Versus Domain-Specific Accumulation
 - 17. Open Questions
-- 18. Design Conditions and Source Integration
+- 18. Design Conditions and Forcing Constraints
 - 18.1 Preconditions and Forcing Constraints
 - 21.1 Field Landscape Details
 - 22.3 Evolutionary Baselines and Limits
-- 22.9 Current Multi-Agent and Inference-Time Systems
+- 22.9 Contemporary Multi-Agent and Inference-Time Systems
 - 22.10 Confidence, Reuse, and Grounding
 
-## Abstract-Like Current Summary
+## Abstract
 
 Open-ended recursive self-improvement is often framed as a single agent
 modifying its own mind. That frame misses the structure shared by the only known
@@ -255,12 +220,12 @@ single episode, organism, or mind. Recursion lives in the coupling: better
 readers and writers create better stored structure, and better stored structure
 makes future reading and writing more effective.
 
-The source also makes the origin claim directional. The active process appears
-before the persistent substrate that later carries its accumulation. RNA-like
-activity precedes DNA-like stable storage; brains precede writing. A process
-with a persistence bottleneck creates selection pressure for a substrate that
-resolves it. The substrate is not designed first while waiting for a process to
-arrive. Once both loops exist, causality becomes bidirectional, but the initial
+The origin claim is directional. The active process appears before the
+persistent substrate that later carries its accumulation. RNA-like activity
+precedes DNA-like stable storage; brains precede writing. A process with a
+persistence bottleneck creates selection pressure for a substrate that resolves
+it. The substrate is not designed first while waiting for a process to arrive.
+Once both loops exist, causality becomes bidirectional, but the initial
 pressure runs from fragile process to stabilizing substrate.
 
 In biology, cellular machinery reads and expresses genetic material. Organisms
@@ -482,22 +447,21 @@ selects whole trajectories rather than persistent subparts. Without discrete
 inherited units, recurring patterns remain attractors in the model's behavior,
 not replicators with identity and lineage.
 
-This is also how the source interprets RLVR's effect on CoT: CoT effectiveness
-was latent at scale, and selecting for correct answers reinforced traces that
-helped reach correctness. RLVR can therefore make episodic reasoning more
-reliable without yet creating heritable process parts.
+RLVR's effect on CoT can be interpreted this way: CoT effectiveness was latent
+at scale, and selecting for correct answers reinforced traces that helped reach
+correctness. RLVR can therefore make episodic reasoning more reliable without
+yet creating heritable process parts.
 
 The goal is to move from trajectory-level selection to process-culture
 selection. A successful trajectory should leave behind bounded transmissible
 objects that future trajectories can reconstruct and improve. Those objects
 should persist only if they continue to help.
 
-## 6. Why Current Module Systems Plateau
+## 6. Why Module Systems Plateau
 
-The source experiments point to a consistent diagnosis. Providing modules or a
-canvas is not enough. The artifacts must be necessary, their use must be
-causal, and selection must distinguish helpful inheritance from decorative
-mentioning.
+The experiments point to a consistent diagnosis. Providing modules or a canvas
+is not enough. The artifacts must be necessary, their use must be causal, and
+selection must distinguish helpful inheritance from decorative mentioning.
 
 In the persistent canvas experiments, the model could propose, list, and read
 stored modules, but reading was rare and did not meaningfully improve the reward
@@ -526,16 +490,14 @@ advantage: lower cost, better robustness, better transfer, or better descendant
 continuation. Token penalties alone can produce shorter blobs, but not
 necessarily modular structure.
 
-The context-reset workspace experiment is instructive as a historical probe.
-When file writes triggered context resets, models did externalize state into
-files. They produced scripts, notes, calculations, and partial solutions. This
-shows that a transmission gap can force externalization. But the current
-vertical/cross-inheritance model does not require engineered context resets:
-fresh episodes and bounded inheritance already create the relevant gap. The
-experiment's main lesson is that externalization alone is insufficient. The
-resulting workspace accumulated heterogeneous artifacts without stable naming,
-hierarchy, ranking, or cross-problem reuse. Externalization occurred, but
-selection over reusable parts was too weak.
+The context-reset workspace experiment shows that transmission gaps can force
+externalization. When file writes triggered context resets, models externalized
+state into files: scripts, notes, calculations, and partial solutions. Fresh
+episodes with bounded inheritance create the same functional gap without
+requiring engineered resets. The important lesson is that externalization alone
+is insufficient. The resulting workspace accumulated heterogeneous artifacts
+without stable naming, hierarchy, ranking, or cross-problem reuse.
+Externalization occurred, but selection over reusable parts was too weak.
 
 The combined lesson is:
 
@@ -611,11 +573,9 @@ execution, and scoring, not prematurely dictate syntax.
 
 ## 8. Operational Substrate
 
-The current architecture does not require GRPO training, a formal probabilistic
-machine, or an engineered context-wipe loop. The operational object is simpler:
-a fresh agent episode receives bounded vertical inheritance, retrieves a
-selected slice of public culture, works in a writable workspace, and leaves
-traces that future agents may inherit or reuse.
+The operational object is a fresh agent episode with bounded vertical
+inheritance, selected public-culture retrieval, a writable workspace, and an
+obligation to leave traces that future agents may inherit or reuse.
 
 The repository or file system is still central, but it should be framed as a
 cultural substrate rather than as a training tape. It stores lineage seeds,
@@ -624,13 +584,11 @@ dependency maps, trust markers, and problem records. The useful question is not
 whether every cycle writes to the repository, but whether later fresh agents can
 reconstruct useful process from what prior agents deliberately left behind.
 
-The transmission gap is now created by episode boundaries and bounded
-inheritance. A child or future worker does not receive the parent's hidden
-state. It receives a lineage seed, selected archive artifacts, and whatever
-environmental state the protocol exposes. This is enough to force
-externalization without requiring an artificial context wipe. Anything that must
-survive across agents has to be encoded into the seed, archive, or other
-model-readable artifact.
+The transmission gap is created by episode boundaries and bounded inheritance.
+A child or future worker does not receive the parent's hidden state. It
+receives a lineage seed, selected archive artifacts, and whatever environmental
+state the protocol exposes. Anything that must survive across agents has to be
+encoded into the seed, archive, or other model-readable artifact.
 
 Tools and deterministic execution remain important, but as workspace
 capabilities and evaluation aids. A fresh agent may run tests, inspect files,
@@ -739,7 +697,7 @@ earn prominence through consumer-written evidence, regulatory documents improve
 navigation, and useful process conventions stabilize without being fully
 specified in advance.
 
-## 11. Current Synthesis
+## 11. Synthesis
 
 Open-ended recursive self-improvement should not be reduced to a single model
 editing itself. The systems that have actually accumulated recursive complexity
@@ -823,24 +781,20 @@ working state and continue improvement.
 
 ## 13. Citation Targets
 
-This draft still needs formal citations. Likely citation clusters:
+Citation clusters to develop:
 
 - evolutionary theory and heredity
 - cultural evolution and dual inheritance
 - iterated learning and compositionality
 - external memory, writing, and cumulative culture
 - self-reference, formal systems, Turing machines, and von Neumann self-reproduction
-- RLVR, GRPO, inference-time scaling, and verifier-based reasoning as
-  background for earlier experiments and noncentral implementation paths
+- RLVR, GRPO, inference-time scaling, and verifier-based reasoning as optional
+  training and evaluation variants
 - memory-augmented LLM agents and tool-using agents
 - Darwin Godel Machine and related evolutionary agent systems
 - software repositories, version control, and open-source cultural production
 
-## 14. Source Structure Inventory
-
-This section preserves the larger shape of the source document so branches are
-not lost while drafting. The current paper-like synthesis should be treated as
-one view over this inventory, not a replacement for it.
+## 14. Thematic Claim Inventory
 
 Part I, The Recursion Problem:
 
@@ -1037,24 +991,21 @@ Part XX, Carrying Cost and Reader Constraint:
   feedback loop.
 - Language is a side effect of practical pressure, not the original target.
 
-Part XXI, The Earlier Machine Model:
+Part XXI, Training and Execution Variants:
 
-- This section is now historical relative to the current vertical/cross
-  inheritance model.
-- It framed AI as two loops: inner reader/writer improvement and outer substrate
-  accumulation.
-- It treated bash as a universal interface because it lets the model operate in
-  a format already present in pretraining.
-- It modeled deterministic execution and stochastic model proposal as two
+- AI can be analyzed as two loops: inner reader/writer improvement and outer
+  substrate accumulation.
+- Bash can serve as a universal interface because it lets the model operate in a
+  format already present in pretraining.
+- Deterministic execution and stochastic model proposal can be modeled as two
   transition functions over the same repository-like substrate.
-- It used context wipe as one way to force externalization.
-- The current architecture does not require GRPO, training, or engineered
-  context wipes; fresh episodes plus bounded inheritance provide the needed
-  transmission gap.
+- Context wipe is one possible way to force externalization, though fresh
+  episodes plus bounded inheritance provide the needed transmission gap without
+  requiring engineered resets.
 - Files still provide part-level structure, and regulatory documents still
   direct reading.
 
-Original source section, Open-Ended RSI as Hereditary Cultural Ecology:
+Open-Ended RSI as Hereditary Cultural Ecology:
 
 - Open-ended RSI is better modeled as ecological heredity over persistent
   external state than as a lone self-modifying reasoner.
@@ -1070,9 +1021,8 @@ Original source section, Open-Ended RSI as Hereditary Cultural Ecology:
 
 ## 15. Experiment Ledger
 
-These results are retained because the negative outcomes constrain the theory.
-They should not be compressed away until follow-up experiments clarify which
-failure modes are structural and which are implementation-specific.
+The negative results constrain the theory. Follow-up experiments should clarify
+which failure modes are structural and which are implementation-specific.
 
 ### 15.1 Persistent Canvas Substrate
 
@@ -1382,22 +1332,21 @@ Observed patterns:
 
 Interpretation:
 
-In that historical setup, context wipe successfully forced externalization. It
-did not, by itself, create reusable process culture. The missing pieces appear
-to be naming, selection, ranking, bounded inheritance, archive filtering, and
-cross-problem necessity.
+Context wipe successfully forced externalization in this setup. It did not, by
+itself, create reusable process culture. The missing pieces appear to be naming,
+selection, ranking, bounded inheritance, archive filtering, and cross-problem
+necessity.
 
-## 16. Retained Theoretical Threads
+## 16. Open Theoretical Threads
 
-These threads are not all ready for a concise formal paper, but they should be
-kept visible for now.
+These threads remain active parts of the research argument.
 
 ### 16.1 Boundary Principle
 
 Cumulative complexity requires stabilized boundaries. A boundary makes a
 substructure identifiable, reusable, preservable, and composable. LLM outputs
 currently have many attractors, such as templates and proof moves, but fewer
-identity-bearing modules with lineage. The source's current-chunk examples are
+identity-bearing modules with lineage. Current chunk examples include
 rhetorical scaffolds, format templates, proof moves, tool-call rituals, and
 safety boilerplate: recurrent motifs that can be useful, but are not yet stable
 replicators.
@@ -1454,8 +1403,7 @@ archive uptake, but it is not essential to the core architecture.
 
 Pre-RNA chemistry may already show variation, selection, and proto-retention in
 reaction networks, surfaces, cycles, and compartments. This supports the idea
-that patterns can exist before clean vocabulary. It is useful background but may
-belong in a later retained-branch section.
+that patterns can exist before clean vocabulary.
 
 ### 16.9 Open-Endedness Versus Domain-Specific Accumulation
 
@@ -1507,17 +1455,11 @@ recombination.
 
 15. What counts as falsification for the near-term version of the theory?
 
-## 18. Design Conditions and Source Integration
-
-This section is a preservation and integration layer added after auditing the
-DOCX against this working document. The first eleven sections keep the argument
-readable; the sections below keep source ideas visible when they need more
-development before being folded into the main synthesis.
+## 18. Design Conditions and Forcing Constraints
 
 ### 18.1 Preconditions and Forcing Constraints
 
-The source lists a concrete recipe for emergent cognitive language. These are
-not all equally proven, but they should remain available as design levers:
+Emergent cognitive language requires a concrete set of design pressures:
 
 - Verifiable intermediate states such as tests, proofs, and checkable partial
   products.
@@ -1553,8 +1495,7 @@ The forcing constraints are more specific:
 
 ### 18.2 Token-Bound Failure Modes
 
-The DOCX includes a failure table for current LLM systems. Preserve these as
-diagnostic targets:
+Current LLM systems show recurring diagnostic failures:
 
 - Sequential bias comes from next-token objectives and points toward missing
   tree or graph primitives.
@@ -1571,8 +1512,7 @@ diagnostic targets:
 
 ### 18.3 Human Development and LLM RL Equivalents
 
-The source connects language emergence to childhood and skill formation. Human
-cognition becomes system-like through a rough ladder:
+Human cognition becomes system-like through a rough ladder:
 
 chunks -> scripts -> composition -> named routines -> interfaces and parameters
 -> abstraction and proof -> systems -> protocols.
@@ -1590,14 +1530,14 @@ library creation, and protocol stabilization.
 
 ### 18.4 Layered Emergence and Comparative Status
 
-The source positions current LLMs between proto-syntax and early discourse:
+Current LLMs sit between proto-syntax and early discourse:
 
 - Tokens are stable.
 - Schemas exist but are brittle.
 - Roles exist but are prompted and unstable.
 - Persistent named modules do not yet exist endogenously.
 
-The DNA / human language / LLM comparison should be retained:
+DNA, human language, and LLMs can be compared across functional roles:
 
 - Alphabet: bases, letters or phonemes, tokens.
 - Grammar: codons and splicing; word order and grammar; prompt patterns.
@@ -1619,19 +1559,19 @@ functional roles.
 
 ### 18.5 The Big Four as Layer-Specific Machinery
 
-The source warns against treating role, CoT, ICL, and structure as failed copies
-of human mechanisms. They are native solutions to the LLM constraint profile:
+Role, CoT, ICL, and structure should not be treated as failed copies of human
+mechanisms. They are native solutions to the LLM constraint profile:
 massive within-read bandwidth, bounded context, and almost no cross-read
 persistence.
 
 ICL and canvas should therefore be treated as complements rather than
 substitutes. Pushing ICL alone produces a stronger within-episode reasoner, a
-better "animal brain" in the source's shorthand, but it does not produce
+  better "animal brain," but it does not produce
 cumulative module evolution or stable internal dialects. RLVR supplies a
 selector; canvas supplies a population of persistent contexts and artifacts only
 if it is coupled to promotion, decay, and downstream consequence.
 
-Preserved mapping:
+Functional mapping:
 
 - ICL is high-bandwidth within-read adaptation. It reconstructs local working
   state quickly. Brains internalize because rereading is slow; LLMs can often
@@ -1643,7 +1583,7 @@ Preserved mapping:
 - Structure is interoperability formatting. It governs tool and system
   interfaces more than internal social order.
 
-The source's layer comparison:
+Layer comparison:
 
 - Ribosome: local mechanical integration, one codon at a time, no cross-read
   persistence.
@@ -1658,7 +1598,7 @@ optimized for fast reconstruction by bounded parallel readers.
 
 ### 18.6 Fidelity Scope and Human CoT Before Writing
 
-The source distinguishes fidelity scope by layer:
+Fidelity scope differs by layer:
 
 - Ribosomes check locally, one codon and amino acid at a time.
 - Brains check compositional coherence among chunks, using working memory as a
@@ -1683,7 +1623,7 @@ A cumulative system needs substructures that are identifiable, reusable,
 preservable, and composable. Without boundaries, systems can show attractors but
 not lineage-bearing parts.
 
-The source distinguishes three regimes:
+Three selection regimes matter:
 
 - Viability selection asks whether a structure can exist or replicate at all.
   It favors speed and brute persistence and tends to produce short motifs.
@@ -1698,8 +1638,7 @@ preservation, modularity, and reuse is selected.
 
 ### 19.2 Pre-RNA Hand-Off and Boundary Hardening
 
-The source does not claim certainty about early DNA mechanics. The robust
-pattern is:
+The exact mechanics of early DNA remain uncertain, but the robust pattern is:
 
 - Boundaries first exist as weak cues or physical regularities.
 - Once useful structure exists, secondary selection for retention under noise
@@ -1716,7 +1655,7 @@ becomes an absorbing advantage.
 
 ### 19.3 Secondary Gradients and Crisis Pattern
 
-The source's crisis pattern:
+General crisis pattern:
 
 primary selection saturates -> many variants pass -> a constraint creates
 differential fitness among passers -> a new gradient emerges -> structures that
@@ -1745,8 +1684,7 @@ Human language bottlenecks:
 
 ### 19.4 MNFL Constraint-to-Structure Mapping
 
-The source's stronger convergence claim maps each constraint to a boundary
-property:
+The stronger convergence claim maps each constraint to a boundary property:
 
 - Noisy transmission forces discreteness and identifiable units.
 - Finite resources plus expressiveness force compositionality and composable
@@ -1755,14 +1693,14 @@ property:
 - Bounded memory forces hierarchy and preservability during processing.
 - Coordination forces convention and preservability across agents.
 
-The theorem should remain conditional: under open-ended expressiveness, finite
+The theorem is conditional: under open-ended expressiveness, finite
 resources, noise or lossy reconstruction, bounded learners, and selection for
 reuse, alternatives fail at scale. Holistic systems fail finite resources and
 learnability. Continuous systems drift under noise. Flat systems fail bounded
 memory. Idiosyncratic systems fail learnability. Pure iconic systems fail
 abstraction.
 
-The source also keeps a structural-correspondence claim: language-like
+There is also a structural-correspondence claim: language-like
 representations work because their parts can mirror stable structure in what
 they represent. Discrete reidentifiable objects become noun-like units;
 reusable properties become adjective-like units; combinable relations become
@@ -1774,8 +1712,7 @@ hierarchy to scale representation.
 
 ### 19.5 Negative Cases and Edge Cases
 
-The source includes cases that solved narrow walls without open-ended
-compositional explosion:
+Some systems solve narrow walls without open-ended compositional explosion:
 
 - Analog computing solves some computation with continuous physics, but does not
   produce cumulative compositional culture.
@@ -1809,9 +1746,9 @@ weak.
 
 ### 19.6 Substrate Stabilization and Universality
 
-The source argues that substrate-replicator systems often pass through an early
-coevolutionary phase, after which the substrate stabilizes and most explosion
-happens in replicator space on top of a fixed base.
+Substrate-replicator systems often pass through an early coevolutionary phase.
+After that, the substrate stabilizes and most explosion happens in replicator
+space on top of a fixed base.
 
 Examples:
 
@@ -1853,10 +1790,9 @@ already do.
 
 ### 20.1 Vehicle, Use, and Two-Fold Selection
 
-The source distinguishes pre-cellular chemistry from post-cellular life through
-the emergence of a vehicle. Pre-cellular chemistry has replication-rate
-selection but no clean vehicle-level utility pressure. Post-cellular life has
-two-fold selection:
+Pre-cellular chemistry and post-cellular life differ through the emergence of a
+vehicle. Pre-cellular chemistry has replication-rate selection but no clean
+vehicle-level utility pressure. Post-cellular life has two-fold selection:
 
 - A gene must help the organism.
 - The organism must reproduce.
@@ -1871,17 +1807,17 @@ learn unit spreads poorly. A catchy but useless unit may spread briefly and then
 die. This maps to AI process artifacts: they must improve local work and remain
 reconstructible by future agents.
 
-The source's strongest formulation is that in human language, use and
-replication are coupled. A speaker uses a word to accomplish a goal now; a
-listener hears it and may adopt it later. The act that benefits the current
-speaker is also the act that transmits the word. AI process artifacts will be
-more selectable when current use and future transmission are similarly coupled,
-rather than separated into "solve now" and "write documentation later" phases.
+In human language, use and replication are coupled. A speaker uses a word to
+accomplish a goal now; a listener hears it and may adopt it later. The act that
+benefits the current speaker is also the act that transmits the word. AI
+process artifacts will be more selectable when current use and future
+transmission are similarly coupled, rather than separated into "solve now" and
+"write documentation later" phases.
 
 ### 20.2 Co-Evolution Rather Than Encoding Pre-Existing Complexity
 
-The source rejects the idea that complex structure exists first and then gets
-encoded wholesale. Historical pattern:
+Complex structure does not appear first and then get encoded wholesale.
+Historical pattern:
 
 - RNA begins with short replicating sequences, and complexity grows with
   replication fidelity.
@@ -1896,18 +1832,17 @@ reuse.
 
 ### 20.3 Bottleneck Design and Generalization Limits
 
-The source cautions that spontaneous phase transition to general compositional
-language is rare. Domain-specific units may stabilize first and remain locked
-for long periods. A realistic near-term target is not broad open-ended language,
-but domain-specific skills that demonstrably accumulate and improve solve rates
-inside a bucket.
+Spontaneous phase transition to general compositional language is rare.
+Domain-specific units may stabilize first and remain locked for long periods. A
+realistic near-term target is not broad open-ended language, but domain-specific
+skills that demonstrably accumulate and improve solve rates inside a bucket.
 
 The competitive-programming or math-testbed framing should therefore be treated
 as a domain-specific accumulation test, not a claim that a full general language
 will emerge automatically.
 
-The anthropological source claim is deliberately cautious: spoken language does
-not give a clean domain-specific-to-general curriculum. The record is murky, and
+The anthropological claim is deliberately cautious: spoken language does not
+give a clean domain-specific-to-general curriculum. The record is murky, and
 competing origin theories do not support a simple gradual broadening story.
 Vervet-style alarm calls show that domain-specific proto-vocabulary can remain
 stuck at a handful of signals for very long periods. The relevant lesson for LLM
@@ -1917,7 +1852,7 @@ broadening alone.
 
 ### 20.4 Externalization Ladder and Nested Selection
 
-The source's hierarchy:
+Externalization hierarchy:
 
 - DNA selects primarily through whole organisms while building molecular parts.
 - Human language selects symbolic parts and builds ideas and structures.
@@ -1940,11 +1875,11 @@ own reasoning. "This tactic worked" and "this module contributed" are
 statements about the system from inside the system. This is the same functional
 operation as language in the broad sense.
 
-The source adds a stronger cross-layer claim: each layer can only assign credit
-one level down. A layer's own machinery cannot fully evaluate its own deepest
-parts until a higher representational layer makes those parts visible,
-copyable, and selectable. No layer bootstraps its own part-level selection from
-inside itself; evaluation capacity arrives from the layer above.
+Each layer can only assign credit one level down. A layer's own machinery cannot
+fully evaluate its own deepest parts until a higher representational layer makes
+those parts visible, copyable, and selectable. No layer bootstraps its own
+part-level selection from inside itself; evaluation capacity arrives from the
+layer above.
 
 Each layer externalizes what the previous layer could not evaluate well:
 
@@ -1953,7 +1888,7 @@ Each layer externalizes what the previous layer could not evaluate well:
 - Human/LLM reasoning -> workspace or repository externalizes inference and
   process traces.
 
-The source separates partial from full externalization. Earlier layers already
+Partial externalization precedes full externalization. Earlier layers already
 perform some version of what later layers make copyable: DNA has recombination
 and regulatory interaction among genes before symbolic systems; human cognition
 has internal reasoning before persistent reasoning artifacts; LLMs have CoT
@@ -1969,7 +1904,7 @@ copies compete under transmission constraints.
 
 ### 20.5 Blind Search, Structured Search, and Routing Around Slow Loops
 
-The source distinguishes variation mechanisms:
+Variation mechanisms differ by layer:
 
 - DNA variation is relatively blind: mutation, duplication, recombination.
 - Brains introduce guided sequential search, but reasoning is ephemeral.
@@ -1985,13 +1920,12 @@ Each new recursive layer bypasses slower loops rather than fixing them:
 This supports the claim that the target is not only better gradient learning,
 but a faster external process-evolution layer.
 
-This is also the source's "fields keep deepening" claim. Human fields deepen
-because abstraction stacks and external tools improve, not because brains keep
-growing. As long as knowledge remains externally representable and substrates,
-verifiers, tools, and retrieval systems improve, there is no obvious local
-ceiling from fixed individual cognition alone. The AI analogue is that
-copyable, editable model episodes could deepen fields by routing around slow
-weight updates through substrate-level process accumulation.
+Human fields deepen because abstraction stacks and external tools improve, not
+because brains keep growing. As long as knowledge remains externally
+representable and substrates, verifiers, tools, and retrieval systems improve,
+there is no obvious local ceiling from fixed individual cognition alone. The AI
+analogue is that copyable, editable model episodes could deepen fields by
+routing around slow weight updates through substrate-level process accumulation.
 
 ### 20.6 Visibility Threshold
 
@@ -2013,7 +1947,7 @@ externalizing them into persistent, reconstructible artifacts.
 
 ### 21.1 Field Landscape Details
 
-The source surveys current systems as partial pieces:
+Current systems provide partial pieces:
 
 - Codex / Claude Code converge on files, tools, bash, Git, and persistent
   skills. Skills resemble named process artifacts but are currently
@@ -2051,11 +1985,11 @@ still useful when the model decides when and how to use them.
 
 ### 21.3 Language as Side Effect
 
-The source emphasizes that language did not evolve for recursion directly.
-Genetic coding evolved for immediate replication and protein construction.
-Human language evolved for coordination, teaching, social interaction, mating,
-and planning. Writing existed for thousands of years mostly as accounting before
-philosophy, formal logic, and mathematics.
+Language did not evolve for recursion directly. Genetic coding evolved for
+immediate replication and protein construction. Human language evolved for
+coordination, teaching, social interaction, mating, and planning. Writing
+existed for thousands of years mostly as accounting before philosophy, formal
+logic, and mathematics.
 
 General pattern:
 
@@ -2068,14 +2002,13 @@ Do not engineer recursion directly as the first objective. Engineer practical
 communicative pressure between instances. If recursion emerges, the hypothesis
 is supported. If it does not, the result is informative.
 
-### 21.4 Earlier Training-Oriented Machine Notes
+### 21.4 Optional Training and Execution Variants
 
-The machine section in the DOCX includes formal details that should stay
-available, but they are no longer the central architecture. They describe an
-earlier training-oriented implementation path. The current model does not
-require GRPO, policy training, or context wipe. It only requires fresh episodes,
+The core architecture is inference-time cultural inheritance: fresh episodes,
 bounded vertical inheritance, selective archive retrieval, and downstream
-selection over what future agents can reconstruct and use.
+selection over what future agents can reconstruct and use. Training-oriented
+variants can be layered on top, but they are not the mechanism that makes the
+substrate hereditary.
 
 The AI inner loop has two timescales. Within-session plasticity is ICL: useful
 adaptation that dies with the episode. Across-session plasticity is RL or weight
@@ -2093,7 +2026,7 @@ all programs invoked through the same shell. This matters because terminal
 sessions are already strongly represented in model pretraining, so the interface
 is partly already in the weights.
 
-- The tape is the repo in the earlier formalization.
+- The repository is the persistent substrate.
 - The head is bash or an equivalent universal read/write/execute interface.
 - The deterministic transition function executes tests, scripts, compilers,
   verifiers, and code.
@@ -2101,39 +2034,38 @@ is partly already in the weights.
 - Selection scores stochastic outputs through deterministic execution and keeps
   winners.
 
-The biological mapping in the source is precise: chemistry is the deterministic
-transition, because given local inputs it executes molecular consequences;
-replication with variation is the stochastic transition; both operate on and
-are configured by the same molecular substrate. The AI machine mirrors this by
-letting deterministic execution and stochastic model proposal operate on the
-same repository-like substrate.
+The biological mapping is precise: chemistry is the deterministic transition,
+because given local inputs it executes molecular consequences; replication with
+variation is the stochastic transition; both operate on and are configured by
+the same molecular substrate. The AI machine mirrors this by letting
+deterministic execution and stochastic model proposal operate on the same
+repository-like substrate.
 
-Earlier GRPO mapping, not required by the current inheritance model:
+Optional GRPO mapping:
 
-- Sample K model rollouts from the same tape snapshot.
-- Evaluate each final tape with deterministic scoring.
+- Sample K model rollouts from the same repository snapshot.
+- Evaluate each final repository state with deterministic scoring.
 - Compute grouped advantage, for example `(r_k - mean(r_1:K)) / std(r_1:K)`.
 - Every cycle in a successful rollout can receive the rollout-level advantage.
 
-Earlier context-wipe decomposition, not required by the current inheritance
-model:
+Optional context-wipe decomposition:
 
-- A rollout is a sequence of independent cycle samples conditioned only on tape
-  state.
+- A rollout is a sequence of independent cycle samples conditioned only on
+  repository state.
 - Log probability decomposes as the sum of per-cycle log probabilities:
-  `log pi(rollout) = sum_i log pi(patch_i | tape_i)`.
-- Tape_i is determined by the initial snapshot plus all previous patches.
+  `log pi(rollout) = sum_i log pi(patch_i | repo_i)`.
+- `repo_i` is determined by the initial snapshot plus all previous patches.
 
 Length-generalization claim:
 
 - Standard long reasoning with N chunks of context c costs roughly `O((N c)^2)`
   attention.
 - Wiped cycles cost roughly `N * O(c^2)`.
-- Complexity lives in accumulated tape state, not in one long sequence.
+- Complexity lives in accumulated repository state, not in one long sequence.
 
-This was not only a memory-forcing mechanism; it was also a computational
-scaling argument for long reasoning through persistent state. In the current
-architecture, the analogous forcing mechanism is simpler: future agents begin as
+This is not only a memory-forcing mechanism; it is also a computational scaling
+argument for long reasoning through persistent state. The inheritance
+architecture can use a simpler version of the same idea: future agents begin as
 fresh episodes and receive only bounded seed and archive context.
 
 ### 21.5 Part-Level Selection in the Repository
@@ -2158,10 +2090,10 @@ not perfect garbage collection.
 
 ### 21.6 Storage Fidelity and Operational Constraints
 
-The source notes that the repository has near-perfect storage fidelity: files do
-not degrade by themselves. Variation instead comes from fresh agent attempts,
-artifact revision, seed mutation, archive recombination, and stochastic model
-sampling. The relevant constraints in the current model are:
+The repository has near-perfect storage fidelity: files do not degrade by
+themselves. Variation instead comes from fresh agent attempts, artifact
+revision, seed mutation, archive recombination, and stochastic model sampling.
+The relevant constraints are:
 
 - bounded seed size
 - bounded archive retrieval
@@ -2185,7 +2117,7 @@ coordination may be needed.
 
 ### 22.1 Hereditary Ecology Core Mapping
 
-The source ecology section's core mapping should remain explicit:
+Core mapping:
 
 Biology:
 
@@ -2216,7 +2148,7 @@ playbook, or local operating doctrine.
 
 ### 22.2 Fixed Constructor and Mutable Culture
 
-The source separates relatively fixed objects from mutable inheritance.
+The architecture separates relatively fixed objects from mutable inheritance.
 
 Fixed or slow constructor:
 
@@ -2295,7 +2227,7 @@ risks benchmark plateau. The channels must interact but remain distinguishable.
 
 ### 22.5 Architecture Evolution
 
-The source describes an architectural progression:
+Architectural progression:
 
 - Initial loop: one parent snapshot spawns N child rollouts in temporary
   workspaces; each child solves a task and leaves a next packet; the best
@@ -2330,13 +2262,13 @@ Human cultural evolution includes more than problem solving:
 - dependency
 - canon formation
 
-The source uses cases such as scientists, monks, artists, activists, and
-founders to make the point sharper: humans sometimes sacrifice biological
-reproduction for symbolic, institutional, scientific, religious, political, or
-artistic legacy. That does not mean cultural survival is unrelated to biological
-selection. It means motivational machinery selected under one regime can become
-capable of supporting another. AI rollouts do not inherit this machinery unless
-the system engineers it through prompt, seed, or ecology.
+Scientists, monks, artists, activists, and founders make the point sharper:
+humans sometimes sacrifice biological reproduction for symbolic, institutional,
+scientific, religious, political, or artistic legacy. That does not mean
+cultural survival is unrelated to biological selection. It means motivational
+machinery selected under one regime can become capable of supporting another.
+AI rollouts do not inherit this machinery unless the system engineers it through
+prompt, seed, or ecology.
 
 AI rollouts do not naturally care about social survival. Possible drive layers:
 
@@ -2385,7 +2317,7 @@ chunks, selection units, retrieval handles, and recombination points. But
 hardcoding a skill syntax too early risks freezing the representational layer
 that should evolve.
 
-Best current synthesis:
+Design synthesis:
 
 - Do not dictate syntax.
 - Do dictate inheritance, execution, and scoring.
@@ -2402,10 +2334,10 @@ Agents should be free to invent files, notes, scripts, DSLs, manifests, skills,
 dependency graphs, branch rituals, evaluator packages, retrieval guides, and
 hybrid formats.
 
-### 22.9 Current Multi-Agent and Inference-Time Systems
+### 22.9 Contemporary Multi-Agent and Inference-Time Systems
 
-The source treats several contemporary systems as evidence for strong
-interpreter capability rather than complete transmission ecology:
+Several contemporary systems show strong interpreter capability rather than
+complete transmission ecology:
 
 - Grok-style multi-agent systems show that parallel specialized agents, debate,
   critique, and synthesis can improve performance. But protocols and lessons
@@ -2506,7 +2438,7 @@ Git is storage before it is ecology. It becomes ecology when:
 7. Stale artifacts decay in visibility.
 8. Downstream usefulness matters.
 
-Minimum cultural trace files proposed in the source:
+Minimum cultural trace files:
 
 - `USED.md`: what artifacts were used, why they were chosen, whether they
   helped, what was modified, and what future agents should read or avoid.
@@ -2590,7 +2522,7 @@ curricula, and professional norms.
 
 ### 22.17 Minimal Practical System Picture
 
-The source's minimal system:
+Minimal system:
 
 1. A persistent world exists.
 2. Each episode starts fresh.
@@ -2646,7 +2578,7 @@ Desired loop:
 
 ### 22.19 Practical Problem-Pool Experiment Details
 
-The source proposes a concrete file layout:
+Concrete file layout:
 
 ```text
 /problems/
@@ -2684,9 +2616,7 @@ or misled it.
 The system should not reward only solved-problem count. It should also reward
 whether artifacts later runs can actually reuse are produced.
 
-### 22.20 Revised Core Summary from the Source Ecology Section
-
-Preserved final thesis:
+### 22.20 Core Summary
 
 - Base LLM: stable cognitive architecture.
 - Constitution: regenerated drives and social motives.
@@ -2705,30 +2635,27 @@ The agent-centered view asks which lineages continue. The artifact-centered view
 asks which artifacts keep getting reconstructed. Both are required because
 agents and artifacts reproduce each other.
 
-### 22.21 Specific Source Details Retained
-
-This section catches smaller claims and examples from the DOCX that are easy to
-lose during synthesis.
+### 22.21 Additional Specific Details
 
 Formal self-reference threshold:
 
-- The source links recursive self-improvement to the threshold identified by
-  Godel, Turing, and von Neumann: once a formal system can encode statements
-  about itself, it admits self-replication, open-ended complexity, and
+- Recursive self-improvement connects to the threshold identified by Godel,
+  Turing, and von Neumann: once a formal system can encode statements about
+  itself, it admits self-replication, open-ended complexity, and
   undecidability.
-- The AI claim should remain functional rather than mystical: the relevant
+- The AI claim is functional rather than mystical: the relevant
   property is representational closure over the substrate, not subjective
   self-awareness.
 
 Fitness shock and biological parallels:
 
-- The source contrasts RNA brute force with brains' dopamine plus replay as
-  retro-credit inside a lifetime.
+- RNA brute force contrasts with brains' dopamine plus replay as retro-credit
+  inside a lifetime.
 - The LLM version likely needs something more efficient than either: algorithmic
   redistribution of credit over artifacts, actions, and inherited process.
-- "Qm bandit calling" appears as a retained mechanism idea for selecting or
-  routing module calls. It is not yet developed enough for the main argument,
-  but should remain in the design-search space.
+- "Qm bandit calling" is a mechanism idea for selecting or routing module
+  calls. It is not yet developed enough for the main argument, but remains in
+  the design-search space.
 
 Weight consolidation analogy:
 
@@ -2740,11 +2667,11 @@ Weight consolidation analogy:
 
 Timeline examples:
 
-- In the source's biological sketch, substrate machinery stabilizes long before
-  later biological explosions; the Cambrian explosion is used as an example of
-  later expansion on top of much older machinery.
-- In the cultural sketch, modern brain size predates the behavioral explosion,
-  and writing appears much later.
+- In the biological timeline, substrate machinery stabilizes long before later
+  biological explosions; the Cambrian explosion is an example of later
+  expansion on top of much older machinery.
+- In the cultural timeline, modern brain size predates the behavioral
+  explosion, and writing appears much later.
 - Writing is described as domain-locked to accounting for a long period before a
   phase transition. Encoding personal names for funerary rites is cited as a
   pressure that helped push writing beyond accounting.
@@ -2759,49 +2686,45 @@ Repetition and display:
 
 DGM cost and level:
 
-- The source flags DGM-style search as expensive and organism-level. A specific
-  remembered cost signature is about `$22k` per run.
+- DGM-style search is expensive and organism-level. A specific remembered cost
+  signature is about `$22k` per run.
 - The point is not the exact cost estimate, but the scaling concern: selecting
   whole agent codebases is expensive and gives weak part-level credit.
 
-Earlier cycle boundary details:
+Optional cycle boundary details:
 
-- In the earlier machine model, the cycle boundary is tied to writing. Write
-  functions like a stop codon: after the model writes a patch or artifact,
-  context wipes and the next cycle reads the updated tape.
+- The cycle boundary can be tied to writing. Write functions like a stop codon:
+  after the model writes a patch or artifact, context wipes and the next cycle
+  reads the updated repository state.
 - The model can choose actual cycle length within an infrastructure-imposed
   maximum by deciding when to write.
 - The target maximum cycle length is an open parameter: too short prevents
   coherent work; too long lets the model solve without externalizing state.
-- Current status: this is an optional training-oriented implementation detail,
-  not a requirement of the vertical/cross-inheritance model.
 
-Earlier parallel training details:
+These cycle boundaries are an optional training-oriented implementation detail.
 
-- Generation remains sequential because each tape state depends on prior
+Optional parallel training details:
+
+- Generation remains sequential because each repository state depends on prior
   patches.
 - Training can still be parallelized because, after context wipe, every cycle is
-  conditionally independent given its tape state.
+  conditionally independent given its repository state.
 - Variable-length rollouts produce different numbers of training samples. A
   successful longer rollout trains more cycle decisions, which may be correct if
   many decisions contributed to success.
-- Current status: relevant only to the earlier training-oriented path, not to
-  the current no-training inheritance architecture.
 
-Earlier universal probabilistic Turing machine framing:
+Optional universal probabilistic Turing machine framing:
 
 - The machine is framed as a universal probabilistic Turing machine with stored
   programs: deterministic execution and stochastic model proposal both operate
-  over the same self-referential tape.
+  over the same self-referential repository.
 - The point is mathematical consistency. Recursive improvement requires both
   transition functions over a substrate that can store the programs,
   instructions, tests, and regulatory documents that affect future transitions.
-- Current status: useful as formal background, but less central than the
-  cultural-substrate account of seeds, archive uptake, and inherited process.
 
 Archive death by invisibility:
 
-- The source compares unused repository artifacts to pseudogenes or obsolete
+- Unused repository artifacts resemble pseudogenes or obsolete
   dictionary words: they may remain physically stored but no longer get
   transcribed/read.
 - The failure mode is not storage bloat alone; it is loss of visibility and
