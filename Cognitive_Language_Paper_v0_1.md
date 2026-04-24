@@ -37,6 +37,115 @@ Document organization:
 - Sections 18-22 expand the theory and architecture with source details that
   should remain visible while experiments continue.
 
+## Index Page: Thematic Structure
+
+I. Core Thesis
+
+- Abstract-Like Current Summary
+- 1. Introduction
+- 11. Current Synthesis
+
+II. Recursive Systems and Language
+
+- 2. The Two-Loop Structure of Cumulative Systems
+- 3. Self-Referential Representation and the Meaning of Language
+- 4. Why Language-Like Structure Converges
+- 16.1 Boundary Principle
+- 16.2 Secondary Gradients
+- 16.3 Transmission-Gap Principle
+- 16.5 Process Precedes Substrate
+- 19.1 Boundary and Selection Regimes
+- 19.2 Pre-RNA Hand-Off and Boundary Hardening
+- 19.3 Secondary Gradients and Crisis Pattern
+- 19.4 MNFL Constraint-to-Structure Mapping
+- 19.5 Negative Cases and Edge Cases
+- 19.6 Substrate Stabilization and Universality
+- 19.7 Cross-Layer Interface Versus Native Format
+
+III. LLM Constraint Profile
+
+- 5. LLMs as Strong Interpreters Without Transmission Ecology
+- 16.4 Reader Constraint
+- 16.6 Cross-Layer Native Formats
+- 18.2 Token-Bound Failure Modes
+- 18.3 Human Development and LLM RL Equivalents
+- 18.4 Layered Emergence and Comparative Status
+- 18.5 The Big Four as Layer-Specific Machinery
+- 18.6 Fidelity Scope and Human CoT Before Writing
+- 21.2 Reader Constraint Details
+- 21.3 Language as Side Effect
+
+IV. Selection Units and Externalization
+
+- 20.1 Vehicle, Use, and Two-Fold Selection
+- 20.2 Co-Evolution Rather Than Encoding Pre-Existing Complexity
+- 20.3 Bottleneck Design and Generalization Limits
+- 20.4 Externalization Ladder and Nested Selection
+- 20.5 Blind Search, Structured Search, and Routing Around Slow Loops
+- 20.6 Visibility Threshold
+
+V. Artificial Cultural Evolution Architecture
+
+- 7. Artificial Cultural Evolution Architecture
+- 22.1 Hereditary Ecology Core Mapping
+- 22.2 Fixed Constructor and Mutable Culture
+- 22.4 Transmission, Storage, Carryover, Seed, and Archive
+- 22.5 Architecture Evolution
+- 22.6 Ecology, Competition, and Engineered Drives
+- 22.7 Process Manifold and Policy-Level Heredity
+- 22.8 Representation Freedom and Protocol
+- 22.11 Dual Inheritance Metrics
+- 22.12 Measuring Fitness
+- 22.13 Git Ecology Mechanics
+- 22.14 Two Views of Cultural Evolution
+- 22.15 What Is Under Differential Pressure
+- 22.16 Cross-Inheritance Filters
+- 22.17 Minimal Practical System Picture
+- 22.18 Differential Persistence and Consequence
+- 22.20 Revised Core Summary from the Source Ecology Section
+- 22.21 Specific Source Details Retained
+
+VI. Machine Model
+
+- 8. The Machine Instantiation
+- 21.4 Machine Formal Details
+- 21.5 Part-Level Selection on the Tape
+- 21.6 Noise and Fidelity on the Tape
+
+VII. Experiments and Empirical Program
+
+- 6. Why Current Module Systems Plateau
+- 9. Experimental Implications
+- 10. Predictions and Failure Modes
+- 15. Experiment Ledger
+- 15.1 Persistent Canvas Substrate
+- 15.2 Dynamic Module Injection Dataset
+- 15.3 Module Extraction from Successful Traces, Random Injection
+- 15.4 Module Extraction plus Ranked Injection
+- 15.5 Usage-Based Module Scoring
+- 15.6 Module Analytics and Summarization
+- 15.7 Selection-Shaped Compositional Vocabulary
+- 15.8 Usage-Weighted Filtered Injection
+- 15.9 Workspace Write-Triggered Context Reset
+- 22.19 Practical Problem-Pool Experiment Details
+
+VIII. Landscape, Branches, and Reference
+
+- 12. Working Definitions
+- 13. Citation Targets
+- 14. Source Structure Inventory
+- 16. Retained Theoretical Branches
+- 16.7 Sexual and Social Selection Analogy
+- 16.8 Pre-RNA and Autocatalytic Chemistry
+- 16.9 Open-Endedness Versus Domain-Specific Accumulation
+- 17. Open Questions
+- 18. Design Conditions and Source Integration
+- 18.1 Preconditions and Forcing Constraints
+- 21.1 Field Landscape Details
+- 22.3 Evolutionary Baselines and Limits
+- 22.9 Current Multi-Agent and Inference-Time Systems
+- 22.10 Confidence, Reuse, and Grounding
+
 ## Abstract-Like Current Summary
 
 Open-ended recursive self-improvement is often framed as a single agent
