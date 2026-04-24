@@ -26,14 +26,14 @@ Working editing policy:
 - Preserve information unless it is known to be wrong.
 - If a claim is uncertain, label its status instead of removing it.
 - Keep negative experimental results because they are part of the theory.
-- Separate "current synthesis" from "expanded branches."
+- Separate "current synthesis" from "expanded threads."
 - Defer aggressive compression until the experimental picture is more complete.
 
 Document organization:
 
 - Sections 1-11 give the current synthesis in readable prose.
 - Sections 12-17 keep definitions, source inventory, experiments, retained
-  branches, and open questions in the main document flow.
+  threads, and open questions in the main document flow.
 - Sections 18-22 expand the theory and architecture with source details that
   should remain visible while experiments continue.
 
@@ -105,12 +105,13 @@ V. Artificial Cultural Evolution Architecture
 - 22.20 Revised Core Summary from the Source Ecology Section
 - 22.21 Specific Source Details Retained
 
-VI. Machine Model
+VI. Operational Substrate and Tooling
 
-- 8. The Machine Instantiation
-- 21.4 Machine Formal Details
-- 21.5 Part-Level Selection on the Tape
-- 21.6 Noise and Fidelity on the Tape
+- 8. Operational Substrate
+- 21.2 Reader Constraint Details
+- 21.4 Earlier Training-Oriented Machine Notes
+- 21.5 Part-Level Selection in the Repository
+- 21.6 Storage Fidelity and Operational Constraints
 
 VII. Experiments and Empirical Program
 
@@ -129,12 +130,12 @@ VII. Experiments and Empirical Program
 - 15.9 Workspace Write-Triggered Context Reset
 - 22.19 Practical Problem-Pool Experiment Details
 
-VIII. Landscape, Branches, and Reference
+VIII. Landscape, Threads, and Reference
 
 - 12. Working Definitions
 - 13. Citation Targets
 - 14. Source Structure Inventory
-- 16. Retained Theoretical Branches
+- 16. Retained Theoretical Threads
 - 16.7 Sexual and Social Selection Analogy
 - 16.8 Pre-RNA and Autocatalytic Chemistry
 - 16.9 Open-Endedness Versus Domain-Specific Accumulation
@@ -354,16 +355,16 @@ recursive accumulation. Recursive accumulation requires that stored structure
 guide future reading, writing, selection, and revision of stored structure. The
 system must be able to say, in effect: this artifact is useful for this class of
 problems; this one is stale; this tool should be preferred; this evaluator is
-trusted; this naming convention reduces reconstruction cost; this branch should
-be continued; this method failed under these conditions.
+trusted; this naming convention reduces reconstruction cost; this lineage or
+thread should be continued; this method failed under these conditions.
 
 Such statements are not metadata in the trivial sense. They are regulatory
 structure. In a biological analogy, README-like files and indexes act less like
 content and more like promoter regions: they influence which stored parts are
-read, when, and under what conditions. If whole-run selection rewards tapes that
-navigate themselves well, then regulatory documents can be selected indirectly.
-The system begins to accumulate not only artifacts, but guidance about which
-artifacts matter.
+read, when, and under what conditions. If selection rewards repository states
+that help future agents navigate well, then regulatory documents can be selected
+indirectly. The system begins to accumulate not only artifacts, but guidance
+about which artifacts matter.
 
 ## 4. Why Language-Like Structure Converges
 
@@ -525,11 +526,14 @@ advantage: lower cost, better robustness, better transfer, or better descendant
 continuation. Token penalties alone can produce shorter blobs, but not
 necessarily modular structure.
 
-The context-reset workspace experiment is instructive in the opposite direction.
+The context-reset workspace experiment is instructive as a historical probe.
 When file writes triggered context resets, models did externalize state into
 files. They produced scripts, notes, calculations, and partial solutions. This
-shows that a transmission gap can force externalization. But the resulting
-workspace accumulated heterogeneous artifacts without stable naming,
+shows that a transmission gap can force externalization. But the current
+vertical/cross-inheritance model does not require engineered context resets:
+fresh episodes and bounded inheritance already create the relevant gap. The
+experiment's main lesson is that externalization alone is insufficient. The
+resulting workspace accumulated heterogeneous artifacts without stable naming,
 hierarchy, ranking, or cross-problem reuse. Externalization occurred, but
 selection over reusable parts was too weak.
 
@@ -605,53 +609,50 @@ invent notes, scripts, manifests, dependency graphs, skill-like conventions,
 retrieval guides, or other formats. The system should dictate inheritance,
 execution, and scoring, not prematurely dictate syntax.
 
-## 8. The Machine Instantiation
+## 8. Operational Substrate
 
-A practical instantiation can be described as a probabilistic machine over a
-persistent tape.
+The current architecture does not require GRPO training, a formal probabilistic
+machine, or an engineered context-wipe loop. The operational object is simpler:
+a fresh agent episode receives bounded vertical inheritance, retrieves a
+selected slice of public culture, works in a writable workspace, and leaves
+traces that future agents may inherit or reuse.
 
-The tape is the repository or file system. It contains text, code, tests, notes,
-indices, tools, seeds, archive artifacts, and usage traces. The head is a simple
-read/write/execute interface, such as a shell. The stochastic transition
-function is the model: given the current tape slice and task context, it proposes
-actions, file edits, commands, and next artifacts. The deterministic transition
-function is execution: tests, verifiers, scripts, compilers, linters, or other
-mechanisms that evaluate consequences.
+The repository or file system is still central, but it should be framed as a
+cultural substrate rather than as a training tape. It stores lineage seeds,
+archive artifacts, tests, notes, tools, usage traces, nominations, warnings,
+dependency maps, trust markers, and problem records. The useful question is not
+whether every cycle writes to the repository, but whether later fresh agents can
+reconstruct useful process from what prior agents deliberately left behind.
 
-The core loop is:
+The transmission gap is now created by episode boundaries and bounded
+inheritance. A child or future worker does not receive the parent's hidden
+state. It receives a lineage seed, selected archive artifacts, and whatever
+environmental state the protocol exposes. This is enough to force
+externalization without requiring an artificial context wipe. Anything that must
+survive across agents has to be encoded into the seed, archive, or other
+model-readable artifact.
 
-1. The model reads a bounded view of the tape.
-2. It reasons and acts through tools.
-3. It writes a patch or artifact.
-4. Context wipes.
-5. The next cycle starts from the tape.
+Tools and deterministic execution remain important, but as workspace
+capabilities and evaluation aids. A fresh agent may run tests, inspect files,
+execute scripts, call search tools, or build utilities. Those operations matter
+when they produce evidence, artifacts, or outcomes that affect inheritance,
+archive prominence, or downstream trust. They are not themselves the central
+recursive mechanism.
 
-The context wipe is not incidental. It is the transmission gap. It destroys
-unstored internal state and forces any durable progress onto the substrate. If
-the maximum cycle context is too large, the model can solve problems without
-committing intermediate state, and the tape remains secondary. If it is too
-small, the model cannot perform coherent work. The useful regime is long enough
-for one meaningful unit of work, but short enough that target problems require
-multi-cycle externalization.
+As the substrate grows, bounded attention creates carrying cost. Future agents
+cannot read everything. This creates pressure for regulatory structure:
+READMEs, indexes, summaries, dependency maps, trust files, usage logs,
+nominations, and warnings that guide future attention. Files that are never
+read may remain physically present, but become functionally dead. Persistence is
+cheap; visibility is scarce.
 
-As the tape grows, bounded context creates carrying cost. The model cannot read
-everything. This creates pressure for regulatory structure: READMEs, indexes,
-summaries, dependency maps, trust files, and usage logs that guide future
-attention. Files that are never read may remain physically present, but become
-functionally dead. Persistence alone is cheap; visibility is scarce.
-
-This gives a route to part-level selection. Files are named, addressable,
-persistent, and composable. They can function as parts. Whole-run selection
-scores final outcomes, but the outcomes depend on which files were read,
-trusted, and modified. Over many tasks, files and regulatory documents that
-contribute to successful runs should gain visibility, while misleading or stale
-artifacts should lose it.
-
-The key empirical question is whether the regulatory layer develops fast enough
-to keep pace with tape growth. If the tape grows faster than the system can
-curate it, the result is a junk archive: many persistent artifacts with little
-usable heredity. If selection rewards navigable, compact, and useful
-organization, the tape can become a process culture.
+This still gives a route to part-level selection. Files are named, addressable,
+persistent, and composable. They can function as parts. But their fitness is
+mediated through inheritance and uptake: whether descendants can continue from
+seeds, whether unrelated lineages retrieve and benefit from artifacts, and
+whether usage evidence changes future visibility. The repository becomes a
+process culture when selection rewards navigable, compact, useful organization
+instead of mere accumulation.
 
 ## 9. Experimental Implications
 
@@ -829,7 +830,8 @@ This draft still needs formal citations. Likely citation clusters:
 - iterated learning and compositionality
 - external memory, writing, and cumulative culture
 - self-reference, formal systems, Turing machines, and von Neumann self-reproduction
-- RLVR, GRPO, inference-time scaling, and verifier-based reasoning
+- RLVR, GRPO, inference-time scaling, and verifier-based reasoning as
+  background for earlier experiments and noncentral implementation paths
 - memory-augmented LLM agents and tool-using agents
 - Darwin Godel Machine and related evolutionary agent systems
 - software repositories, version control, and open-source cultural production
@@ -1035,20 +1037,22 @@ Part XX, Carrying Cost and Reader Constraint:
   feedback loop.
 - Language is a side effect of practical pressure, not the original target.
 
-Part XXI, The Machine:
+Part XXI, The Earlier Machine Model:
 
-- AI can be modeled as two loops: inner reader/writer improvement and outer
-  substrate accumulation.
-- Bash is a universal interface because it lets the model operate in a format
-  already present in pretraining.
-- The system has two transition functions over the same tape: deterministic
-  execution and stochastic model proposal.
-- Context wipe forces the tape to carry information forward.
-- Wiped cycles make long reasoning potentially linear in depth rather than
-  quadratic in sequence length.
-- Files provide part-level structure; regulatory documents direct reading.
-- The minimal machine implements substrate and constraint, but not the full
-  population ecology.
+- This section is now historical relative to the current vertical/cross
+  inheritance model.
+- It framed AI as two loops: inner reader/writer improvement and outer substrate
+  accumulation.
+- It treated bash as a universal interface because it lets the model operate in
+  a format already present in pretraining.
+- It modeled deterministic execution and stochastic model proposal as two
+  transition functions over the same repository-like substrate.
+- It used context wipe as one way to force externalization.
+- The current architecture does not require GRPO, training, or engineered
+  context wipes; fresh episodes plus bounded inheritance provide the needed
+  transmission gap.
+- Files still provide part-level structure, and regulatory documents still
+  direct reading.
 
 Original source section, Open-Ended RSI as Hereditary Cultural Ecology:
 
@@ -1378,14 +1382,14 @@ Observed patterns:
 
 Interpretation:
 
-The context wipe successfully forced externalization. It did not, by itself,
-create reusable process culture. The missing pieces appear to be naming,
-selection, ranking, bounded inheritance, archive filtering, and cross-problem
-necessity.
+In that historical setup, context wipe successfully forced externalization. It
+did not, by itself, create reusable process culture. The missing pieces appear
+to be naming, selection, ranking, bounded inheritance, archive filtering, and
+cross-problem necessity.
 
-## 16. Retained Theoretical Branches
+## 16. Retained Theoretical Threads
 
-These branches are not all ready for a concise formal paper, but they should be
+These threads are not all ready for a concise formal paper, but they should be
 kept visible for now.
 
 ### 16.1 Boundary Principle
@@ -1455,11 +1459,12 @@ belong in a later retained-branch section.
 
 ### 16.9 Open-Endedness Versus Domain-Specific Accumulation
 
-The minimal machine should not be claimed to produce full open-endedness by
-itself. A more defensible short-term target is domain-specific accumulation of
-process artifacts that improve solve rates within a bounded bucket. Broader
-open-endedness likely requires ecological consequence, shifting tasks,
-competition, scarcity, and cross-lineage recombination.
+The minimal vertical/cross-inheritance architecture should not be claimed to
+produce full open-endedness by itself. A more defensible short-term target is
+domain-specific accumulation of process artifacts that improve solve rates
+within a bounded bucket. Broader open-endedness likely requires ecological
+consequence, shifting tasks, competition, scarcity, and cross-lineage
+recombination.
 
 ## 17. Open Questions
 
@@ -1488,8 +1493,8 @@ competition, scarcity, and cross-lineage recombination.
 10. When does a tool become a reusable process artifact rather than a one-off
     script?
 
-11. What is the minimum context-wipe frequency that forces externalization
-    without preventing coherent work?
+11. What episode boundary, seed size, and archive retrieval budget best force
+    externalization without preventing coherent work?
 
 12. What signs would indicate emergence of a genuine LLM-native process
     language rather than human-readable bureaucracy?
@@ -1945,7 +1950,8 @@ Each layer externalizes what the previous layer could not evaluate well:
 
 - Chemistry -> DNA externalizes molecular structure.
 - DNA/organisms -> language externalizes cognitive and social structure.
-- Human/LLM reasoning -> tape externalizes inference and process traces.
+- Human/LLM reasoning -> workspace or repository externalizes inference and
+  process traces.
 
 The source separates partial from full externalization. Earlier layers already
 perform some version of what later layers make copyable: DNA has recombination
@@ -2003,7 +2009,7 @@ Examples below threshold:
 The LLM target is to move reasoning procedures above the visibility threshold by
 externalizing them into persistent, reconstructible artifacts.
 
-## 21. Field Landscape and Machine Details
+## 21. Field Landscape and Operational Substrate Details
 
 ### 21.1 Field Landscape Details
 
@@ -2062,10 +2068,14 @@ Do not engineer recursion directly as the first objective. Engineer practical
 communicative pressure between instances. If recursion emerges, the hypothesis
 is supported. If it does not, the result is informative.
 
-### 21.4 Machine Formal Details
+### 21.4 Earlier Training-Oriented Machine Notes
 
 The machine section in the DOCX includes formal details that should stay
-available:
+available, but they are no longer the central architecture. They describe an
+earlier training-oriented implementation path. The current model does not
+require GRPO, policy training, or context wipe. It only requires fresh episodes,
+bounded vertical inheritance, selective archive retrieval, and downstream
+selection over what future agents can reconstruct and use.
 
 The AI inner loop has two timescales. Within-session plasticity is ICL: useful
 adaptation that dies with the episode. Across-session plasticity is RL or weight
@@ -2083,7 +2093,7 @@ all programs invoked through the same shell. This matters because terminal
 sessions are already strongly represented in model pretraining, so the interface
 is partly already in the weights.
 
-- The tape is the repo.
+- The tape is the repo in the earlier formalization.
 - The head is bash or an equivalent universal read/write/execute interface.
 - The deterministic transition function executes tests, scripts, compilers,
   verifiers, and code.
@@ -2096,16 +2106,17 @@ transition, because given local inputs it executes molecular consequences;
 replication with variation is the stochastic transition; both operate on and
 are configured by the same molecular substrate. The AI machine mirrors this by
 letting deterministic execution and stochastic model proposal operate on the
-same tape.
+same repository-like substrate.
 
-The GRPO mapping:
+Earlier GRPO mapping, not required by the current inheritance model:
 
 - Sample K model rollouts from the same tape snapshot.
 - Evaluate each final tape with deterministic scoring.
 - Compute grouped advantage, for example `(r_k - mean(r_1:K)) / std(r_1:K)`.
 - Every cycle in a successful rollout can receive the rollout-level advantage.
 
-The context-wipe decomposition:
+Earlier context-wipe decomposition, not required by the current inheritance
+model:
 
 - A rollout is a sequence of independent cycle samples conditioned only on tape
   state.
@@ -2120,10 +2131,12 @@ Length-generalization claim:
 - Wiped cycles cost roughly `N * O(c^2)`.
 - Complexity lives in accumulated tape state, not in one long sequence.
 
-This is not only a memory-forcing mechanism; it is also a computational scaling
-argument for long reasoning through persistent state.
+This was not only a memory-forcing mechanism; it was also a computational
+scaling argument for long reasoning through persistent state. In the current
+architecture, the analogous forcing mechanism is simpler: future agents begin as
+fresh episodes and receive only bounded seed and archive context.
 
-### 21.5 Part-Level Selection on the Tape
+### 21.5 Part-Level Selection in the Repository
 
 Files satisfy the boundary criteria:
 
@@ -2132,28 +2145,30 @@ Files satisfy the boundary criteria:
 - persistent
 - composable
 
-Implicit file selection happens through reading. A file read in successful runs
-contributes to high-scoring tapes. A file never read contributes little. README,
-index, manifest, and navigation files function as regulatory regions because
-they direct which other files get read.
+Implicit file selection happens through reading and inheritance. A file read in
+successful runs, carried in a useful seed, or adopted from the archive
+contributes to future success. A file never read or inherited contributes
+little. README, index, manifest, and navigation files function as regulatory
+regions because they direct which other files get read.
 
-The tape need not actively delete everything unused. Physical persistence can be
-flat while visibility is selective. Pseudogenes can remain in genomes; obsolete
-words can remain in dictionaries. The key pressure is bounded reading, not
-perfect garbage collection.
+The repository need not actively delete everything unused. Physical persistence
+can be flat while visibility is selective. Pseudogenes can remain in genomes;
+obsolete words can remain in dictionaries. The key pressure is bounded reading,
+not perfect garbage collection.
 
-### 21.6 Noise and Fidelity on the Tape
+### 21.6 Storage Fidelity and Operational Constraints
 
-The source notes that the tape has near-perfect storage fidelity: files do not
-degrade by themselves. Variation instead comes from stochastic model sampling.
-The relevant constraints still include:
+The source notes that the repository has near-perfect storage fidelity: files do
+not degrade by themselves. Variation instead comes from fresh agent attempts,
+artifact revision, seed mutation, archive recombination, and stochastic model
+sampling. The relevant constraints in the current model are:
 
-- bounded context
-- context wipe
-- finite reading per cycle
-- stochastic variation in proposed edits
+- bounded seed size
+- bounded archive retrieval
+- finite reading per episode
+- stochastic variation in proposed edits and inherited process
 
-Constraints that may be weak or absent in the minimal machine:
+Constraints that may be weak or absent in the minimal inheritance architecture:
 
 - storage corruption
 - teachability pressure
@@ -2161,10 +2176,10 @@ Constraints that may be weak or absent in the minimal machine:
 - multi-agent coordination
 - parasites or exploiters
 
-The minimal machine supplies substrate and transmission constraints, but not the
-full population ecology. If progress plateaus, additional pressures such as
-multi-agent competition, adversarial dynamics, scarcity, and coordination may be
-needed.
+The operational substrate supplies storage and a transmission channel, but not
+the full population ecology by itself. If progress plateaus, additional
+pressures such as multi-agent competition, adversarial dynamics, scarcity, and
+coordination may be needed.
 
 ## 22. Hereditary Ecology and Architecture Details
 
@@ -2749,17 +2764,19 @@ DGM cost and level:
 - The point is not the exact cost estimate, but the scaling concern: selecting
   whole agent codebases is expensive and gives weak part-level credit.
 
-Cycle boundary details:
+Earlier cycle boundary details:
 
-- In the machine model, the cycle boundary is tied to writing. Write functions
-  like a stop codon: after the model writes a patch or artifact, context wipes
-  and the next cycle reads the updated tape.
+- In the earlier machine model, the cycle boundary is tied to writing. Write
+  functions like a stop codon: after the model writes a patch or artifact,
+  context wipes and the next cycle reads the updated tape.
 - The model can choose actual cycle length within an infrastructure-imposed
   maximum by deciding when to write.
 - The target maximum cycle length is an open parameter: too short prevents
   coherent work; too long lets the model solve without externalizing state.
+- Current status: this is an optional training-oriented implementation detail,
+  not a requirement of the vertical/cross-inheritance model.
 
-Parallel training details:
+Earlier parallel training details:
 
 - Generation remains sequential because each tape state depends on prior
   patches.
@@ -2768,8 +2785,10 @@ Parallel training details:
 - Variable-length rollouts produce different numbers of training samples. A
   successful longer rollout trains more cycle decisions, which may be correct if
   many decisions contributed to success.
+- Current status: relevant only to the earlier training-oriented path, not to
+  the current no-training inheritance architecture.
 
-Universal probabilistic Turing machine framing:
+Earlier universal probabilistic Turing machine framing:
 
 - The machine is framed as a universal probabilistic Turing machine with stored
   programs: deterministic execution and stochastic model proposal both operate
@@ -2777,10 +2796,12 @@ Universal probabilistic Turing machine framing:
 - The point is mathematical consistency. Recursive improvement requires both
   transition functions over a substrate that can store the programs,
   instructions, tests, and regulatory documents that affect future transitions.
+- Current status: useful as formal background, but less central than the
+  cultural-substrate account of seeds, archive uptake, and inherited process.
 
 Archive death by invisibility:
 
-- The source compares unused tape artifacts to pseudogenes or obsolete
+- The source compares unused repository artifacts to pseudogenes or obsolete
   dictionary words: they may remain physically stored but no longer get
   transcribed/read.
 - The failure mode is not storage bloat alone; it is loss of visibility and
