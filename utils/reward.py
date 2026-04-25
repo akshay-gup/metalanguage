@@ -235,6 +235,53 @@ def _execute_solution_batch(
 
     return passed, total
 
+
+def _first_present(row: dict[str, Any], keys: list[str]) -> Any:
+    for key in keys:
+        if key in row and row[key] is not None:
+            return row[key]
+    return None
+
+
+def ground_truth_from_private_row(private_problem_path: Path) -> tuple[str | None, str | None]:
+    try:
+        row = json.loads(private_problem_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None, None
+
+    if not isinstance(row, dict):
+        return None, None
+
+    private_task_id = _first_present(row, ["id", "task_id", "problem_id", "index"])
+    private_answer = _first_present(row, ["answer", "solution", "ground_truth", "target"])
+    return (
+        str(private_task_id) if private_task_id is not None else None,
+        str(private_answer) if private_answer is not None else None,
+    )
+
+
+def compute_rollout_reward(
+    *,
+    submitted_answer: str,
+    expected_task_id: str,
+    expected_problem_uid: str,
+    reported_task_id: str | None,
+    reported_problem_uid: str | None,
+    private_problem_path: Path,
+) -> float:
+    private_task_id, private_answer = ground_truth_from_private_row(private_problem_path)
+    if private_answer is None:
+        return 0.0
+
+    if reported_problem_uid is not None and reported_problem_uid != expected_problem_uid:
+        return 0.0
+    if reported_task_id is not None and reported_task_id != expected_task_id:
+        return 0.0
+    if private_task_id is not None and private_task_id != expected_task_id:
+        return 0.0
+
+    return compute_score_bigmath(submitted_answer, private_answer, {"problem_id": expected_task_id})
+
 def _extract_code_from_section(section_text: str, language: str = "python") -> str | None:
     """
     Extract the last code block from a section of model output.
