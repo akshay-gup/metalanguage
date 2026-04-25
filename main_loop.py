@@ -5,7 +5,8 @@ Flow:
 1) Sample one task from a Hugging Face RLVR-style dataset.
 2) Create an ephemeral episode temp directory and write task metadata.
 3) Run a tool-using worker (LLM + bash function tool) in that directory.
-4) Evaluate `solution.md` against ground truth with reward util.
+4) Evaluate rollout answer (`solution.json` preferred, `solution.md` fallback)
+   against ground truth with reward util.
 5) Append run metadata to a growing JSONL log.
 6) Print a one-line summary.
 """
@@ -26,7 +27,13 @@ from typing import Any
 
 from utils.hf_datasets import HFDatasetDataLoader
 from utils.openrouter import bash_tool, call_openrouter_with_tools, get_tool_calls
-from utils.reward import compute_score_bigmath
+from utils.reward import compute_rollout_reward
+from utils.task_store import (
+    compute_problem_uid,
+    load_rollout_answer,
+    redact_solution_fields,
+    write_private_problem_record,
+)
 
 
 @dataclass
@@ -218,7 +225,13 @@ def run_worker(
             "content": [
                 {
                     "type": "input_text",
-                    "text": f"Look at the workspace and proceed. Working directory: {workdir}",
+                    "text": (
+                        "Look at the workspace and proceed. "
+                        f"Working directory: {workdir}. "
+                        "Write final output to solution.json with keys "
+                        '{"problem_uid": "...", "task_id": "...", "answer": "..."}; '
+                        "you may also write solution.md."
+                    ),
                 }
             ],
         }
@@ -476,6 +489,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable resume logic and always start a fresh run.",
     )
+    parser.add_argument(
+        "--task-store-dir",
+        default="logs/task_store",
+        help=(
+            "Private task store path (outside rollout workspaces) for full dataset rows "
+            "including ground truth."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -543,6 +564,7 @@ def main() -> None:
         ]
 
     runs_log_path = Path(args.runs_log)
+    task_store_dir = Path(args.task_store_dir)
     existing_records: list[dict[str, Any]] = []
     if not args.no_resume:
         all_records = load_existing_run_records(runs_log_path)
@@ -574,6 +596,19 @@ def main() -> None:
     for task_index, task in enumerate(tasks):
         successful_rollouts: list[Path] = []
         existing_task_records = existing_by_task.get(task_index, {})
+        problem_uid = compute_problem_uid(
+            dataset_name=args.dataset_name,
+            split=args.split,
+            config_name=args.config_name,
+            task_id=task.task_id,
+            question=task.question,
+        )
+        private_problem_path = write_private_problem_record(
+            task_store_dir=task_store_dir,
+            problem_uid=problem_uid,
+            row=task.raw,
+        )
+        model_visible_row = redact_solution_fields(task.raw)
 
         if len(existing_task_records) >= args.num_rollouts:
             continue
@@ -606,10 +641,8 @@ def main() -> None:
             task_file.write_text(
                 json.dumps(
                     {
-                        "task_id": task.task_id,
-                        "question": task.question,
-                        "ground_truth": task.answer,
-                        "dataset_row": task.raw,
+                        "problem_uid": problem_uid,
+                        "dataset_row": model_visible_row,
                         "previous_rollout_dir": str(sampled_parent) if sampled_parent else None,
                         "next_rollout_dir": str(next_rollout_dir),
                         "rollout_username": rollout_username,
@@ -631,14 +664,15 @@ def main() -> None:
                 rollout_username=rollout_username,
                 max_turns=args.max_turns,
             )
-
-            solution_path = temp_dir / "solution.md"
-            if not solution_path.exists():
-                fallback = worker_text if worker_text else "\\boxed{}"
-                solution_path.write_text(fallback + "\n", encoding="utf-8")
-
-            solution_text = solution_path.read_text(encoding="utf-8")
-            reward = compute_score_bigmath(solution_text, task.answer, {"problem_id": task.task_id})
+            reported_problem_uid, reported_task_id, submitted_answer = load_rollout_answer(temp_dir, worker_text)
+            reward = compute_rollout_reward(
+                submitted_answer=submitted_answer,
+                expected_task_id=task.task_id,
+                expected_problem_uid=problem_uid,
+                reported_task_id=reported_task_id,
+                reported_problem_uid=reported_problem_uid,
+                private_problem_path=private_problem_path,
+            )
             solved = bool(reward >= 1.0)
 
             output_dir = persist_episode_outputs(
@@ -657,11 +691,15 @@ def main() -> None:
                 "rollout_index": rollout_index,
                 "rollout_username": rollout_username,
                 "task_id": task.task_id,
+                "problem_uid": problem_uid,
+                "reported_problem_uid": reported_problem_uid,
+                "reported_task_id": reported_task_id,
                 "parent_rollout_dir": str(sampled_parent) if sampled_parent else None,
                 "next_rollout_dir": str(next_rollout_dir),
                 "solved": solved,
                 "reward": reward,
                 "output_path": str(output_dir),
+                "private_problem_path": str(private_problem_path),
                 "dataset_name": args.dataset_name,
                 "split": args.split,
                 "model": args.model,
