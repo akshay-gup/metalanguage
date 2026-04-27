@@ -22,6 +22,9 @@ Open ended RSI
   6. score solution via `utils/reward.py`, grounding correctness against the private stored row and validating reported ids,
   7. retain only successful rollout workspaces as parent candidates for the next task,
   8. append run metadata to a growing JSONL log and print one-line summary per rollout.
+- Parent allotment strategies:
+  - default `--parent-allotment round_robin` preserves existing behavior by sampling uniformly from successful parents;
+  - `--parent-allotment solved_proportional` weights by `max(1, solved_count)` so rollouts that have solved more prior tasks are allotted more often.
 - Resume behavior:
   - runs automatically resume from existing `--runs-log` entries that match dataset/split/model/seed/generation/config/rollout-count;
   - completed rollouts are skipped, partial tasks continue from missing rollout indices;

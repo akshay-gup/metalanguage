@@ -497,6 +497,15 @@ def parse_args() -> argparse.Namespace:
             "including ground truth."
         ),
     )
+    parser.add_argument(
+        "--parent-allotment",
+        choices=("round_robin", "solved_proportional"),
+        default="round_robin",
+        help=(
+            "How to allot next-task parent rollout directories from successful rollouts. "
+            "'solved_proportional' upweights rollouts that have solved more prior tasks."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -527,7 +536,12 @@ def main() -> None:
         parent_pool = [previous_rollout_dir]
     rng = random.Random(args.seed)
 
-    def _build_parent_pool(successes: list[Path], target_size: int) -> list[Path]:
+    def _build_parent_pool(
+        successes: list[tuple[str, Path]],
+        target_size: int,
+        *,
+        allotment: str,
+    ) -> list[Path]:
         """Construct the next-task parent pool.
 
         If we have fewer successful workspaces than rollouts, sample with replacement
@@ -535,9 +549,18 @@ def main() -> None:
         """
         if not successes or target_size <= 0:
             return []
-        if len(successes) >= target_size:
-            return rng.sample(successes, target_size)
-        return [rng.choice(successes) for _ in range(target_size)]
+        if allotment == "round_robin":
+            success_paths = [path for _, path in successes]
+            if len(success_paths) >= target_size:
+                return rng.sample(success_paths, target_size)
+            return [rng.choice(success_paths) for _ in range(target_size)]
+
+        # Solved-proportional sampling: rollouts that solved more prior tasks receive
+        # higher allocation chance. Use a floor of 1.0 for cold-start stability.
+        usernames = [username for username, _ in successes]
+        paths = [path for _, path in successes]
+        weights = [float(max(1, solved_counts.get(username, 0))) for username in usernames]
+        return rng.choices(paths, weights=weights, k=target_size)
 
     if args.all_tasks:
         tasks = iter_tasks(
@@ -580,6 +603,13 @@ def main() -> None:
             and rec.get("config_name") == args.config_name
         ]
 
+    solved_counts: dict[str, int] = {name: 0 for name in rollout_usernames}
+    for rec in existing_records:
+        if bool(rec.get("solved")):
+            username = rec.get("rollout_username")
+            if isinstance(username, str):
+                solved_counts[username] = solved_counts.get(username, 0) + 1
+
     existing_by_task: dict[int, dict[int, dict[str, Any]]] = {}
     for rec in existing_records:
         task_idx = rec.get("task_index")
@@ -594,7 +624,7 @@ def main() -> None:
             per_task[rollout_idx] = rec
 
     for task_index, task in enumerate(tasks):
-        successful_rollouts: list[Path] = []
+        successful_rollouts: list[tuple[str, Path]] = []
         existing_task_records = existing_by_task.get(task_index, {})
         problem_uid = compute_problem_uid(
             dataset_name=args.dataset_name,
@@ -619,7 +649,9 @@ def main() -> None:
                 if bool(existing.get("solved")):
                     next_dir = existing.get("next_rollout_dir")
                     if isinstance(next_dir, str) and next_dir:
-                        successful_rollouts.append(Path(next_dir))
+                        username = existing.get("rollout_username")
+                        if isinstance(username, str):
+                            successful_rollouts.append((username, Path(next_dir)))
                 continue
 
             rollout_username = rollout_usernames[rollout_index]
@@ -681,7 +713,8 @@ def main() -> None:
                 f"{task.task_id}_rollout_{rollout_index:03d}",
             )
             if solved:
-                successful_rollouts.append(next_rollout_dir)
+                successful_rollouts.append((rollout_username, next_rollout_dir))
+                solved_counts[rollout_username] = solved_counts.get(rollout_username, 0) + 1
 
             record = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -714,7 +747,11 @@ def main() -> None:
             )
 
         if successful_rollouts:
-            parent_pool = _build_parent_pool(successful_rollouts, args.num_rollouts)
+            parent_pool = _build_parent_pool(
+                successful_rollouts,
+                args.num_rollouts,
+                allotment=args.parent_allotment,
+            )
             latest_ptr.write_text(str(parent_pool[0]), encoding="utf-8")
             save_parent_pool(parent_pool_path, parent_pool)
         else:
