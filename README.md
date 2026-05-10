@@ -17,6 +17,7 @@ Open ended RSI
   1. by default, sample one task from HF dataset (or process all tasks with `--all-tasks`),
   2. run `--num-rollouts` child rollouts per task in isolated temp workspaces (each with an auto-assigned unique rollout username),
   3. sample each child's parent (with replacement) from the prior task's successful rollouts,
+  3.5. expose a shared cross-rollout workspace at `--rollout-temp-root/shared_workspace` where any rollout agent can leave files/messages for any other rollout agent (files written by each rollout are cleaned up after that rollout ends),
   4. write the original dataset row as-is under `--task-store-dir`, while model-visible workspace task files redact solution-like fields,
   5. run OpenRouter worker with `run_bash` tool access to produce `solution.json` (`problem_uid` + `task_id` + `answer`, with `solution.md` fallback),
   6. score solution via `utils/reward.py`, grounding correctness against the private stored row and validating reported ids,
