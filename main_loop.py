@@ -20,6 +20,8 @@ import os
 import random
 import shutil
 import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,6 +44,21 @@ class Task:
     question: str
     answer: str
     raw: dict[str, Any]
+
+
+@dataclass
+class RolloutResult:
+    rollout_index: int
+    record: dict[str, Any]
+    successful_dir: Path | None
+    summary: str
+
+
+@dataclass
+class ArchiveWorktree:
+    path: Path
+    branch: str
+    base_commit: str
 
 
 def _first_present(row: dict[str, Any], keys: list[str]) -> Any:
@@ -191,6 +208,16 @@ def _run_bash_tool(command: str, working_directory: str, rollout_username: str |
             "working_directory": working_directory,
             "timed_out": True,
         }
+
+
+def _run_git(args: list[str], cwd: Path, *, check: bool = True) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        text=True,
+        capture_output=True,
+        check=check,
+    )
 
 
 def _sanitize_for_path(value: str) -> str:
@@ -429,6 +456,72 @@ def save_parent_pool(parent_pool_path: Path, parent_pool: list[Path]) -> None:
     )
 
 
+def create_archive_worktree(
+    *,
+    archive_repo_dir: Path,
+    worktree_root: Path,
+    branch: str,
+    git_lock: threading.Lock,
+) -> ArchiveWorktree:
+    """Create an isolated archive worktree for one parallel rollout."""
+    worktree_root.mkdir(parents=True, exist_ok=True)
+    worktree_path = (worktree_root / _sanitize_for_path(branch)).resolve()
+    shutil.rmtree(worktree_path, ignore_errors=True)
+
+    with git_lock:
+        base_commit = _run_git(["rev-parse", "HEAD"], archive_repo_dir).stdout.strip()
+        _run_git(["worktree", "prune"], archive_repo_dir, check=False)
+        _run_git(["branch", "-D", branch], archive_repo_dir, check=False)
+        _run_git(["worktree", "add", "-B", branch, str(worktree_path), "HEAD"], archive_repo_dir)
+
+    return ArchiveWorktree(path=worktree_path, branch=branch, base_commit=base_commit)
+
+
+def finalize_archive_worktree(
+    *,
+    archive_repo_dir: Path,
+    worktree: ArchiveWorktree,
+    git_lock: threading.Lock,
+) -> dict[str, Any]:
+    """Keep committed archive changes, discard uncommitted edits, and remove the worktree."""
+    result: dict[str, Any] = {
+        "archive_worktree_dir": str(worktree.path),
+        "archive_branch": worktree.branch,
+        "archive_base_commit": worktree.base_commit,
+        "archive_head_commit": worktree.base_commit,
+        "archive_committed": False,
+        "archive_merged": False,
+    }
+
+    try:
+        if worktree.path.exists():
+            _run_git(["reset", "--hard", "HEAD"], worktree.path, check=False)
+            _run_git(["clean", "-fd"], worktree.path, check=False)
+            head_commit = _run_git(["rev-parse", "HEAD"], worktree.path).stdout.strip()
+            result["archive_head_commit"] = head_commit
+            result["archive_committed"] = head_commit != worktree.base_commit
+
+            with git_lock:
+                merge_failed = False
+                if result["archive_committed"]:
+                    merge = _run_git(["merge", "--no-ff", "--no-edit", worktree.branch], archive_repo_dir, check=False)
+                    if merge.returncode != 0:
+                        _run_git(["merge", "--abort"], archive_repo_dir, check=False)
+                        result["archive_merge_error"] = (merge.stderr or merge.stdout).strip()
+                        merge_failed = True
+                    else:
+                        result["archive_merged"] = True
+
+                _run_git(["worktree", "remove", "--force", str(worktree.path)], archive_repo_dir, check=False)
+                if not merge_failed:
+                    delete_args = ["branch", "-d" if result["archive_merged"] else "-D", worktree.branch]
+                    _run_git(delete_args, archive_repo_dir, check=False)
+    finally:
+        shutil.rmtree(worktree.path, ignore_errors=True)
+
+    return result
+
+
 def ensure_local_world_repo(repo_path: Path) -> None:
     """Ensure a local persistent git repo exists with an initial commit."""
     repo_path.mkdir(parents=True, exist_ok=True)
@@ -559,11 +652,13 @@ def main() -> None:
     if not api_key:
         raise RuntimeError("OPENROUTER_API_KEY is required.")
 
-    archive_repo_dir = Path(args.archive_repo_dir)
+    archive_repo_dir = Path(args.archive_repo_dir).resolve()
     ensure_local_world_repo(archive_repo_dir)
+    archive_git_lock = threading.Lock()
 
     rollout_root = Path(args.rollout_temp_root)
     rollout_root.mkdir(parents=True, exist_ok=True)
+    archive_worktree_root = rollout_root / "archive_worktrees"
 
     latest_ptr = rollout_root / "latest_rollout_dir.txt"
     parent_pool_path = rollout_root / "latest_parent_pool.json"
@@ -666,19 +761,22 @@ def main() -> None:
         if len(existing_task_records) >= args.num_rollouts:
             continue
 
-        for rollout_index in range(args.num_rollouts):
+        def _run_one_rollout(rollout_index: int) -> RolloutResult:
             existing = existing_task_records.get(rollout_index)
             if existing is not None:
-                if bool(existing.get("solved")):
-                    next_dir = existing.get("next_rollout_dir")
-                    if isinstance(next_dir, str) and next_dir:
-                        successful_rollouts.append(Path(next_dir))
-                continue
+                raise RuntimeError(f"rollout {rollout_index} already exists and should not have been submitted")
 
             rollout_username = rollout_usernames[rollout_index]
             sampled_parent: Path | None = (
                 parent_pool[rollout_index % len(parent_pool)] if parent_pool else None
             )
+            archive_worktree = create_archive_worktree(
+                archive_repo_dir=archive_repo_dir,
+                worktree_root=archive_worktree_root,
+                branch=f"rollout/{task_index:06d}-{rollout_index:03d}-{_sanitize_for_path(task.task_id)}",
+                git_lock=archive_git_lock,
+            )
+            archive_result: dict[str, Any] = {}
 
             temp_dir = Path(args.fixed_temp_dir) / f"{task_index:06d}" / f"rollout_{rollout_index:03d}"
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -698,7 +796,8 @@ def main() -> None:
                         "dataset_row": model_visible_row,
                         "previous_rollout_dir": str(sampled_parent) if sampled_parent else None,
                         "next_rollout_dir": str(next_rollout_dir),
-                        "archive_repo_dir": str(archive_repo_dir),
+                        "archive_repo_dir": str(archive_worktree.path),
+                        "archive_main_repo_dir": str(archive_repo_dir),
                         "shared_workspace_dir": str(shared_workspace_dir),
                         "rollout_username": rollout_username,
                     },
@@ -708,22 +807,26 @@ def main() -> None:
                 encoding="utf-8",
             )
 
-            shared_snapshot = _snapshot_workspace_files(shared_workspace_dir)
-
-            worker_text = run_worker(
-                api_key=api_key,
-                model=args.model,
-                question=task.question,
-                task_id=task.task_id,
-                workdir=temp_dir,
-                previous_rollout_dir=sampled_parent,
-                next_rollout_dir=next_rollout_dir,
-                archive_repo_dir=archive_repo_dir,
-                shared_workspace_dir=shared_workspace_dir,
-                rollout_username=rollout_username,
-                max_turns=args.max_turns,
-            )
-            _cleanup_rollout_shared_writes(shared_workspace_dir, shared_snapshot)
+            try:
+                worker_text = run_worker(
+                    api_key=api_key,
+                    model=args.model,
+                    question=task.question,
+                    task_id=task.task_id,
+                    workdir=temp_dir,
+                    previous_rollout_dir=sampled_parent,
+                    next_rollout_dir=next_rollout_dir,
+                    archive_repo_dir=archive_worktree.path,
+                    shared_workspace_dir=shared_workspace_dir,
+                    rollout_username=rollout_username,
+                    max_turns=args.max_turns,
+                )
+            finally:
+                archive_result = finalize_archive_worktree(
+                    archive_repo_dir=archive_repo_dir,
+                    worktree=archive_worktree,
+                    git_lock=archive_git_lock,
+                )
             reported_problem_uid, reported_task_id, submitted_answer = load_rollout_answer(temp_dir, worker_text)
             reward = compute_rollout_reward(
                 submitted_answer=submitted_answer,
@@ -740,8 +843,6 @@ def main() -> None:
                 Path(args.outputs_dir),
                 f"{task.task_id}_rollout_{rollout_index:03d}",
             )
-            if solved:
-                successful_rollouts.append(next_rollout_dir)
 
             record = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -765,13 +866,58 @@ def main() -> None:
                 "model": args.model,
                 "num_rollouts": args.num_rollouts,
                 "config_name": args.config_name,
+                **archive_result,
             }
-            append_run_log(runs_log_path, record)
 
-            print(
+            summary = (
                 f"gen={args.generation} seed={args.seed} task_index={task_index} rollout_index={rollout_index} "
                 f"rollout_username={rollout_username} task_id={task.task_id} solved={solved} output={output_dir}"
             )
+            return RolloutResult(
+                rollout_index=rollout_index,
+                record=record,
+                successful_dir=next_rollout_dir if solved else None,
+                summary=summary,
+            )
+
+        missing_rollout_indices: list[int] = []
+        for rollout_index in range(args.num_rollouts):
+            existing = existing_task_records.get(rollout_index)
+            if existing is not None:
+                if bool(existing.get("solved")):
+                    next_dir = existing.get("next_rollout_dir")
+                    if isinstance(next_dir, str) and next_dir:
+                        successful_rollouts.append(Path(next_dir))
+                continue
+            missing_rollout_indices.append(rollout_index)
+
+        shared_snapshot = _snapshot_workspace_files(shared_workspace_dir)
+        results: list[RolloutResult] = []
+        errors: list[tuple[int, BaseException]] = []
+        if missing_rollout_indices:
+            with ThreadPoolExecutor(max_workers=len(missing_rollout_indices)) as executor:
+                futures = {
+                    executor.submit(_run_one_rollout, rollout_index): rollout_index
+                    for rollout_index in missing_rollout_indices
+                }
+                for future in as_completed(futures):
+                    rollout_index = futures[future]
+                    try:
+                        results.append(future.result())
+                    except BaseException as exc:
+                        errors.append((rollout_index, exc))
+
+        _cleanup_rollout_shared_writes(shared_workspace_dir, shared_snapshot)
+
+        if errors:
+            details = "; ".join(f"rollout {idx}: {exc}" for idx, exc in sorted(errors, key=lambda item: item[0]))
+            raise RuntimeError(f"One or more rollouts failed: {details}")
+
+        for result in sorted(results, key=lambda item: item.rollout_index):
+            append_run_log(runs_log_path, result.record)
+            if result.successful_dir is not None:
+                successful_rollouts.append(result.successful_dir)
+            print(result.summary)
 
         if successful_rollouts:
             parent_pool = _build_parent_pool(successful_rollouts, args.num_rollouts)
