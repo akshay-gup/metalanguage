@@ -249,6 +249,7 @@ def run_worker(
     workdir: Path,
     previous_rollout_dir: Path | None,
     next_rollout_dir: Path,
+    archive_repo_dir: Path,
     shared_workspace_dir: Path,
     rollout_username: str,
     max_turns: int,
@@ -261,8 +262,11 @@ def run_worker(
                 {
                     "type": "input_text",
                     "text": (
-                        "Look at the workspace and proceed. "
+                        "Read task.json, inspect the workspace, and proceed. "
                         f"Working directory: {workdir}. "
+                        f"Use next_rollout_dir as your vertical seed for descendants. "
+                        f"Use archive_repo_dir ({archive_repo_dir}) as the durable cross-lineage git archive. "
+                        f"Use shared_workspace_dir only for ephemeral live coordination. "
                         "Write final output to solution.json with keys "
                         '{"problem_uid": "...", "task_id": "...", "answer": "..."}; '
                         "you may also write solution.md."
@@ -332,7 +336,12 @@ def run_worker(
                 wd = str(args.get("working_directory") or workdir)
                 try:
                     resolved_wd = Path(wd).resolve()
-                    allowed_roots = [workdir.resolve(), next_rollout_dir.resolve(), shared_workspace_dir.resolve()]
+                    allowed_roots = [
+                        workdir.resolve(),
+                        next_rollout_dir.resolve(),
+                        archive_repo_dir.resolve(),
+                        shared_workspace_dir.resolve(),
+                    ]
                     if previous_rollout_dir is not None:
                         allowed_roots.append(previous_rollout_dir.resolve())
                     safe_wd = str(workdir)
@@ -532,6 +541,11 @@ def parse_args() -> argparse.Namespace:
             "including ground truth."
         ),
     )
+    parser.add_argument(
+        "--archive-repo-dir",
+        default="archive/world_repo",
+        help="Durable cross-lineage Git archive exposed to every rollout.",
+    )
     return parser.parse_args()
 
 
@@ -545,7 +559,8 @@ def main() -> None:
     if not api_key:
         raise RuntimeError("OPENROUTER_API_KEY is required.")
 
-    ensure_local_world_repo(Path("logs/world_repo"))
+    archive_repo_dir = Path(args.archive_repo_dir)
+    ensure_local_world_repo(archive_repo_dir)
 
     rollout_root = Path(args.rollout_temp_root)
     rollout_root.mkdir(parents=True, exist_ok=True)
@@ -683,6 +698,7 @@ def main() -> None:
                         "dataset_row": model_visible_row,
                         "previous_rollout_dir": str(sampled_parent) if sampled_parent else None,
                         "next_rollout_dir": str(next_rollout_dir),
+                        "archive_repo_dir": str(archive_repo_dir),
                         "shared_workspace_dir": str(shared_workspace_dir),
                         "rollout_username": rollout_username,
                     },
@@ -702,6 +718,7 @@ def main() -> None:
                 workdir=temp_dir,
                 previous_rollout_dir=sampled_parent,
                 next_rollout_dir=next_rollout_dir,
+                archive_repo_dir=archive_repo_dir,
                 shared_workspace_dir=shared_workspace_dir,
                 rollout_username=rollout_username,
                 max_turns=args.max_turns,
