@@ -206,6 +206,40 @@ def _is_within(path: Path, root: Path) -> bool:
         return False
 
 
+def _snapshot_workspace_files(root: Path) -> dict[Path, tuple[int, int]]:
+    """Return file signatures keyed by relative path for all files under root."""
+    snapshot: dict[Path, tuple[int, int]] = {}
+    if not root.exists():
+        return snapshot
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(root)
+        stat = path.stat()
+        snapshot[rel] = (stat.st_size, stat.st_mtime_ns)
+    return snapshot
+
+
+def _cleanup_rollout_shared_writes(root: Path, before: dict[Path, tuple[int, int]]) -> None:
+    """Delete files created or modified in the shared workspace by a rollout."""
+    if not root.exists():
+        return
+
+    after = _snapshot_workspace_files(root)
+    dirty_paths = [rel for rel, sig in after.items() if before.get(rel) != sig]
+    for rel in dirty_paths:
+        target = root / rel
+        if target.exists() and target.is_file():
+            target.unlink()
+
+    # Best-effort cleanup of now-empty directories under the shared root.
+    for directory in sorted((p for p in root.rglob("*") if p.is_dir()), key=lambda p: len(p.parts), reverse=True):
+        try:
+            directory.rmdir()
+        except OSError:
+            continue
+
+
 def run_worker(
     *,
     api_key: str,
@@ -215,6 +249,7 @@ def run_worker(
     workdir: Path,
     previous_rollout_dir: Path | None,
     next_rollout_dir: Path,
+    shared_workspace_dir: Path,
     rollout_username: str,
     max_turns: int,
 ) -> str:
@@ -297,7 +332,7 @@ def run_worker(
                 wd = str(args.get("working_directory") or workdir)
                 try:
                     resolved_wd = Path(wd).resolve()
-                    allowed_roots = [workdir.resolve(), next_rollout_dir.resolve()]
+                    allowed_roots = [workdir.resolve(), next_rollout_dir.resolve(), shared_workspace_dir.resolve()]
                     if previous_rollout_dir is not None:
                         allowed_roots.append(previous_rollout_dir.resolve())
                     safe_wd = str(workdir)
@@ -522,6 +557,9 @@ def main() -> None:
         previous_path = Path(latest_ptr.read_text(encoding="utf-8").strip())
         if previous_path.exists():
             previous_rollout_dir = previous_path
+    shared_workspace_dir = rollout_root / "shared_workspace"
+    shared_workspace_dir.mkdir(parents=True, exist_ok=True)
+
     parent_pool: list[Path] = load_parent_pool(parent_pool_path)
     if not parent_pool and previous_rollout_dir is not None:
         parent_pool = [previous_rollout_dir]
@@ -645,6 +683,7 @@ def main() -> None:
                         "dataset_row": model_visible_row,
                         "previous_rollout_dir": str(sampled_parent) if sampled_parent else None,
                         "next_rollout_dir": str(next_rollout_dir),
+                        "shared_workspace_dir": str(shared_workspace_dir),
                         "rollout_username": rollout_username,
                     },
                     ensure_ascii=False,
@@ -652,6 +691,8 @@ def main() -> None:
                 ),
                 encoding="utf-8",
             )
+
+            shared_snapshot = _snapshot_workspace_files(shared_workspace_dir)
 
             worker_text = run_worker(
                 api_key=api_key,
@@ -661,9 +702,11 @@ def main() -> None:
                 workdir=temp_dir,
                 previous_rollout_dir=sampled_parent,
                 next_rollout_dir=next_rollout_dir,
+                shared_workspace_dir=shared_workspace_dir,
                 rollout_username=rollout_username,
                 max_turns=args.max_turns,
             )
+            _cleanup_rollout_shared_writes(shared_workspace_dir, shared_snapshot)
             reported_problem_uid, reported_task_id, submitted_answer = load_rollout_answer(temp_dir, worker_text)
             reward = compute_rollout_reward(
                 submitted_answer=submitted_answer,
