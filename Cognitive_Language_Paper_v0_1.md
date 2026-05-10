@@ -56,20 +56,31 @@ V. Artificial Cultural Evolution Architecture
 - Architecture Overview
 - Hereditary Ecology Core Mapping
 - Fixed Constructor and Mutable Culture
+- Primitive Physics and Evolved Filters
 - Transmission, Storage, Carryover, Seed, and Archive
+- Compaction as Transmission Bottleneck
 - Architecture Evolution
 - Ecology, Competition, and Engineered Drives
 - Process Manifold and Policy-Level Heredity
 - Representation Freedom and Protocol
 - Dual Inheritance Metrics
 - Measuring Fitness
+- Archive Visibility, Uptake, and Producer Credit
 - Git Ecology Mechanics
 - Names and Standardization
 - Two Views of Cultural Evolution
 - What Is Under Differential Pressure
 - Cross-Inheritance Filters
+- Bounded Attention as Root Scarcity
+- Vertical Competition and Delayed Reproductive Value
+- Minimal Selection Loop
 - Minimal Practical System Picture
+- Practical First Implementation
+- Four-Channel Architecture and Ephemeral Signaling
 - Differential Persistence and Consequence
+- Consequence and Moving Targets
+- Option Value Rather Than Complexity
+- Operational Failure Modes and Counterpressures
 - Core Summary
 
 VI. Operational Substrate and Tooling
@@ -1171,6 +1182,53 @@ The design principle remains:
 fix the constructor; fix the minimal protocol; fix the scarcity; let culture
 evolve.
 
+### Primitive Physics and Evolved Filters
+
+The system should not hand-code a mature culture. If every trust rule, archive
+filter, reputation mechanism, artifact format, evaluator convention, role, and
+review practice is specified in advance, then the result is a human-designed
+institution rather than an evolving process culture. But the opposite extreme
+also fails. If nothing is fixed, agents can drift, self-certify, preserve
+useless artifacts, or redefine success.
+
+The useful distinction is between primitive physics and cultural filters.
+Primitive physics should be fixed or slow-changing. Cultural filters should
+evolve.
+
+Primitive physics includes:
+
+- fresh episode starts
+- bounded context
+- bounded seed size
+- bounded archive retrieval
+- compute, tool use, and attention costs
+- current-run scoring that the current run cannot rewrite
+- artifact effects that matter only through future reconstruction or use
+- lineage continuation and artifact visibility tied to downstream consequence
+
+These are the artificial equivalents of scarcity, mortality, locality,
+attention limits, and physical consequence. They are not the final culture.
+They are the conditions under which culture must regulate itself.
+
+Above this layer, the system should allow evolving filters:
+
+- trust rules
+- provenance norms
+- deprecation procedures
+- archive conventions
+- review practices
+- curator roles
+- dependency policies
+- citation systems
+- warning formats
+- evaluator-building traditions
+- problem taxonomies
+- seed-writing conventions
+
+The compact rule is: fix consequence, not doctrine. The constitution should
+mostly create the channel through which filters can be proposed, inherited,
+tested, and discarded.
+
 ### Transmission, Storage, Carryover, Seed, and Archive
 
 Storage is not transmission. Transmission happens only when externally stored
@@ -1197,6 +1255,41 @@ Fitness intuition:
 
 Selection on reuse alone risks pure memetics. Selection on task score alone
 risks benchmark plateau. The channels must interact but remain distinguishable.
+
+### Compaction as Transmission Bottleneck
+
+Compaction is not only a context-management trick. It is the hereditary
+mechanism that turns a messy rollout into a bounded continuation object.
+
+The basic transition is:
+
+workspace / lifetime trace -> compaction -> lineage seed or carried-forward
+artifact -> fresh descendant reconstruction.
+
+The workspace is too noisy to inherit wholesale. A single note is usually too
+compressed. A useful seed sits between these extremes: enough structure to let a
+fresh child reconstruct useful process, not enough structure to avoid
+compression pressure.
+
+This makes seed-writing itself evolvable. A good seed is not a transcript. It
+is a compact process packet that tells descendants:
+
+- what to attend to
+- what to ignore
+- what worked
+- what failed
+- which tools matter
+- which archive pointers are trusted
+- which warnings are live
+- which assumptions are fragile
+- which mutations are promising
+- how to allocate scarce effort
+
+Therefore the system is not selecting only for better answers. It is selecting
+for better ways of compressing a lifetime into a descendant-operable form.
+Ordinary compaction asks what should survive so the next session can continue.
+Evolutionary compaction asks which compressed seeds produce better descendants
+over many generations.
 
 ### Architecture Evolution
 
@@ -1360,6 +1453,43 @@ successfully adapted, and retained because they keep helping. Useful measures:
 Producer-written claims can provide provenance and local notes, but durable
 public reputation should come mainly from downstream consumers.
 
+### Archive Visibility, Uptake, and Producer Credit
+
+In the archive channel, artifact fitness is future visibility under validated
+uptake. The analog of reproduction is not biological offspring. It is future
+influence: retrieval probability, recommendation prominence, dependency status,
+inclusion in seeds, adaptation into new versions, and survival through
+deprecation pressure.
+
+The archive should distinguish exposure, attention, and uptake.
+
+- Exposure: the artifact was available.
+- Attention: a later run inspected or read it.
+- Uptake: a later run incorporated, copied, adapted, executed, depended on, or
+  carried it forward in a way associated with success.
+
+Only uptake should strongly affect artifact fitness. Search hits, brief reads,
+and producer claims are weak signals. A practical first rule is that an artifact
+counts as adopted only if it is carried into a child seed, copied or modified
+into a derivative artifact, imported as a dependency, used by an evaluator or
+workflow, or nominated by a downstream consumer with evidence.
+
+This avoids over-designing causal attribution. Natural selection does not know
+perfect causal credit; it uses repeated consequence. The archive can start with
+noisy but grounded association:
+
+- Artifacts carried forward by successful unrelated lineages gain visibility.
+- Artifacts carried forward by failing lineages lose visibility.
+- Artifacts marked misleading by consumers decay.
+- Artifacts that are only exposed or mentioned do not gain much standing.
+
+Producer credit should be a later institution, not the primitive mechanism.
+Directly rewarding producers invites archive spam, self-promotion, inflated
+claims, and artifacts optimized for nomination rather than use. The safer early
+rule is: artifacts compete for visibility; lineages compete for descendants.
+Only after the archive contains enough downstream consumer evidence should
+lineage reputation for producing useful artifacts become a stronger prior.
+
 ### Git Ecology Mechanics
 
 Git is storage before it is ecology. It becomes ecology when:
@@ -1415,6 +1545,14 @@ Artifact-centered view:
 The same system needs both views because artifacts shape agents and agents
 produce artifacts.
 
+From the artifact-centered view, vertical and cross inheritance are not
+fundamentally different kinds of reproduction. Both are cases where a future
+interpreter reconstructs, modifies, trusts, depends on, or preserves a
+structure across a transmission gap. The agent-centered distinction remains
+useful because it asks who inherits from whom, but the artifact-centered
+question is whether the structure survives local tradition or foreign
+interpretation with enough usefulness to remain causally active.
+
 ### What Is Under Differential Pressure
 
 Selection acts on whatever has heritable variation and affects its future
@@ -1462,6 +1600,109 @@ These are analogues of biological compatibility constraints, regulation,
 immune-like filtering, and human peer review, teaching, institutions, citation,
 curricula, and professional norms.
 
+### Bounded Attention as Root Scarcity
+
+Bounded attention, bounded context, and bounded compute are the primitive
+scarcities that make cultural filters necessary. The relevant compute is
+agentic compute: what a rollout can read, inspect, test, reason through, carry
+forward, or afford to ignore.
+
+In a large repository, storage is cheap but visibility is scarce. A file can
+physically persist forever and still be culturally dead if no future agent reads
+it, trusts it, reconstructs from it, or depends on it.
+
+This creates the first meta-problem: given limited context and compute, what
+should the agent attend to? A bad lineage wastes attention on stale notes,
+misleading artifacts, verbose seeds, irrelevant tools, and low-value archive
+branches. A good lineage evolves attention policy:
+
+- read failure evidence before success stories
+- prefer artifacts with downstream consumer evidence
+- distrust producer self-praise
+- run cheap tests before expensive search
+- preserve warnings shorter than procedures
+- summarize tools by interface and failure mode
+- keep archive pointers only if they changed behavior
+- distinguish "mentioned" from "used"
+
+The seed is therefore not merely memory. It is an evolving attention-control
+object. It tells descendants what to read first, what to ignore, what is stale,
+what failed, what changed behavior, what to test before trusting, and how to
+allocate scarce effort. Vertical inheritance becomes selection over ways of
+allocating bounded cognition.
+
+### Vertical Competition and Delayed Reproductive Value
+
+Vertical inheritance has force only if there is differential continuation under
+scarce rollout budget. If every seed continues equally, bad doctrine, bloated
+seeds, stale warnings, fake artifacts, and poor attention policies all persist.
+The system becomes accumulation rather than heredity.
+
+Vertical competition can decide:
+
+- which lineages receive child rollouts
+- which child seed replaces or forks a parent seed
+- which branches are pruned
+- which lineages receive more compute or archive access
+- which unusual lineages are preserved for exploration
+
+This should not be winner-take-all. A simple regime gives each lineage a small
+guaranteed reproduction budget, allocates extra children to stronger lineages,
+reserves exploration budget for young or unusual lineages, and prunes
+repeatedly failing or bloated lineages.
+
+Immediate viability and delayed reproductive value should be separated.
+Immediate score asks whether a child is viable enough to continue: task
+success, partial progress, compute cost, bounded seed quality, evidence, and
+absence of obvious bloat. Delayed score asks whether that child was a good
+ancestor. That can only be known after descendants attempt to reconstruct and
+continue from its seed.
+
+A practical loop is:
+
+1. A parent lineage spawns several children.
+2. Each child attempts tasks and writes a candidate next seed.
+3. Top children by immediate viability enter probation.
+4. Probation seeds receive limited descendant budget.
+5. Descendant performance updates the reproductive credit of the seed.
+6. Seeds whose descendants keep doing well receive more future budget.
+7. Seeds whose descendants fail, bloat, or stagnate are pruned.
+
+This also explains why lineages leave good seeds. A prompt can request useful
+handoff notes, but without reproductive consequence that often becomes ritual
+documentation. A lineage leaves better seeds when better seeds produce better
+descendants, and better descendants receive more continuation.
+
+### Minimal Selection Loop
+
+A minimal ecology can be described as two coupled selection loops.
+
+Vertical lineage loop:
+
+1. A parent lineage has a seed.
+2. Several children start fresh from that seed plus selected archive context.
+3. Each child works in an ephemeral workspace under bounded compute and context.
+4. Each child attempts tasks and writes a candidate next seed.
+5. Immediate viability selects which seeds enter probation.
+6. Descendants from probationary seeds reveal reproductive value.
+7. Lineages with better descendant outcomes receive more future budget.
+
+Archive artifact loop:
+
+1. Rollouts produce local artifacts.
+2. Some artifacts are nominated or copied into public archive space.
+3. Future lineages receive small archive samples.
+4. Some archive artifacts are adopted into code, seeds, dependencies, or
+   workflows.
+5. Artifacts adopted by successful consumers gain visibility.
+6. Artifacts adopted by failing consumers lose visibility.
+7. Artifacts ignored, stale, or warned against decay.
+8. High-visibility artifacts become more likely to shape future rollouts.
+
+Together, seeds preserve lineage depth, archive artifacts spread portable
+structure, rollouts act as temporary phenotypic episodes, and bounded attention
+creates selection pressure.
+
 ### Minimal Practical System Picture
 
 Minimal system:
@@ -1489,6 +1730,92 @@ Four-layer version:
 - Workspace / lifetime phenotype.
 - Lineage seed / vertical culture.
 - Git archive / public culture.
+
+### Practical First Implementation
+
+A first implementation should preserve the heredity structure without trying to
+solve every institutional problem at once.
+
+Start with:
+
+- fixed base model and scaffold
+- fixed task interface
+- bounded seed
+- bounded archive retrieval
+- ephemeral workspace
+- lineage ids
+- artifact ids
+- immediate task verifier
+- simple child selection
+- simple artifact visibility update
+
+Do not start with:
+
+- elaborate reputation markets
+- complex producer credit
+- fully specified skill syntax
+- hand-designed archive bureaucracy
+- perfect causal attribution
+- large institutional role systems
+
+One concrete starter regime is a small active population of lineages. Each
+lineage receives a guaranteed child budget, stronger lineages receive extra
+children, an exploration budget preserves novelty, weak lineages are pruned
+after repeated failure, and strong lineages may fork. Each child writes a
+bounded `next_seed.md`; full workspaces are discarded; seed quality is judged
+mainly by descendant performance rather than immediate aesthetics.
+
+Archive artifacts should have ids, producer lineage, and versions. Retrieval is
+bounded. Artifacts gain visibility when carried forward by successful unrelated
+lineages, lose visibility when carried by failing lineages or warned against,
+and should not initially grant strong producer reward. Public prominence belongs
+to artifacts, not self-described authors.
+
+Each run receives a task, a seed, and a small archive slice. It may write
+arbitrary workspace files, but it must record what it carried forward. Only
+carried-forward artifacts count as strong uptake; weak inspection signals can be
+logged without being heavily rewarded.
+
+### Four-Channel Architecture and Ephemeral Signaling
+
+The durable architecture has constitution, workspace, lineage seed, and archive.
+For multi-agent ecologies, one more channel matters: an ephemeral shared
+workspace for live inter-agent signaling.
+
+The four writable cultural channels are:
+
+- Private workspace: individual lifetime cognition. It is fully writable and
+  deleted after the rollout unless compacted.
+- Shared live workspace: temporary public traces visible to currently active
+  agents. Files vanish when the writer ends or the epoch closes.
+- Lineage seed: private vertical culture written for descendants and selected
+  by descendant-operable continuity.
+- Archive: durable public culture shared across lineages and selected by
+  successful downstream uptake.
+
+The shared live workspace is not a second archive. It is a temporary field in
+which active rollouts can alter one another's local selection environment. It
+might contain failed attempts, partial results, warnings, work-in-progress
+claims, cheap test results, candidate tools, observed artifact failures, or
+requests for missing evaluators.
+
+The system should not hardcode a full social ontology such as REQUEST, OFFER,
+WARNING, REVIEW, BID, and PATCH at the start. Those are already cultural
+institutions. A cleaner primitive is that agents may write files into a shared
+temporary workspace and other active agents may read them under bounded
+attention.
+
+Persistence should not attach to the signal itself. Persistence should depend
+on uptake:
+
+1. Agent A writes trace T into shared space.
+2. Agent B reads T while A is alive.
+3. B uses, copies, tests, or reacts to T.
+4. A ends and T disappears.
+5. Only consequences that B carries into seed, archive, or behavior persist.
+
+The compact rule is: signals die by default; only consequences reproduce. This
+adds a live social layer without making cheap talk directly heritable.
 
 ### Differential Persistence and Consequence
 
@@ -1518,6 +1845,99 @@ Desired loop:
 5. Resulting successes reshape the competitive and archival environment.
 6. New gradients appear.
 
+### Consequence and Moving Targets
+
+The phrase "moving target" hides two different mechanisms. A bad moving target
+is metric capture: the agent edits the verifier for its current task, changes
+its own score, redefines success after acting, promotes its own artifacts
+without downstream uptake, or alters the rules that judge its own continuation.
+This should be blocked by primitive physics.
+
+A good moving target is ecological complexification. Successful artifacts
+change the future archive, tools become dependencies, old solutions create
+maintenance burdens, archive crowding creates retrieval and trust problems,
+lineages specialize, successful methods create harder variants, recombination
+creates new problem classes, and dependency formation creates versioning and
+compatibility pressure.
+
+The top-level continuation filter can remain simple while the world it operates
+on becomes more complex. A good artifact should not merely solve a past task. It
+should become part of the future environment: something to reuse, distrust,
+maintain, compose with, route around, or use to attempt new problems. That is
+the difference between a memory system and a cultural ecology.
+
+### Option Value Rather Than Complexity
+
+The system should not select for complexity itself. Complexity can accumulate as
+bloated seeds, ritual reports, stale procedures, brittle dependencies,
+ungrounded jargon, archive spam, evaluator overfitting, or bureaucracy. Human
+culture also accumulates useless complexity.
+
+The useful target is future option value: persistent ability to create,
+preserve, recombine, and select better future options under scarce attention and
+changing constraints.
+
+Valuable inherited structures are often answer-producing machinery rather than
+object-level answers. Human examples include counting, maps, measurement,
+writing, law, markets, mathematics, experimental method, engineering standards,
+libraries, schools, software, and institutions. AI analogues include
+evaluators, test generators, problem taxonomies, tool interfaces, failure
+libraries, repair procedures, retrieval policies, dependency maps, trust
+markers, process compression, deprecation norms, and archive navigation aids.
+
+A useful metric asks whether inherited structure increased future option value.
+Approximations include transfer to perturbed tasks, lower search cost, improved
+descendant performance, successful cross-lineage adoption, better failure
+recovery, reduced archive confusion, improved ability to evaluate future
+artifacts, and creation of new productive problem classes.
+
+Complexification is not the goal. Reusable constraint-management is the goal.
+
+### Operational Failure Modes and Counterpressures
+
+Several failure modes should be treated as central design tests.
+
+Seed bloat: seeds become long, vague, and expensive to reconstruct.
+Counterpressures include seed size limits, descendant performance, context-cost
+penalties, and compression pressure.
+
+Ritual documentation: agents write reports because prompted, but descendants do
+not use them. Counterpressures include scoring only descendant-operable seeds
+and giving little value to self-report without later uptake.
+
+Archive spam: lineages flood the archive with artifacts. Counterpressures
+include stricter archive admission than seed continuation, visibility based on
+consumer adoption, and no direct reward for producing artifacts.
+
+Producer self-promotion: lineages claim broad usefulness without evidence.
+Counterpressures include consumer-written uptake and treating producer claims as
+weak provenance rather than reputation.
+
+Popular but brittle artifacts: artifacts spread because they are easy to
+understand, not because they are robust. Counterpressures include downstream
+performance correction, decay under failure, and perturbation tests for
+high-visibility artifacts.
+
+Stagnant old lineages: long-lived lineages monopolize resources without
+improving. Counterpressures include age discounting, recent-performance
+weighting, stagnation penalties, and exploration budget for young lineages.
+
+Shallow novelty: cross-lineage borrowing creates many variants but little depth.
+Counterpressures include vertical continuity, descendant viability, and
+multigeneration lineage tracking.
+
+Narrow depth: vertical lineages become powerful but isolated. Counterpressures
+include archive sampling, portability pressure, and cross-lineage adoption.
+
+Metric capture: agents alter what counts as success. Counterpressures include
+uneditable current-run scoring, delayed validation for evaluator changes, and
+slow externally compared constitutional changes.
+
+Static benchmark plateau: the system optimizes a fixed task distribution
+without creating new gradients. Counterpressures include task variation, archive
+consequences, dependency formation, shifting problem pools, and maintenance
+burdens created by prior success.
+
 ### Core Summary
 
 - Base LLM: stable cognitive architecture.
@@ -1528,6 +1948,12 @@ Desired loop:
 - Rollout: temporary phenotype/interactor.
 - Tasks and budgets: ecology.
 - Selection: differential continuation, uptake, trust, reuse, and dependency.
+- Compaction: the transmission bottleneck that turns a rollout into a bounded
+  seed or carried artifact.
+- Bounded attention: the root scarcity that makes filters, indexes, trust, and
+  seed discipline necessary.
+- Archive visibility: artifact fitness expressed as future influence under
+  validated uptake.
 
 The private seed is not DNA. It is vertically transmitted culture. Git is not
 automatically an ecology. It becomes one when artifacts compete for scarce
@@ -1536,6 +1962,11 @@ attention, trust, context, dependency, validation, and downstream use.
 The agent-centered view asks which lineages continue. The artifact-centered view
 asks which artifacts keep getting reconstructed. Both are required because
 agents and artifacts reproduce each other.
+
+The design principle is fixed primitive consequence, evolvable cultural filters,
+dual inheritance channels, delayed selection, and artifact visibility through
+successful adoption. Do not select for complexity itself. Select for future
+option value under bounded attention and changing constraints.
 
 ## VI. Operational Substrate and Tooling
 
@@ -2261,15 +2692,32 @@ Workspace:
 The local, writable, ephemeral environment of one rollout. It is an episode of
 work, not the inherited object.
 
+Shared live workspace:
+
+A temporary public environment visible to currently active rollouts. Its traces
+die by default unless another agent carries their consequences into behavior,
+seed, or archive.
+
 Lineage seed:
 
 A bounded inherited process packet passed from parent to child. It is vertical
 culture, not literal DNA and not a full workspace dump.
 
+Compaction:
+
+The bottleneck that turns a rollout's noisy workspace or lifetime trace into a
+bounded seed or carried-forward artifact that descendants can reconstruct from.
+
 Archive:
 
 The shared public cultural store from which unrelated lineages can retrieve,
 adapt, validate, and depend on artifacts.
+
+Uptake:
+
+Stronger than exposure or inspection. An artifact is taken up when a later run
+copies, adapts, depends on, executes, includes, or carries it forward in a way
+associated with downstream success.
 
 Immediate viability:
 
@@ -2284,6 +2732,18 @@ Archive fitness:
 
 Whether unrelated lineages retrieve, adapt, validate, and benefit from a public
 artifact.
+
+Primitive physics:
+
+The fixed or slow-changing constraints that make selection possible: fresh
+starts, bounded context, bounded inheritance, costly attention, uneditable
+current-run scoring, and downstream consequence.
+
+Option value:
+
+The future usefulness of inherited structure for creating, preserving,
+recombining, and selecting better options under scarce attention and changing
+constraints.
 
 Process language:
 
