@@ -31,3 +31,6 @@ Open ended RSI
   - completed rollouts are skipped, partial tasks continue from missing rollout indices;
   - parent lineage candidates are persisted under `--rollout-temp-root/latest_parent_pool.json`, so resume restores the exact parent pool without replaying old tasks;
   - disable this with `--no-resume`.
+- Manual iteration:
+  - use `--step` to run exactly one task iteration, choosing the first incomplete task from the resume log or the next new task;
+  - use `--all-tasks --start-task-index N --max-tasks 1` to run a specific shuffled dataset task index.

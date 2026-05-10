@@ -140,6 +140,7 @@ def iter_tasks(
     question_key: str | None,
     answer_key: str | None,
     id_key: str | None,
+    start_task_index: int = 0,
     max_tasks: int | None = None,
 ):
     loader = HFDatasetDataLoader(
@@ -151,11 +152,15 @@ def iter_tasks(
         seed=seed,
     )
 
+    yielded = 0
     for index, batch in enumerate(loader):
-        if max_tasks is not None and index >= max_tasks:
+        if index < start_task_index:
+            continue
+        if max_tasks is not None and yielded >= max_tasks:
             break
         row = batch[0]
-        yield _task_from_row(
+        yielded += 1
+        yield index, _task_from_row(
             row=row,
             question_key=question_key,
             answer_key=answer_key,
@@ -607,7 +612,18 @@ def parse_args() -> argparse.Namespace:
         "--max-tasks",
         type=int,
         default=None,
-        help="Optional cap on number of tasks when --all-tasks is set.",
+        help="Optional number of tasks to process when --all-tasks is set.",
+    )
+    parser.add_argument(
+        "--start-task-index",
+        type=int,
+        default=0,
+        help="Start index in the shuffled dataset stream when --all-tasks or --step is set.",
+    )
+    parser.add_argument(
+        "--step",
+        action="store_true",
+        help="Process exactly the next incomplete task iteration from resume state, then exit.",
     )
     parser.add_argument("--runs-log", default="logs/runs.jsonl")
     parser.add_argument("--outputs-dir", default="logs/episodes")
@@ -687,30 +703,6 @@ def main() -> None:
             return rng.sample(successes, target_size)
         return [rng.choice(successes) for _ in range(target_size)]
 
-    if args.all_tasks:
-        tasks = iter_tasks(
-            dataset_name=args.dataset_name,
-            split=args.split,
-            config_name=args.config_name,
-            seed=args.seed,
-            question_key=args.question_key,
-            answer_key=args.answer_key,
-            id_key=args.id_key,
-            max_tasks=args.max_tasks,
-        )
-    else:
-        tasks = [
-            sample_task(
-                dataset_name=args.dataset_name,
-                split=args.split,
-                config_name=args.config_name,
-                seed=args.seed,
-                question_key=args.question_key,
-                answer_key=args.answer_key,
-                id_key=args.id_key,
-            )
-        ]
-
     runs_log_path = Path(args.runs_log)
     task_store_dir = Path(args.task_store_dir)
     existing_records: list[dict[str, Any]] = []
@@ -741,7 +733,58 @@ def main() -> None:
         if existing is None:
             per_task[rollout_idx] = rec
 
-    for task_index, task in enumerate(tasks):
+    def _next_step_task_index() -> int:
+        eligible_indices = [idx for idx in existing_by_task if idx >= args.start_task_index]
+        for idx in sorted(eligible_indices):
+            if len(existing_by_task[idx]) < args.num_rollouts:
+                return idx
+        if eligible_indices:
+            return max(eligible_indices) + 1
+        return args.start_task_index
+
+    if args.step:
+        task_start_index = _next_step_task_index()
+        task_limit = 1
+        tasks = iter_tasks(
+            dataset_name=args.dataset_name,
+            split=args.split,
+            config_name=args.config_name,
+            seed=args.seed,
+            question_key=args.question_key,
+            answer_key=args.answer_key,
+            id_key=args.id_key,
+            start_task_index=task_start_index,
+            max_tasks=task_limit,
+        )
+    elif args.all_tasks:
+        tasks = iter_tasks(
+            dataset_name=args.dataset_name,
+            split=args.split,
+            config_name=args.config_name,
+            seed=args.seed,
+            question_key=args.question_key,
+            answer_key=args.answer_key,
+            id_key=args.id_key,
+            start_task_index=args.start_task_index,
+            max_tasks=args.max_tasks,
+        )
+    else:
+        tasks = [
+            (
+                0,
+                sample_task(
+                    dataset_name=args.dataset_name,
+                    split=args.split,
+                    config_name=args.config_name,
+                    seed=args.seed,
+                    question_key=args.question_key,
+                    answer_key=args.answer_key,
+                    id_key=args.id_key,
+                ),
+            )
+        ]
+
+    for task_index, task in tasks:
         successful_rollouts: list[Path] = []
         existing_task_records = existing_by_task.get(task_index, {})
         problem_uid = compute_problem_uid(
