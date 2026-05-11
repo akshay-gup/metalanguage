@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from utils.hf_datasets import HFDatasetDataLoader
-from utils.openrouter import bash_tool, call_openrouter_with_tools, get_tool_calls
+from utils.openrouter import OpenRouterAPIError, bash_tool, call_openrouter_with_tools, get_tool_calls
 from utils.reward import compute_rollout_reward
 from utils.task_store import (
     compute_problem_uid,
@@ -59,6 +59,15 @@ class ArchiveWorktree:
     path: Path
     branch: str
     base_commit: str
+
+
+@dataclass
+class WorkerResult:
+    final_text: str
+    status: str
+    stop_reason: str | None = None
+    error_code: str | int | None = None
+    error_message: str | None = None
 
 
 def _first_present(row: dict[str, Any], keys: list[str]) -> Any:
@@ -272,6 +281,77 @@ def _cleanup_rollout_shared_writes(root: Path, before: dict[Path, tuple[int, int
             continue
 
 
+LIMIT_ERROR_CODES = {
+    "context_length_exceeded",
+    "max_tokens_exceeded",
+    "token_limit_exceeded",
+    "string_too_long",
+}
+
+LIMIT_ERROR_PATTERNS = (
+    "context length",
+    "context window",
+    "maximum context",
+    "max context",
+    "token limit",
+    "maximum prompt length",
+    "prompt is too long",
+    "input is too long",
+    "string too long",
+)
+
+
+def _text_contains_limit_error(value: Any) -> bool:
+    text = json.dumps(value, default=str).lower() if not isinstance(value, str) else value.lower()
+    return any(pattern in text for pattern in LIMIT_ERROR_PATTERNS)
+
+
+def _response_limit_stop(response_json: dict[str, Any]) -> tuple[str | None, str | int | None, str | None]:
+    """Return limit stop metadata if OpenRouter encoded a limit as a successful response."""
+    errors: list[dict[str, Any]] = []
+    error = response_json.get("error")
+    if isinstance(error, dict):
+        errors.append(error)
+    response = response_json.get("response")
+    if isinstance(response, dict):
+        response_error = response.get("error")
+        if isinstance(response_error, dict):
+            errors.append(response_error)
+
+    for error in errors:
+        code = error.get("code")
+        message = str(error.get("message") or "")
+        if code in LIMIT_ERROR_CODES or _text_contains_limit_error(error):
+            return "limit_exceeded", code, message
+
+    incomplete = response_json.get("incomplete_details")
+    if isinstance(incomplete, dict):
+        reason = incomplete.get("reason")
+        if reason == "max_output_tokens" or _text_contains_limit_error(incomplete):
+            return "limit_exceeded", reason, str(incomplete)
+
+    if response_json.get("status") == "incomplete" and _text_contains_limit_error(response_json):
+        return "limit_exceeded", response_json.get("status"), str(response_json.get("incomplete_details") or "")
+
+    if response_json.get("status") == "failed" and _text_contains_limit_error(response_json):
+        return "limit_exceeded", response_json.get("status"), str(response_json.get("error") or "")
+
+    for item in response_json.get("output", []):
+        if not isinstance(item, dict):
+            continue
+        finish_reason = item.get("finish_reason") or item.get("status")
+        if finish_reason == "length":
+            return "limit_exceeded", "length", "OpenRouter returned finish/status length."
+
+    return None, None, None
+
+
+def _api_error_limit_stop(exc: OpenRouterAPIError) -> tuple[str | None, str | int | None, str | None]:
+    if exc.error_code in LIMIT_ERROR_CODES or _text_contains_limit_error(exc.response_body):
+        return "limit_exceeded", exc.error_code, exc.message
+    return None, None, None
+
+
 def run_worker(
     *,
     api_key: str,
@@ -284,7 +364,7 @@ def run_worker(
     archive_repo_dir: Path,
     shared_workspace_dir: Path,
     rollout_username: str,
-) -> str:
+) -> WorkerResult:
     """Run a multi-turn tool-calling worker loop and return final assistant text."""
     conversation: list[dict[str, Any]] = [
         {
@@ -309,17 +389,39 @@ def run_worker(
 
     final_text = ""
     while True:
-        response = call_openrouter_with_tools(
-            api_key=api_key,
-            model=model,
-            input_items=conversation,
-            tools=[bash_tool],
-            tool_choice="auto",
-            timeout=120,
-        )
+        try:
+            response = call_openrouter_with_tools(
+                api_key=api_key,
+                model=model,
+                input_items=conversation,
+                tools=[bash_tool],
+                tool_choice="auto",
+                timeout=120,
+            )
+        except OpenRouterAPIError as exc:
+            status, code, message = _api_error_limit_stop(exc)
+            if status is not None:
+                return WorkerResult(
+                    final_text=final_text,
+                    status=status,
+                    stop_reason="api_limit_error",
+                    error_code=code,
+                    error_message=message,
+                )
+            raise
 
         if not isinstance(response, dict):
             raise RuntimeError("Unexpected non-JSON response in non-stream mode.")
+
+        status, code, message = _response_limit_stop(response)
+        if status is not None:
+            return WorkerResult(
+                final_text=_extract_text_from_response(response) or final_text,
+                status=status,
+                stop_reason="response_limit",
+                error_code=code,
+                error_message=message,
+            )
 
         tool_calls = get_tool_calls(response)
         if not tool_calls:
@@ -396,7 +498,7 @@ def run_worker(
                 }
             )
 
-    return final_text
+    return WorkerResult(final_text=final_text, status="completed", stop_reason="final_message")
 
 
 def persist_episode_outputs(temp_dir: Path, dest_root: Path, task_id: str) -> Path:
@@ -848,7 +950,7 @@ def main() -> None:
             )
 
             try:
-                worker_text = run_worker(
+                worker_result = run_worker(
                     api_key=api_key,
                     model=args.model,
                     question=task.question,
@@ -866,16 +968,25 @@ def main() -> None:
                     worktree=archive_worktree,
                     git_lock=archive_git_lock,
                 )
-            reported_problem_uid, reported_task_id, submitted_answer = load_rollout_answer(temp_dir, worker_text)
-            reward = compute_rollout_reward(
-                submitted_answer=submitted_answer,
-                expected_task_id=task.task_id,
-                expected_problem_uid=problem_uid,
-                reported_task_id=reported_task_id,
-                reported_problem_uid=reported_problem_uid,
-                private_problem_path=private_problem_path,
-            )
-            solved = bool(reward >= 1.0)
+            if worker_result.status == "completed":
+                reported_problem_uid, reported_task_id, submitted_answer = load_rollout_answer(
+                    temp_dir,
+                    worker_result.final_text,
+                )
+                reward = compute_rollout_reward(
+                    submitted_answer=submitted_answer,
+                    expected_task_id=task.task_id,
+                    expected_problem_uid=problem_uid,
+                    reported_task_id=reported_task_id,
+                    reported_problem_uid=reported_problem_uid,
+                    private_problem_path=private_problem_path,
+                )
+                solved = bool(reward >= 1.0)
+            else:
+                reported_problem_uid = None
+                reported_task_id = None
+                reward = 0.0
+                solved = False
 
             output_dir = persist_episode_outputs(
                 temp_dir,
@@ -896,6 +1007,10 @@ def main() -> None:
                 "reported_task_id": reported_task_id,
                 "parent_rollout_dir": str(sampled_parent) if sampled_parent else None,
                 "next_rollout_dir": str(next_rollout_dir),
+                "worker_status": worker_result.status,
+                "worker_stop_reason": worker_result.stop_reason,
+                "worker_error_code": worker_result.error_code,
+                "worker_error_message": worker_result.error_message,
                 "solved": solved,
                 "reward": reward,
                 "output_path": str(output_dir),

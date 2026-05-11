@@ -10,6 +10,29 @@ OPENROUTER_RESPONSES_URL = "https://openrouter.ai/api/v1/responses"
 ToolChoice = Literal["auto", "none"] | dict[str, str]
 
 
+class OpenRouterAPIError(RuntimeError):
+    """Structured OpenRouter API error."""
+
+    def __init__(self, status_code: int, response_body: dict[str, Any] | str):
+        self.status_code = status_code
+        self.response_body = response_body
+        if isinstance(response_body, dict):
+            error = response_body.get("error")
+            if isinstance(error, dict):
+                self.error_code = error.get("code")
+                self.message = str(error.get("message") or "")
+                self.metadata = error.get("metadata")
+            else:
+                self.error_code = None
+                self.message = str(response_body)
+                self.metadata = None
+        else:
+            self.error_code = None
+            self.message = response_body
+            self.metadata = None
+        super().__init__(f"OpenRouter API request failed ({status_code}): {self.message}")
+
+
 def call_openrouter_with_tools(
     *,
     api_key: str,
@@ -55,9 +78,11 @@ def call_openrouter_with_tools(
     )
 
     if not response.ok:
-        raise RuntimeError(
-            f"OpenRouter API request failed ({response.status_code}): {response.text}"
-        )
+        try:
+            response_body: dict[str, Any] | str = response.json()
+        except ValueError:
+            response_body = response.text
+        raise OpenRouterAPIError(response.status_code, response_body)
 
     if stream:
         return response
