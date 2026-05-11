@@ -21,11 +21,13 @@ Open ended RSI
   4. expose `archive/world_repo` by default as the durable cross-lineage Git archive available to every rollout (override with `--archive-repo-dir`),
      using a per-rollout temporary worktree so only committed archive changes are merged back and uncommitted archive edits are discarded,
   5. write the original dataset row as-is under `--task-store-dir`, while model-visible workspace task files redact solution-like fields,
-  6. run OpenRouter worker with `run_bash` tool access to produce `solution.json` (`problem_uid` + `task_id` + `answer`, with `solution.md` fallback),
-     while allowing access to the current workspace, parent rollout seed, next rollout seed, shared workspace, and archive repo,
+  6. run OpenRouter worker with `run_bash` tool access and a minimal fixed prompt that only provides the working directory; operating doctrine is expected to come from the inherited parent seed,
   7. score solution via `utils/reward.py`, grounding correctness against the private stored row and validating reported ids,
   8. after all child rollouts for the task finish, retain only successful rollout workspaces as parent candidates for the next task,
   9. append run metadata to a growing JSONL log and print one-line summary per rollout.
+- Lineage behavior:
+  - the first task can bootstrap without a parent seed;
+  - after bootstrap, missing parent seeds are terminal and the loop will not silently continue as a fresh lineage.
 - Resume behavior:
   - runs automatically resume from existing `--runs-log` entries that match dataset/split/model/seed/generation/config/rollout-count;
   - completed rollouts are skipped, partial tasks continue from missing rollout indices;

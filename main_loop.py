@@ -374,14 +374,7 @@ def run_worker(
                 {
                     "type": "input_text",
                     "text": (
-                        "Read task.json, inspect the workspace, and proceed. "
-                        f"Working directory: {workdir}. "
-                        f"Use next_rollout_dir as your vertical seed for descendants. "
-                        f"Use archive_repo_dir ({archive_repo_dir}) as the durable cross-lineage git archive. "
-                        f"Use shared_workspace_dir only for ephemeral live coordination. "
-                        "Write final output to solution.json with keys "
-                        '{"problem_uid": "...", "task_id": "...", "answer": "..."}; '
-                        "you may also write solution.md."
+                        f"Working directory: {workdir}."
                     ),
                 }
             ],
@@ -913,6 +906,11 @@ def main() -> None:
             sampled_parent: Path | None = (
                 parent_pool[rollout_index % len(parent_pool)] if parent_pool else None
             )
+            if sampled_parent is None and task_index > 0:
+                raise RuntimeError(
+                    "No parent seed available for non-bootstrap rollout; "
+                    f"task_index={task_index} rollout_index={rollout_index}"
+                )
             archive_worktree = create_archive_worktree(
                 archive_repo_dir=archive_repo_dir,
                 worktree_root=archive_worktree_root,
@@ -1136,8 +1134,11 @@ def main() -> None:
             latest_ptr.write_text(str(parent_pool[0]), encoding="utf-8")
             save_parent_pool(parent_pool_path, parent_pool)
         else:
-            parent_pool = []
             save_parent_pool(parent_pool_path, parent_pool)
+            raise RuntimeError(
+                f"No successful parent seeds produced for task_index={task_index}; "
+                "lineage cannot advance without a parent seed."
+            )
 
         failed_results = [result for result in results if result.error]
         if failed_results:
