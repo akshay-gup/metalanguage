@@ -284,7 +284,6 @@ def run_worker(
     archive_repo_dir: Path,
     shared_workspace_dir: Path,
     rollout_username: str,
-    max_turns: int,
 ) -> str:
     """Run a multi-turn tool-calling worker loop and return final assistant text."""
     conversation: list[dict[str, Any]] = [
@@ -309,14 +308,13 @@ def run_worker(
     ]
 
     final_text = ""
-    for _ in range(max_turns):
+    while True:
         response = call_openrouter_with_tools(
             api_key=api_key,
             model=model,
             input_items=conversation,
             tools=[bash_tool],
             tool_choice="auto",
-            max_output_tokens=4000,
             timeout=120,
         )
 
@@ -602,7 +600,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--question-key", default=None)
     parser.add_argument("--answer-key", default=None)
     parser.add_argument("--id-key", default=None)
-    parser.add_argument("--max-turns", type=int, default=10)
     parser.add_argument(
         "--all-tasks",
         action="store_true",
@@ -862,7 +859,6 @@ def main() -> None:
                     archive_repo_dir=archive_worktree.path,
                     shared_workspace_dir=shared_workspace_dir,
                     rollout_username=rollout_username,
-                    max_turns=args.max_turns,
                 )
             finally:
                 archive_result = finalize_archive_worktree(

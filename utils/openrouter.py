@@ -17,7 +17,7 @@ def call_openrouter_with_tools(
     input_items: list[dict[str, Any]] | str,
     tools: list[dict[str, Any]] | None = None,
     tool_choice: ToolChoice = "auto",
-    max_output_tokens: int = 9000,
+    max_output_tokens: int | None = None,
     stream: bool = False,
     timeout: int = 60,
     reasoning_effort: Literal["low", "medium", "high"] | None = None,
@@ -30,9 +30,11 @@ def call_openrouter_with_tools(
     payload: dict[str, Any] = {
         "model": model,
         "input": input_items,
-        "max_output_tokens": max_output_tokens,
         "stream": stream,
     }
+
+    if max_output_tokens is not None:
+        payload["max_output_tokens"] = max_output_tokens
 
     if tools is not None:
         payload["tools"] = tools
