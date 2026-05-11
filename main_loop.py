@@ -52,6 +52,7 @@ class RolloutResult:
     record: dict[str, Any]
     successful_dir: Path | None
     summary: str
+    error: str | None = None
 
 
 @dataclass
@@ -950,23 +951,44 @@ def main() -> None:
             )
 
             try:
-                worker_result = run_worker(
-                    api_key=api_key,
-                    model=args.model,
-                    question=task.question,
-                    task_id=task.task_id,
-                    workdir=temp_dir,
-                    previous_rollout_dir=sampled_parent,
-                    next_rollout_dir=next_rollout_dir,
-                    archive_repo_dir=archive_worktree.path,
-                    shared_workspace_dir=shared_workspace_dir,
-                    rollout_username=rollout_username,
-                )
-            finally:
-                archive_result = finalize_archive_worktree(
-                    archive_repo_dir=archive_repo_dir,
-                    worktree=archive_worktree,
-                    git_lock=archive_git_lock,
+                try:
+                    worker_result = run_worker(
+                        api_key=api_key,
+                        model=args.model,
+                        question=task.question,
+                        task_id=task.task_id,
+                        workdir=temp_dir,
+                        previous_rollout_dir=sampled_parent,
+                        next_rollout_dir=next_rollout_dir,
+                        archive_repo_dir=archive_worktree.path,
+                        shared_workspace_dir=shared_workspace_dir,
+                        rollout_username=rollout_username,
+                    )
+                except BaseException as exc:
+                    worker_result = WorkerResult(
+                        final_text="",
+                        status="error",
+                        stop_reason=type(exc).__name__,
+                        error_code=None,
+                        error_message=str(exc),
+                    )
+                finally:
+                    archive_result = finalize_archive_worktree(
+                        archive_repo_dir=archive_repo_dir,
+                        worktree=archive_worktree,
+                        git_lock=archive_git_lock,
+                    )
+            except BaseException as exc:
+                archive_result = {
+                    **archive_result,
+                    "archive_finalize_error": f"{type(exc).__name__}: {exc}",
+                }
+                worker_result = WorkerResult(
+                    final_text="",
+                    status="error",
+                    stop_reason=type(exc).__name__,
+                    error_code=None,
+                    error_message=str(exc),
                 )
             if worker_result.status == "completed":
                 reported_problem_uid, reported_task_id, submitted_answer = load_rollout_answer(
@@ -1027,11 +1049,14 @@ def main() -> None:
                 f"gen={args.generation} seed={args.seed} task_index={task_index} rollout_index={rollout_index} "
                 f"rollout_username={rollout_username} task_id={task.task_id} solved={solved} output={output_dir}"
             )
+            if worker_result.status == "error":
+                summary += f" error={worker_result.stop_reason}"
             return RolloutResult(
                 rollout_index=rollout_index,
                 record=record,
                 successful_dir=next_rollout_dir if solved else None,
                 summary=summary,
+                error=worker_result.error_message if worker_result.status == "error" else None,
             )
 
         missing_rollout_indices: list[int] = []
@@ -1047,7 +1072,6 @@ def main() -> None:
 
         shared_snapshot = _snapshot_workspace_files(shared_workspace_dir)
         results: list[RolloutResult] = []
-        errors: list[tuple[int, BaseException]] = []
         if missing_rollout_indices:
             with ThreadPoolExecutor(max_workers=len(missing_rollout_indices)) as executor:
                 futures = {
@@ -1059,13 +1083,47 @@ def main() -> None:
                     try:
                         results.append(future.result())
                     except BaseException as exc:
-                        errors.append((rollout_index, exc))
+                        results.append(
+                            RolloutResult(
+                                rollout_index=rollout_index,
+                                record={
+                                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                                    "generation": args.generation,
+                                    "seed": args.seed,
+                                    "task_index": task_index,
+                                    "rollout_index": rollout_index,
+                                    "rollout_username": rollout_usernames[rollout_index],
+                                    "task_id": task.task_id,
+                                    "problem_uid": problem_uid,
+                                    "reported_problem_uid": None,
+                                    "reported_task_id": None,
+                                    "parent_rollout_dir": None,
+                                    "next_rollout_dir": None,
+                                    "worker_status": "error",
+                                    "worker_stop_reason": type(exc).__name__,
+                                    "worker_error_code": None,
+                                    "worker_error_message": str(exc),
+                                    "solved": False,
+                                    "reward": 0.0,
+                                    "output_path": None,
+                                    "private_problem_path": str(private_problem_path),
+                                    "dataset_name": args.dataset_name,
+                                    "split": args.split,
+                                    "model": args.model,
+                                    "num_rollouts": args.num_rollouts,
+                                    "config_name": args.config_name,
+                                },
+                                successful_dir=None,
+                                summary=(
+                                    f"gen={args.generation} seed={args.seed} task_index={task_index} "
+                                    f"rollout_index={rollout_index} rollout_username={rollout_usernames[rollout_index]} "
+                                    f"task_id={task.task_id} solved=False output=None error={type(exc).__name__}"
+                                ),
+                                error=str(exc),
+                            )
+                        )
 
         _cleanup_rollout_shared_writes(shared_workspace_dir, shared_snapshot)
-
-        if errors:
-            details = "; ".join(f"rollout {idx}: {exc}" for idx, exc in sorted(errors, key=lambda item: item[0]))
-            raise RuntimeError(f"One or more rollouts failed: {details}")
 
         for result in sorted(results, key=lambda item: item.rollout_index):
             append_run_log(runs_log_path, result.record)
@@ -1080,6 +1138,14 @@ def main() -> None:
         else:
             parent_pool = []
             save_parent_pool(parent_pool_path, parent_pool)
+
+        failed_results = [result for result in results if result.error]
+        if failed_results:
+            details = "; ".join(
+                f"rollout {result.rollout_index}: {result.error}"
+                for result in sorted(failed_results, key=lambda item: item.rollout_index)
+            )
+            raise RuntimeError(f"One or more rollouts failed after logging results: {details}")
 
 
 if __name__ == "__main__":
