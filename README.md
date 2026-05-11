@@ -31,7 +31,7 @@ Open ended RSI
 - Resume behavior:
   - runs automatically resume from existing `--runs-log` entries that match dataset/split/model/seed/generation/config/rollout-count;
   - completed rollouts are skipped, partial tasks continue from missing rollout indices;
-  - parent lineage candidates are persisted under `--rollout-temp-root/latest_parent_pool.json`, so resume restores the exact parent pool without replaying old tasks;
+  - parent lineage candidates are reconstructed from successful completed run records when possible, with `--rollout-temp-root/latest_parent_pool.json` kept as a fallback/cache;
   - disable this with `--no-resume`.
 - Manual iteration:
   - use `--step` to run exactly one task iteration, choosing the first incomplete task from the resume log or the next new task;

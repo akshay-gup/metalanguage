@@ -555,6 +555,38 @@ def save_parent_pool(parent_pool_path: Path, parent_pool: list[Path]) -> None:
     )
 
 
+def latest_successful_parent_pool_from_records(records: list[dict[str, Any]], num_rollouts: int) -> list[Path]:
+    """Reconstruct the latest completed task's successful parent pool from run records."""
+    by_task: dict[int, dict[int, dict[str, Any]]] = {}
+    for rec in records:
+        task_idx = rec.get("task_index")
+        rollout_idx = rec.get("rollout_index")
+        if not isinstance(task_idx, int) or not isinstance(rollout_idx, int):
+            continue
+        if rollout_idx < 0 or rollout_idx >= num_rollouts:
+            continue
+        by_task.setdefault(task_idx, {})[rollout_idx] = rec
+
+    for task_idx in sorted(by_task, reverse=True):
+        per_task = by_task[task_idx]
+        if len(per_task) < num_rollouts:
+            continue
+        successes: list[Path] = []
+        for rollout_idx in sorted(per_task):
+            rec = per_task[rollout_idx]
+            if not bool(rec.get("solved")):
+                continue
+            next_dir = rec.get("next_rollout_dir")
+            if not isinstance(next_dir, str) or not next_dir:
+                continue
+            path = Path(next_dir)
+            if path.exists():
+                successes.append(path)
+        if successes:
+            return successes
+    return []
+
+
 def create_archive_worktree(
     *,
     archive_repo_dir: Path,
@@ -769,19 +801,11 @@ def main() -> None:
     rollout_root.mkdir(parents=True, exist_ok=True)
     archive_worktree_root = rollout_root / "archive_worktrees"
 
-    latest_ptr = rollout_root / "latest_rollout_dir.txt"
     parent_pool_path = rollout_root / "latest_parent_pool.json"
-    previous_rollout_dir: Path | None = None
-    if latest_ptr.exists():
-        previous_path = Path(latest_ptr.read_text(encoding="utf-8").strip())
-        if previous_path.exists():
-            previous_rollout_dir = previous_path
     shared_workspace_dir = rollout_root / "shared_workspace"
     shared_workspace_dir.mkdir(parents=True, exist_ok=True)
 
-    parent_pool: list[Path] = load_parent_pool(parent_pool_path)
-    if not parent_pool and previous_rollout_dir is not None:
-        parent_pool = [previous_rollout_dir]
+    parent_pool: list[Path] = []
     rng = random.Random(args.seed)
 
     def _build_parent_pool(successes: list[Path], target_size: int) -> list[Path]:
@@ -825,6 +849,13 @@ def main() -> None:
         existing = per_task.get(rollout_idx)
         if existing is None:
             per_task[rollout_idx] = rec
+
+    if not args.no_resume:
+        parent_pool = latest_successful_parent_pool_from_records(existing_records, args.num_rollouts)
+        if parent_pool:
+            save_parent_pool(parent_pool_path, parent_pool)
+        else:
+            parent_pool = load_parent_pool(parent_pool_path)
 
     def _next_step_task_index() -> int:
         eligible_indices = [idx for idx in existing_by_task if idx >= args.start_task_index]
@@ -1131,7 +1162,6 @@ def main() -> None:
 
         if successful_rollouts:
             parent_pool = _build_parent_pool(successful_rollouts, args.num_rollouts)
-            latest_ptr.write_text(str(parent_pool[0]), encoding="utf-8")
             save_parent_pool(parent_pool_path, parent_pool)
         else:
             save_parent_pool(parent_pool_path, parent_pool)
