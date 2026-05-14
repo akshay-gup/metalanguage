@@ -282,6 +282,19 @@ def _cleanup_rollout_shared_writes(root: Path, before: dict[Path, tuple[int, int
             continue
 
 
+def copy_seed_workspace(parent_dir: Path, workdir: Path) -> None:
+    """Copy the parent seed workspace into the child's current workspace."""
+    if not parent_dir.exists():
+        return
+    for item in parent_dir.iterdir():
+        dest = workdir / item.name
+        if item.is_dir():
+            shutil.copytree(item, dest, dirs_exist_ok=True)
+        elif item.is_file():
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(item, dest)
+
+
 LIMIT_ERROR_CODES = {
     "context_length_exceeded",
     "max_tokens_exceeded",
@@ -360,8 +373,7 @@ def run_worker(
     question: str,
     task_id: str,
     workdir: Path,
-    previous_rollout_dir: Path | None,
-    next_rollout_dir: Path,
+    next_seed_dir: Path,
     archive_repo_dir: Path,
     shared_workspace_dir: Path,
     rollout_username: str,
@@ -464,12 +476,10 @@ def run_worker(
                     resolved_wd = Path(wd).resolve()
                     allowed_roots = [
                         workdir.resolve(),
-                        next_rollout_dir.resolve(),
+                        next_seed_dir.resolve(),
                         archive_repo_dir.resolve(),
                         shared_workspace_dir.resolve(),
                     ]
-                    if previous_rollout_dir is not None:
-                        allowed_roots.append(previous_rollout_dir.resolve())
                     safe_wd = str(workdir)
                     for root in allowed_roots:
                         if _is_within(resolved_wd, root):
@@ -953,29 +963,27 @@ def main() -> None:
             temp_dir = Path(args.fixed_temp_dir) / f"{task_index:06d}" / f"rollout_{rollout_index:03d}"
             shutil.rmtree(temp_dir, ignore_errors=True)
             temp_dir.mkdir(parents=True, exist_ok=True)
+            if sampled_parent is not None:
+                copy_seed_workspace(sampled_parent, temp_dir)
 
-            next_rollout_dir = rollout_root / (
+            next_seed_dir = temp_dir / "next_seed"
+            next_seed_dir.mkdir(parents=True, exist_ok=True)
+
+            seed_rollout_dir = rollout_root / (
                 f"{task_index:06d}_{_sanitize_for_path(task.task_id)}_{_sanitize_for_path(rollout_username)}"
             )
-            shutil.rmtree(next_rollout_dir, ignore_errors=True)
-            next_rollout_dir.mkdir(parents=True, exist_ok=True)
+            shutil.rmtree(seed_rollout_dir, ignore_errors=True)
+            seed_rollout_dir.mkdir(parents=True, exist_ok=True)
 
-            task_file = temp_dir / "task.json"
+            task_file = temp_dir / "task.md"
             task_file.write_text(
-                json.dumps(
-                    {
-                        "problem_uid": problem_uid,
-                        "dataset_row": model_visible_row,
-                        "previous_rollout_dir": str(sampled_parent) if sampled_parent else None,
-                        "next_rollout_dir": str(next_rollout_dir),
-                        "archive_repo_dir": str(archive_worktree.path),
-                        "archive_main_repo_dir": str(archive_repo_dir),
-                        "shared_workspace_dir": str(shared_workspace_dir),
-                        "rollout_username": rollout_username,
-                    },
-                    ensure_ascii=False,
-                    indent=2,
-                ),
+                "# Task\n\n"
+                f"problem_uid: {problem_uid}\n"
+                f"task_id: {task.task_id}\n\n"
+                "## Dataset Row\n\n"
+                "```json\n"
+                f"{json.dumps(model_visible_row, ensure_ascii=False, indent=2)}\n"
+                "```\n",
                 encoding="utf-8",
             )
 
@@ -987,8 +995,7 @@ def main() -> None:
                         question=task.question,
                         task_id=task.task_id,
                         workdir=temp_dir,
-                        previous_rollout_dir=sampled_parent,
-                        next_rollout_dir=next_rollout_dir,
+                        next_seed_dir=next_seed_dir,
                         archive_repo_dir=archive_worktree.path,
                         shared_workspace_dir=shared_workspace_dir,
                         rollout_username=rollout_username,
@@ -1057,7 +1064,7 @@ def main() -> None:
                 "reported_problem_uid": reported_problem_uid,
                 "reported_task_id": reported_task_id,
                 "parent_rollout_dir": str(sampled_parent) if sampled_parent else None,
-                "next_rollout_dir": str(next_rollout_dir),
+                "next_rollout_dir": str(seed_rollout_dir),
                 "worker_status": worker_result.status,
                 "worker_stop_reason": worker_result.stop_reason,
                 "worker_error_code": worker_result.error_code,
@@ -1080,10 +1087,12 @@ def main() -> None:
             )
             if worker_result.status == "error":
                 summary += f" error={worker_result.stop_reason}"
+            if next_seed_dir.exists():
+                shutil.copytree(next_seed_dir, seed_rollout_dir, dirs_exist_ok=True)
             return RolloutResult(
                 rollout_index=rollout_index,
                 record=record,
-                successful_dir=next_rollout_dir if solved else None,
+                successful_dir=seed_rollout_dir if solved else None,
                 summary=summary,
                 error=worker_result.error_message if worker_result.status == "error" else None,
             )

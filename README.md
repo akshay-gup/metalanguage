@@ -20,10 +20,10 @@ Open ended RSI
   3.5. expose a shared cross-rollout workspace at `--rollout-temp-root/shared_workspace` where any rollout agent can leave files/messages for any other rollout agent (files written by each rollout are cleaned up after that rollout ends),
   4. expose `archive/world_repo` by default as the durable cross-lineage Git archive available to every rollout (override with `--archive-repo-dir`),
      using a per-rollout temporary worktree so only committed archive changes are merged back and uncommitted archive edits are discarded,
-  5. write the original dataset row as-is under `--task-store-dir`, while model-visible workspace task files redact solution-like fields,
+  5. copy the selected parent seed workspace into the child workspace, then write the current task as `task.md` with solution-like fields redacted,
   6. run OpenRouter worker with `run_bash` tool access and a minimal fixed prompt that only provides the working directory; operating doctrine is expected to come from the inherited parent seed,
   7. score solution via `utils/reward.py`, grounding correctness against the private stored row and validating reported ids,
-  8. after all child rollouts for the task finish, retain only successful rollout workspaces as parent candidates for the next task,
+  8. after all child rollouts for the task finish, persist each successful rollout's separate `next_seed/` directory as a parent seed candidate for the next task,
   9. append run metadata to a growing JSONL log and print one-line summary per rollout.
 - Lineage behavior:
   - the first task can bootstrap without a parent seed;
