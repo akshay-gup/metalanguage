@@ -370,8 +370,6 @@ def run_worker(
     *,
     api_key: str,
     model: str,
-    question: str,
-    task_id: str,
     workdir: Path,
     next_seed_dir: Path,
     archive_repo_dir: Path,
@@ -992,8 +990,6 @@ def main() -> None:
                     worker_result = run_worker(
                         api_key=api_key,
                         model=args.model,
-                        question=task.question,
-                        task_id=task.task_id,
                         workdir=temp_dir,
                         next_seed_dir=next_seed_dir,
                         archive_repo_dir=archive_worktree.path,
