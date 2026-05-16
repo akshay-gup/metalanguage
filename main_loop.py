@@ -71,6 +71,9 @@ class WorkerResult:
     error_message: str | None = None
 
 
+SHARED_ATTRIBUTION_FILENAME = ".writers.jsonl"
+
+
 def _first_present(row: dict[str, Any], keys: list[str]) -> Any:
     for key in keys:
         if key in row and row[key] is not None:
@@ -257,9 +260,77 @@ def _snapshot_workspace_files(root: Path) -> dict[Path, tuple[int, int]]:
         if not path.is_file():
             continue
         rel = path.relative_to(root)
+        if rel.name == SHARED_ATTRIBUTION_FILENAME:
+            continue
         stat = path.stat()
         snapshot[rel] = (stat.st_size, stat.st_mtime_ns)
     return snapshot
+
+
+def _shared_workspace_events(
+    *,
+    before: dict[Path, tuple[int, int]],
+    after: dict[Path, tuple[int, int]],
+    task_index: int,
+    task_id: str,
+    rollout_index: int,
+    rollout_username: str,
+    command_index: int,
+    command: str,
+    working_directory: str,
+) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    timestamp = datetime.now(timezone.utc).isoformat()
+    for rel in sorted(set(before) | set(after)):
+        before_sig = before.get(rel)
+        after_sig = after.get(rel)
+        if before_sig == after_sig:
+            continue
+        if before_sig is None:
+            event = "created"
+        elif after_sig is None:
+            event = "deleted"
+        else:
+            event = "modified"
+        record: dict[str, Any] = {
+            "timestamp": timestamp,
+            "task_index": task_index,
+            "task_id": task_id,
+            "rollout_index": rollout_index,
+            "rollout_username": rollout_username,
+            "command_index": command_index,
+            "event": event,
+            "path": str(rel),
+            "working_directory": working_directory,
+            "command": command[:1000],
+        }
+        if before_sig is not None:
+            record["previous_size"] = before_sig[0]
+        if after_sig is not None:
+            record["size"] = after_sig[0]
+        events.append(record)
+    return events
+
+
+def _append_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
+    if not records:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        for record in records:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def _append_shared_attribution(
+    *,
+    shared_workspace_dir: Path,
+    durable_log_path: Path,
+    events: list[dict[str, Any]],
+) -> None:
+    if not events:
+        return
+    _append_jsonl(durable_log_path, events)
+    _append_jsonl(shared_workspace_dir / SHARED_ATTRIBUTION_FILENAME, events)
 
 
 def _cleanup_rollout_shared_writes(root: Path, before: dict[Path, tuple[int, int]]) -> None:
@@ -280,6 +351,9 @@ def _cleanup_rollout_shared_writes(root: Path, before: dict[Path, tuple[int, int
             directory.rmdir()
         except OSError:
             continue
+    attribution_path = root / SHARED_ATTRIBUTION_FILENAME
+    if attribution_path.exists():
+        attribution_path.unlink()
 
 
 def copy_seed_workspace(parent_dir: Path, workdir: Path) -> None:
@@ -374,6 +448,11 @@ def run_worker(
     next_seed_dir: Path,
     archive_repo_dir: Path,
     shared_workspace_dir: Path,
+    shared_workspace_write_log: Path,
+    shared_workspace_lock: threading.Lock,
+    task_index: int,
+    task_id: str,
+    rollout_index: int,
     rollout_username: str,
 ) -> WorkerResult:
     """Run a multi-turn tool-calling worker loop and return final assistant text."""
@@ -390,6 +469,7 @@ def run_worker(
     ]
 
     final_text = ""
+    command_index = 0
     while True:
         try:
             response = call_openrouter_with_tools(
@@ -467,6 +547,7 @@ def run_worker(
             elif not command:
                 tool_result = {"error": "missing or malformed 'command' argument"}
             else:
+                command_index += 1
                 wd = str(args.get("working_directory") or workdir)
                 try:
                     resolved_wd = Path(wd).resolve()
@@ -483,11 +564,41 @@ def run_worker(
                             break
                 except Exception:
                     safe_wd = str(workdir)
-                tool_result = _run_bash_tool(
-                    command=command,
-                    working_directory=safe_wd,
-                    rollout_username=rollout_username,
-                )
+                # A bash command can touch the shared workspace through absolute paths,
+                # so serialize command execution while diffing for reliable attribution.
+                with shared_workspace_lock:
+                    before_shared = _snapshot_workspace_files(shared_workspace_dir)
+                    tool_result = _run_bash_tool(
+                        command=command,
+                        working_directory=safe_wd,
+                        rollout_username=rollout_username,
+                    )
+                    after_shared = _snapshot_workspace_files(shared_workspace_dir)
+                    shared_events = _shared_workspace_events(
+                        before=before_shared,
+                        after=after_shared,
+                        task_index=task_index,
+                        task_id=task_id,
+                        rollout_index=rollout_index,
+                        rollout_username=rollout_username,
+                        command_index=command_index,
+                        command=command,
+                        working_directory=safe_wd,
+                    )
+                    _append_shared_attribution(
+                        shared_workspace_dir=shared_workspace_dir,
+                        durable_log_path=shared_workspace_write_log,
+                        events=shared_events,
+                    )
+                    if shared_events:
+                        tool_result["shared_workspace_writes"] = [
+                            {
+                                "event": event["event"],
+                                "path": event["path"],
+                                "rollout_username": rollout_username,
+                            }
+                            for event in shared_events
+                        ]
 
             conversation.append(call)
             conversation.append(
@@ -810,6 +921,8 @@ def main() -> None:
     parent_pool_path = rollout_root / "latest_parent_pool.json"
     shared_workspace_dir = rollout_root / "shared_workspace"
     shared_workspace_dir.mkdir(parents=True, exist_ok=True)
+    shared_workspace_write_log = rollout_root / "shared_workspace_writes.jsonl"
+    shared_workspace_lock = threading.Lock()
 
     parent_pool: list[Path] = []
     rng = random.Random(args.seed)
@@ -992,6 +1105,11 @@ def main() -> None:
                         next_seed_dir=next_seed_dir,
                         archive_repo_dir=archive_worktree.path,
                         shared_workspace_dir=shared_workspace_dir,
+                        shared_workspace_write_log=shared_workspace_write_log,
+                        shared_workspace_lock=shared_workspace_lock,
+                        task_index=task_index,
+                        task_id=task.task_id,
+                        rollout_index=rollout_index,
                         rollout_username=rollout_username,
                     )
                 except BaseException as exc:
@@ -1067,6 +1185,7 @@ def main() -> None:
                 "reward": reward,
                 "output_path": str(output_dir),
                 "private_problem_path": str(private_problem_path),
+                "shared_workspace_write_log": str(shared_workspace_write_log),
                 "dataset_name": args.dataset_name,
                 "split": args.split,
                 "model": args.model,
@@ -1102,6 +1221,9 @@ def main() -> None:
                 continue
             missing_rollout_indices.append(rollout_index)
 
+        live_attribution_path = shared_workspace_dir / SHARED_ATTRIBUTION_FILENAME
+        if live_attribution_path.exists():
+            live_attribution_path.unlink()
         shared_snapshot = _snapshot_workspace_files(shared_workspace_dir)
         results: list[RolloutResult] = []
         if missing_rollout_indices:
@@ -1139,6 +1261,7 @@ def main() -> None:
                                     "reward": 0.0,
                                     "output_path": None,
                                     "private_problem_path": str(private_problem_path),
+                                    "shared_workspace_write_log": str(shared_workspace_write_log),
                                     "dataset_name": args.dataset_name,
                                     "split": args.split,
                                     "model": args.model,
