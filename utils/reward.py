@@ -35,7 +35,7 @@ LANG_MAP = {
 
 _generated_tests_cache: dict[str, list[dict]] = {}
 
-def _store_solution_output(solution_str, ground_truth, extra_info, num_problems):
+def _store_bigmath_solution_output(solution_str, ground_truth, extra_info, num_problems):
     """
     Store the model's solution_str as JSON, indexed by a unique identifier.
     Overwrites if the same multi-problem prompt appears again.
@@ -310,7 +310,7 @@ def _extract_code_from_section(section_text: str, language: str = "python") -> s
 
     return None
 
-def _split_into_sections(text: str, num_problems: int) -> dict[int, str]:
+def _split_codeforces_sections(text: str, num_problems: int) -> dict[int, str]:
     """
     Split model output into per-problem sections.
     Mirrors the BigMath version but adapted for code problems.
@@ -391,7 +391,7 @@ def _score_single_cf_problem(
     # return passed / total if total > 0 else 0.0
 
 
-def _store_solution_output(solution_str, ground_truth, extra_info, num_problems):
+def _store_codeforces_solution_output(solution_str, ground_truth, extra_info, num_problems):
     """Store model output for debugging / analysis."""
     output_dir = "multi_problem_outputs_cf"
     os.makedirs(output_dir, exist_ok=True)
@@ -481,7 +481,7 @@ def _score_multi_cf(
     Parse each '## Problem K' section, extract code, execute against tests.
     Return fraction of problems solved correctly.
     """
-    _store_solution_output(solution_str, ground_truth, extra_info, num_problems)
+    _store_codeforces_solution_output(solution_str, ground_truth, extra_info, num_problems)
 
     # ── 1) Recover ground-truth list ──
     if extra_info and "ground_truths" in extra_info.get("tools_kwargs", {}):
@@ -505,7 +505,7 @@ def _score_multi_cf(
         language = (extra_info or {}).get("tools_kwargs", {}).get("language", "python")
 
     # ── 2) Extract per-problem sections from model output ──
-    model_sections = _split_into_sections(solution_str, num_problems)
+    model_sections = _split_codeforces_sections(solution_str, num_problems)
 
     # ── 3) Score each problem ──
     correct = 0
@@ -603,7 +603,7 @@ def _score_multi(solution_str, ground_truth, extra_info, num_problems):
     Parse each '## Problem K' section, compare to its ground truth.
     Return fraction correct.
     """
-    _store_solution_output(solution_str, ground_truth, extra_info, num_problems)
+    _store_bigmath_solution_output(solution_str, ground_truth, extra_info, num_problems)
 
     # ---- 1) Recover the list of ground-truth solutions ----
     if extra_info and "solutions" in extra_info:
@@ -621,7 +621,7 @@ def _score_multi(solution_str, ground_truth, extra_info, num_problems):
         return 0.0
 
     # ---- 2) Extract per-problem sections from model output ----
-    model_sections = _split_into_sections(solution_str, num_problems)
+    model_sections = _split_bigmath_sections(solution_str, num_problems)
 
     # ---- 3) Score each problem independently ----
     correct = 0
@@ -706,7 +706,7 @@ def _parse_model_answer(text):
     )
 
 
-def _split_into_sections(text: str, num_problems: int) -> dict[int, str]:
+def _split_bigmath_sections(text: str, num_problems: int) -> dict[int, str]:
     """
     Split model output into per-problem sections.
     
