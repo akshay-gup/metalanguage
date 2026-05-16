@@ -383,9 +383,7 @@ def run_worker(
             "content": [
                 {
                     "type": "input_text",
-                    "text": (
-                        f"Working directory: {workdir}."
-                    ),
+                    "text": "Read README.md.",
                 }
             ],
         }
