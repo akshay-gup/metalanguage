@@ -14,7 +14,7 @@ Open ended RSI
 ## Episode runner
 
 - `main_loop.py`: runs RLVR-style episodes end-to-end:
-  1. by default, sample one task from HF dataset (or process all tasks with `--all-tasks`),
+  1. by default, sample one task from `m-a-p/SuperGPQA` (or process all tasks with `--all-tasks`; override with `--dataset-name`),
   2. run `--num-rollouts` child rollouts per task concurrently in isolated temp workspaces (each with an auto-assigned unique rollout username),
   3. sample each child's parent (with replacement) from the prior task's successful rollouts,
   3.5. expose a shared cross-rollout workspace at `--rollout-temp-root/shared_workspace` where any rollout agent can leave files/messages for any other rollout agent (files written by each rollout are cleaned up after that rollout ends),

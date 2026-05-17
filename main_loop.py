@@ -830,7 +830,7 @@ def ensure_local_world_repo(repo_path: Path) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run one RLVR episode.")
-    parser.add_argument("--dataset-name", required=True)
+    parser.add_argument("--dataset-name", default="m-a-p/SuperGPQA")
     parser.add_argument("--split", default="train")
     parser.add_argument("--config-name", default=None)
     parser.add_argument("--model", required=True)
