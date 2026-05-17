@@ -880,6 +880,11 @@ def parse_args() -> argparse.Namespace:
         help="Root path for per-task carryover directories.",
     )
     parser.add_argument(
+        "--bootstrap-seed-dir",
+        default="seeds/bootstrap",
+        help="Seed workspace copied into bootstrap rollouts before any parent seed exists.",
+    )
+    parser.add_argument(
         "--no-resume",
         action="store_true",
         help="Disable resume logic and always start a fresh run.",
@@ -913,6 +918,7 @@ def main() -> None:
     archive_repo_dir = Path(args.archive_repo_dir).resolve()
     ensure_local_world_repo(archive_repo_dir)
     archive_git_lock = threading.Lock()
+    bootstrap_seed_dir = Path(args.bootstrap_seed_dir).resolve()
 
     rollout_root = Path(args.rollout_temp_root)
     rollout_root.mkdir(parents=True, exist_ok=True)
@@ -1074,6 +1080,10 @@ def main() -> None:
             temp_dir.mkdir(parents=True, exist_ok=True)
             if sampled_parent is not None:
                 copy_seed_workspace(sampled_parent, temp_dir)
+            else:
+                if not bootstrap_seed_dir.exists():
+                    raise RuntimeError(f"Bootstrap seed directory does not exist: {bootstrap_seed_dir}")
+                copy_seed_workspace(bootstrap_seed_dir, temp_dir)
 
             next_seed_dir = temp_dir / "next_seed"
             next_seed_dir.mkdir(parents=True, exist_ok=True)
@@ -1093,6 +1103,18 @@ def main() -> None:
                 "```json\n"
                 f"{json.dumps(model_visible_row, ensure_ascii=False, indent=2)}\n"
                 "```\n",
+                encoding="utf-8",
+            )
+            runtime_file = temp_dir / "runtime.md"
+            runtime_file.write_text(
+                "# Runtime\n\n"
+                f"working_directory: {temp_dir}\n"
+                f"task_file: {task_file}\n"
+                f"next_seed_dir: {next_seed_dir}\n"
+                f"archive_repo_dir: {archive_worktree.path}\n"
+                f"shared_workspace_dir: {shared_workspace_dir}\n"
+                f"shared_workspace_attribution: {shared_workspace_dir / SHARED_ATTRIBUTION_FILENAME}\n"
+                f"durable_shared_workspace_write_log: {shared_workspace_write_log}\n",
                 encoding="utf-8",
             )
 
@@ -1176,6 +1198,7 @@ def main() -> None:
                 "reported_problem_uid": reported_problem_uid,
                 "reported_task_id": reported_task_id,
                 "parent_rollout_dir": str(sampled_parent) if sampled_parent else None,
+                "bootstrap_seed_dir": str(bootstrap_seed_dir) if sampled_parent is None else None,
                 "next_rollout_dir": str(seed_rollout_dir),
                 "worker_status": worker_result.status,
                 "worker_stop_reason": worker_result.stop_reason,
@@ -1252,6 +1275,7 @@ def main() -> None:
                                     "reported_problem_uid": None,
                                     "reported_task_id": None,
                                     "parent_rollout_dir": None,
+                                    "bootstrap_seed_dir": str(bootstrap_seed_dir),
                                     "next_rollout_dir": None,
                                     "worker_status": "error",
                                     "worker_stop_reason": type(exc).__name__,
