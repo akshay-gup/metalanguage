@@ -1,23 +1,57 @@
 # train_grpo_limr_zero3.py
 # pip install "evalchemy @ git+https://github.com/mlfoundations/evalchemy.git"
+from __future__ import annotations
+
 import os, re, json, argparse, sys, subprocess, glob, time, datetime
 from typing import Optional, List, Any, Dict, Set
-from math_verify import LatexExtractionConfig, parse, verify, math_metric, ExprExtractionConfig
-from latex2sympy2_extended import NormalizationConfig
-from bench_eval import compute_score_aime, compute_score_gpqa
-from filelock import FileLock
-from transformers import PreTrainedTokenizer
-import aiohttp
-from openai.types.chat import ChatCompletion
 import math
 import hashlib
 import tempfile
 from pathlib import Path
 from functools import lru_cache
+from types import TracebackType
 
 import requests
-import pandas as pd
-from filelock import FileLock
+
+try:
+    from filelock import FileLock
+except ImportError:
+    class FileLock:
+        def __init__(self, path: str, timeout: int = 10) -> None:
+            self.path = path
+            self.timeout = timeout
+
+        def __enter__(self) -> "FileLock":
+            return self
+
+        def __exit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc: BaseException | None,
+            tb: TracebackType | None,
+        ) -> None:
+            return None
+
+try:
+    import pandas as pd
+except ImportError:
+    pd = None
+
+try:
+    from math_verify import LatexExtractionConfig, parse, verify
+    from latex2sympy2_extended import NormalizationConfig
+except ImportError:
+    LatexExtractionConfig = None
+    NormalizationConfig = None
+    parse = None
+    verify = None
+
+try:
+    from bench_eval import compute_score_aime as _bench_compute_score_aime
+    from bench_eval import compute_score_gpqa as _bench_compute_score_gpqa
+except ImportError:
+    _bench_compute_score_aime = None
+    _bench_compute_score_gpqa = None
 
 PISTON_ENDPOINT = os.environ.get("PISTON_ENDPOINT", "http://localhost:2000")
 CF_GENERATED_TESTS_DIR = os.environ.get("CF_GENERATED_TESTS", "")
@@ -34,6 +68,23 @@ LANG_MAP = {
 }
 
 _generated_tests_cache: dict[str, list[dict]] = {}
+
+
+def _missing_optional_dependency(feature: str, packages: str, install_hint: str | None = None) -> RuntimeError:
+    hint = install_hint or "The default SuperGPQA setup does not need them."
+    return RuntimeError(
+        f"{feature} requires optional reward dependencies: {packages}. "
+        f"{hint}"
+    )
+
+
+def _require_math_verify(feature: str) -> None:
+    if parse is None or verify is None or LatexExtractionConfig is None or NormalizationConfig is None:
+        raise _missing_optional_dependency(
+            feature,
+            "math-verify latex2sympy2-extended",
+            "Run ./setup.sh --with-legacy-reward to install them.",
+        )
 
 def _store_bigmath_solution_output(solution_str, ground_truth, extra_info, num_problems):
     """
@@ -82,6 +133,8 @@ def _store_bigmath_solution_output(solution_str, ground_truth, extra_info, num_p
 def _load_generated_tests_for_contest(contest_id: str) -> pd.DataFrame | None:
     """Load a single contest's generated test parquet file."""
     if not CF_GENERATED_TESTS_DIR:
+        return None
+    if pd is None:
         return None
 
     parquet_path = os.path.join(
@@ -742,9 +795,21 @@ def verl_reward_func(
    extra_info: dict,
     ):
     if data_source in ["Maxwell-Jia/AIME_2024", "opencompass/cnmo2024_en", "opencompass/cnmo2024_zh"]:
-        return compute_score_aime(solution_str, ground_truth)
+        if _bench_compute_score_aime is None:
+            raise _missing_optional_dependency(
+                "AIME scoring",
+                "Evalchemy bench_eval",
+                "Install Evalchemy manually; the default SuperGPQA setup does not need it.",
+            )
+        return _bench_compute_score_aime(solution_str, ground_truth)
     elif data_source == "Idavidrein/gpqa":
-        return compute_score_gpqa(solution_str, ground_truth)
+        if _bench_compute_score_gpqa is None:
+            raise _missing_optional_dependency(
+                "GPQA scoring",
+                "Evalchemy bench_eval",
+                "Install Evalchemy manually; the default SuperGPQA setup does not need it.",
+            )
+        return _bench_compute_score_gpqa(solution_str, ground_truth)
     elif data_source == "open-r1/Big-Math-RL-Verified-Processed":
         return compute_score_bigmath(solution_str, ground_truth, extra_info)
     elif data_source == "open-r1/codeforces":
@@ -774,6 +839,8 @@ def compute_score_bigmath(solution_str, ground_truth, extra_info):
     return _score_multi(solution_str, ground_truth, extra_info, num_problems)
 
 def _score_single(solution_str, ground_truth, extra_info):
+    _require_math_verify("Big-Math scoring")
+
     gold_text = _extract_gold_text(ground_truth)
     if not gold_text:
         return 0.0
@@ -799,6 +866,8 @@ def _score_multi(solution_str, ground_truth, extra_info, num_problems):
     Parse each '## Problem K' section, compare to its ground truth.
     Return fraction correct.
     """
+    _require_math_verify("Big-Math scoring")
+
     _store_bigmath_solution_output(solution_str, ground_truth, extra_info, num_problems)
 
     # ---- 1) Recover the list of ground-truth solutions ----
@@ -882,6 +951,8 @@ def _extract_gold_text(ground_truth):
 
 def _parse_model_answer(text):
     """Parse a model's boxed answer from a text chunk using math_verify."""
+    _require_math_verify("Big-Math scoring")
+
     return parse(
         text,
         extraction_config=[
