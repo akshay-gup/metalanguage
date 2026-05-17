@@ -243,16 +243,21 @@ def _first_present(row: dict[str, Any], keys: list[str]) -> Any:
     return None
 
 
-def ground_truth_from_private_row(private_problem_path: Path) -> tuple[str | None, str | None]:
+def _load_private_problem_row(private_problem_path: Path) -> dict[str, Any] | None:
     try:
         row = json.loads(private_problem_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
+        return None
+
+    return row if isinstance(row, dict) else None
+
+
+def ground_truth_from_private_row(private_problem_path: Path) -> tuple[str | None, str | None]:
+    row = _load_private_problem_row(private_problem_path)
+    if row is None:
         return None, None
 
-    if not isinstance(row, dict):
-        return None, None
-
-    private_task_id = _first_present(row, ["id", "task_id", "problem_id", "index"])
+    private_task_id = _first_present(row, ["id", "task_id", "problem_id", "uuid", "index"])
     private_answer = _first_present(row, ["answer", "solution", "ground_truth", "target"])
     return (
         str(private_task_id) if private_task_id is not None else None,
@@ -269,6 +274,10 @@ def compute_rollout_reward(
     reported_problem_uid: str | None,
     private_problem_path: Path,
 ) -> float:
+    private_row = _load_private_problem_row(private_problem_path)
+    if private_row is None:
+        return 0.0
+
     private_task_id, private_answer = ground_truth_from_private_row(private_problem_path)
     if private_answer is None:
         return 0.0
@@ -280,7 +289,192 @@ def compute_rollout_reward(
     if private_task_id is not None and private_task_id != expected_task_id:
         return 0.0
 
+    if "answer_letter" in private_row and "options" in private_row:
+        return compute_score_supergpqa(
+            submitted_answer,
+            str(private_row.get("answer_letter") or private_answer),
+            private_row,
+        )
+
     return compute_score_bigmath(submitted_answer, private_answer, {"problem_id": expected_task_id})
+
+
+def _supergpqa_options_list(options: Any) -> list[str]:
+    if isinstance(options, list):
+        return [str(option) for option in options]
+    if isinstance(options, tuple):
+        return [str(option) for option in options]
+    if isinstance(options, dict):
+        labeled: list[tuple[str, str]] = []
+        for key, value in options.items():
+            label = _normalize_supergpqa_label(str(key))
+            if label is not None:
+                labeled.append((label, str(value)))
+        if labeled:
+            return [value for _, value in sorted(labeled)]
+        return [str(options[key]) for key in sorted(options)]
+    return []
+
+
+def _supergpqa_valid_labels(options: Any = None) -> str:
+    option_count = len(_supergpqa_options_list(options))
+    if option_count <= 0 or option_count > 10:
+        option_count = 10
+    return "ABCDEFGHIJ"[:option_count]
+
+
+def _normalize_supergpqa_label(value: Any, valid_labels: str = "ABCDEFGHIJ") -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    match = re.fullmatch(r"[\s\(\[\{]*([A-Ja-j])[\s\)\]\}\.\:]*", text)
+    if not match:
+        return None
+    label = match.group(1).upper()
+    return label if label in valid_labels else None
+
+
+def _normalize_supergpqa_text(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"^[\*\$\s]*", "", text)
+    text = re.sub(r"[\*\$\s]*$", "", text)
+    text = re.sub(r"^\\(?:boxed|mathbf|mathrm|text)\{(.+)\}$", r"\1", text)
+    text = re.sub(r"^[\s\(\[]*[a-j][\)\]\.\:\-]\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"^[\"'`]+|[\"'`\.\s]+$", "", text)
+    return text
+
+
+def _supergpqa_label_pattern(valid_labels: str) -> str:
+    wrappers = r"(?:(?:\\boxed|\\mathbf|\\mathrm|\\text)\{)?"
+    prefix = r"[\*\$\{\(\[\\]*?"
+    suffix = r"(?:\\?\}?\$?\)?\]?\}?)*(?:[\s:\.\*)]|$)"
+    return rf"{prefix}(?:{wrappers})*\s*([{re.escape(valid_labels)}]){suffix}"
+
+
+def _json_answer_field(text: str) -> str | None:
+    try:
+        payload = json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    for key in ("answer", "answer_letter", "extracted_answer", "prediction", "response"):
+        value = payload.get(key)
+        if value is not None:
+            return str(value)
+    return None
+
+
+def extract_supergpqa_option_label(text: Any, options: Any = None) -> str | None:
+    """Extract a SuperGPQA-style option letter from a model answer."""
+    if not isinstance(text, str):
+        return None
+
+    valid_labels = _supergpqa_valid_labels(options)
+    json_answer = _json_answer_field(text.strip())
+    if json_answer is not None:
+        direct = _normalize_supergpqa_label(json_answer, valid_labels)
+        if direct is not None:
+            return direct
+
+    candidates = [line.strip() for line in text.rstrip().splitlines() if line.strip()]
+    if text.strip():
+        candidates.append(text.strip())
+
+    answer_patterns = [
+        rf"(?:the\s+)?(?:final\s+)?(?:\w+\s+)?(?:answer|option|choice)"
+        rf"(?:\s+\w+)*\s*(?:is|:|：|\-)?\s*{_supergpqa_label_pattern(valid_labels)}",
+        rf"(?i:answer)[\*\s]*:\s*{_supergpqa_label_pattern(valid_labels)}",
+        rf"^[^\w\r\n]*{_supergpqa_label_pattern(valid_labels)}",
+    ]
+
+    for candidate in candidates[-3:]:
+        direct = _normalize_supergpqa_label(candidate, valid_labels)
+        if direct is not None:
+            return direct
+        for pattern in answer_patterns:
+            match = re.search(pattern, candidate, flags=re.IGNORECASE)
+            if match:
+                label = match.group(1).upper()
+                if label in valid_labels:
+                    return label
+
+    for pattern in answer_patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            label = match.group(1).upper()
+            if label in valid_labels:
+                return label
+
+    return None
+
+
+def extract_supergpqa_option_content(text: Any, options: Any = None) -> str | None:
+    """Extract an exact SuperGPQA option text answer when no letter is present."""
+    if not isinstance(text, str):
+        return None
+
+    options_list = _supergpqa_options_list(options)
+    if not options_list:
+        return None
+
+    json_answer = _json_answer_field(text.strip())
+    answer_text = json_answer if json_answer is not None else text
+    candidates = [line.strip() for line in answer_text.rstrip().splitlines() if line.strip()]
+    if answer_text.strip():
+        candidates.append(answer_text.strip())
+
+    normalized_options = {_normalize_supergpqa_text(option): option for option in options_list}
+    for candidate in candidates[-3:]:
+        normalized = _normalize_supergpqa_text(candidate)
+        if normalized in normalized_options:
+            return normalized_options[normalized]
+
+        match = re.search(
+            r"(?:final\s+answer|answer|option|choice)\s*(?:is|:|：|\-)?\s*(.+)$",
+            candidate,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            normalized_marked = _normalize_supergpqa_text(match.group(1))
+            if normalized_marked in normalized_options:
+                return normalized_options[normalized_marked]
+
+    return None
+
+
+def compute_score_supergpqa(solution_str: str, ground_truth: str, extra_info: dict | None = None) -> float:
+    """Score SuperGPQA multiple-choice answers against answer_letter/options rows."""
+    extra_info = extra_info or {}
+    options = extra_info.get("options")
+    options_list = _supergpqa_options_list(options)
+    valid_labels = _supergpqa_valid_labels(options)
+
+    gold_label = _normalize_supergpqa_label(
+        extra_info.get("answer_letter") or ground_truth,
+        valid_labels,
+    )
+    if gold_label is None and options_list:
+        gold_answer_text = _normalize_supergpqa_text(extra_info.get("answer") or ground_truth)
+        for index, option in enumerate(options_list):
+            if _normalize_supergpqa_text(option) == gold_answer_text:
+                gold_label = chr(65 + index)
+                break
+    if gold_label is None:
+        return 0.0
+
+    predicted_label = extract_supergpqa_option_label(solution_str, options)
+    if predicted_label is None:
+        predicted_content = extract_supergpqa_option_content(solution_str, options)
+        if predicted_content is not None:
+            for index, option in enumerate(options_list):
+                if _normalize_supergpqa_text(option) == _normalize_supergpqa_text(predicted_content):
+                    predicted_label = chr(65 + index)
+                    break
+
+    return 1.0 if predicted_label == gold_label else 0.0
+
 
 def _extract_code_from_section(section_text: str, language: str = "python") -> str | None:
     """
@@ -555,6 +749,8 @@ def verl_reward_func(
         return compute_score_bigmath(solution_str, ground_truth, extra_info)
     elif data_source == "open-r1/codeforces":
         return compute_score_codeforces(solution_str, ground_truth, extra_info)
+    elif data_source in ["m-a-p/SuperGPQA", "C10X/SuperGPQA"]:
+        return compute_score_supergpqa(solution_str, ground_truth, extra_info)
     else:
         raise NotImplementedError
 

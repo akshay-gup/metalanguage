@@ -98,7 +98,7 @@ def _task_from_row(
 
     tid = _first_present(row, [id_key] if id_key else [])
     if tid is None:
-        tid = _first_present(row, ["id", "task_id", "problem_id", "index"])
+        tid = _first_present(row, ["id", "task_id", "problem_id", "uuid", "index"])
 
     if q is None or a is None:
         keys = ", ".join(sorted(row.keys()))
