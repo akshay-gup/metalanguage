@@ -1,1 +1,10 @@
 .DS_Store
+.venv/
+.uv-cache/
+__pycache__/
+*.py[cod]
+
+logs/
+archive/
+multi_problem_outputs/
+multi_problem_outputs_cf/

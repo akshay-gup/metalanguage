@@ -2,6 +2,25 @@
 
 Open ended RSI
 
+## Setup
+
+Run the setup script from the repository root:
+
+```bash
+./setup.sh
+```
+
+The script installs `uv` if needed, uses `uv` to ensure Python 3.12 is
+available, creates `.venv`, installs the SuperGPQA rollout runtime
+dependencies, and verifies that `main_loop.py` imports correctly.
+
+Useful variants:
+
+```bash
+./setup.sh --verify-only
+./setup.sh --with-legacy-reward
+```
+
 ## Utilities
 
 - `utils/reward.py`: reward/evaluation helpers used by training workflows.
@@ -21,7 +40,7 @@ Open ended RSI
   4. expose `archive/world_repo` by default as the durable cross-lineage Git archive available to every rollout (override with `--archive-repo-dir`),
      using a per-rollout temporary worktree so only committed archive changes are merged back and uncommitted archive edits are discarded,
   5. copy the selected parent seed workspace into the child workspace, then write the current task as `task.md` with solution-like fields redacted,
-  6. run OpenRouter worker with `run_bash` tool access and a minimal fixed prompt that only provides the working directory; operating doctrine is expected to come from the inherited parent seed,
+  6. run OpenRouter worker with `run_bash` tool access and the minimal fixed prompt `Read README.md.`; operating doctrine is expected to come from the inherited parent seed,
   7. score solution via `utils/reward.py`, grounding correctness against the private stored row and validating reported ids,
   8. after all child rollouts for the task finish, persist each successful rollout's separate `next_seed/` directory as a parent seed candidate for the next task,
   9. append run metadata to a growing JSONL log and print one-line summary per rollout.
