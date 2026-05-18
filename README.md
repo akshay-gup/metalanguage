@@ -44,6 +44,12 @@ Useful variants:
   7. score solution via `utils/reward.py`, grounding correctness against the private stored row and validating reported ids,
   8. after all child rollouts for the task finish, persist each successful rollout's separate `next_seed/` directory as a parent seed candidate for the next task,
   9. append run metadata to a growing JSONL log and print one-line summary per rollout.
+- Runtime containment:
+  - generated state is rooted at `~/Documents/metalanguage_runs` by default;
+  - `--runs-log`, `--outputs-dir`, `--fixed-temp-dir`, `--rollout-temp-root`, `--task-store-dir`, `--archive-repo-dir`, and `--bootstrap-seed-dir` are resolved under `--runtime-root` when relative;
+  - absolute overrides for those paths are rejected unless they stay inside `--runtime-root`;
+  - `--runtime-root` itself is rejected unless it stays inside `~/Documents`;
+  - Hugging Face caches, process temp files, and worker shell home/cache/temp defaults are also redirected under the runtime root.
 - Lineage behavior:
   - the first task can bootstrap without a parent seed;
   - after bootstrap, missing parent seeds are terminal and the loop will not silently continue as a fresh lineage.
