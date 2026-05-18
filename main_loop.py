@@ -72,6 +72,8 @@ class WorkerResult:
 
 
 SHARED_ATTRIBUTION_FILENAME = ".writers.jsonl"
+DEFAULT_RUNTIME_ROOT = Path.home() / "Documents" / "metalanguage_runs"
+BUNDLED_BOOTSTRAP_SEED_DIR = Path(__file__).resolve().parent / "seeds" / "bootstrap"
 
 
 def _first_present(row: dict[str, Any], keys: list[str]) -> Any:
@@ -123,7 +125,12 @@ def sample_task(
     question_key: str | None,
     answer_key: str | None,
     id_key: str | None,
+    dataset_cache_dir: Path | None = None,
 ) -> Task:
+    load_kwargs: dict[str, Any] = {}
+    if dataset_cache_dir is not None:
+        load_kwargs["cache_dir"] = str(dataset_cache_dir)
+
     loader = HFDatasetDataLoader(
         dataset_name=dataset_name,
         split=split,
@@ -131,6 +138,7 @@ def sample_task(
         batch_size=1,
         shuffle=True,
         seed=seed,
+        **load_kwargs,
     )
 
     batch = next(iter(loader))
@@ -155,7 +163,12 @@ def iter_tasks(
     id_key: str | None,
     start_task_index: int = 0,
     max_tasks: int | None = None,
+    dataset_cache_dir: Path | None = None,
 ):
+    load_kwargs: dict[str, Any] = {}
+    if dataset_cache_dir is not None:
+        load_kwargs["cache_dir"] = str(dataset_cache_dir)
+
     loader = HFDatasetDataLoader(
         dataset_name=dataset_name,
         split=split,
@@ -163,6 +176,7 @@ def iter_tasks(
         batch_size=1,
         shuffle=True,
         seed=seed,
+        **load_kwargs,
     )
 
     yielded = 0
@@ -198,6 +212,18 @@ def _run_bash_tool(command: str, working_directory: str, rollout_username: str |
     try:
         git_identity = rollout_username or Path(working_directory).name
         env = os.environ.copy()
+        worker_home = Path(working_directory) / ".home"
+        worker_cache = worker_home / ".cache"
+        worker_tmp = worker_home / "tmp"
+        worker_hf_home = worker_cache / "huggingface"
+        worker_hf_datasets = worker_cache / "huggingface_datasets"
+        for path in [worker_home, worker_cache, worker_tmp, worker_hf_home, worker_hf_datasets]:
+            path.mkdir(parents=True, exist_ok=True)
+        env["HOME"] = str(worker_home)
+        env["XDG_CACHE_HOME"] = str(worker_cache)
+        env["HF_HOME"] = str(worker_hf_home)
+        env["HF_DATASETS_CACHE"] = str(worker_hf_datasets)
+        env["TMPDIR"] = str(worker_tmp)
         env.setdefault("GIT_AUTHOR_NAME", git_identity)
         env.setdefault("GIT_COMMITTER_NAME", git_identity)
         env.setdefault("GIT_AUTHOR_EMAIL", f"{git_identity}@local")
@@ -249,6 +275,48 @@ def _is_within(path: Path, root: Path) -> bool:
         return True
     except Exception:
         return False
+
+
+def _resolve_runtime_root(value: str) -> Path:
+    documents_dir = (Path.home() / "Documents").resolve()
+    raw_root = Path(value).expanduser()
+    root = raw_root.resolve() if raw_root.is_absolute() else (documents_dir / raw_root).resolve()
+    if not _is_within(root, documents_dir):
+        raise ValueError(f"--runtime-root must stay inside {documents_dir}: {root}")
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _resolve_runtime_path(value: str, runtime_root: Path, label: str) -> Path:
+    raw_path = Path(value).expanduser()
+    path = raw_path.resolve() if raw_path.is_absolute() else (runtime_root / raw_path).resolve()
+    if not _is_within(path, runtime_root):
+        raise ValueError(f"{label} must stay inside --runtime-root {runtime_root}: {path}")
+    return path
+
+
+def _configure_runtime_environment(runtime_root: Path) -> Path:
+    cache_root = runtime_root / "cache"
+    dataset_cache_dir = cache_root / "huggingface_datasets"
+    env_dirs = {
+        "XDG_CACHE_HOME": cache_root / "xdg",
+        "HF_HOME": cache_root / "huggingface",
+        "HF_DATASETS_CACHE": dataset_cache_dir,
+        "TMPDIR": runtime_root / "tmp" / "process",
+    }
+    for name, path in env_dirs.items():
+        path.mkdir(parents=True, exist_ok=True)
+        os.environ[name] = str(path)
+    return dataset_cache_dir
+
+
+def _ensure_runtime_bootstrap_seed(bootstrap_seed_dir: Path) -> None:
+    if bootstrap_seed_dir.exists():
+        return
+    if not BUNDLED_BOOTSTRAP_SEED_DIR.exists():
+        return
+    bootstrap_seed_dir.mkdir(parents=True, exist_ok=True)
+    copy_seed_workspace(BUNDLED_BOOTSTRAP_SEED_DIR, bootstrap_seed_dir)
 
 
 def _snapshot_workspace_files(root: Path) -> dict[Path, tuple[int, int]]:
@@ -867,6 +935,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Process exactly the next incomplete task iteration from resume state, then exit.",
     )
+    parser.add_argument(
+        "--runtime-root",
+        default=str(DEFAULT_RUNTIME_ROOT),
+        help="Root for all generated run state. Must stay inside ~/Documents.",
+    )
     parser.add_argument("--runs-log", default="logs/runs.jsonl")
     parser.add_argument("--outputs-dir", default="logs/episodes")
     parser.add_argument(
@@ -882,7 +955,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--bootstrap-seed-dir",
         default="seeds/bootstrap",
-        help="Seed workspace copied into bootstrap rollouts before any parent seed exists.",
+        help=(
+            "Seed workspace copied into bootstrap rollouts before any parent seed exists. "
+            "Resolved under --runtime-root unless absolute."
+        ),
     )
     parser.add_argument(
         "--no-resume",
@@ -915,12 +991,20 @@ def main() -> None:
     if not api_key:
         raise RuntimeError("OPENROUTER_API_KEY is required.")
 
-    archive_repo_dir = Path(args.archive_repo_dir).resolve()
+    runtime_root = _resolve_runtime_root(args.runtime_root)
+    runs_log_path = _resolve_runtime_path(args.runs_log, runtime_root, "--runs-log")
+    outputs_dir = _resolve_runtime_path(args.outputs_dir, runtime_root, "--outputs-dir")
+    fixed_temp_dir = _resolve_runtime_path(args.fixed_temp_dir, runtime_root, "--fixed-temp-dir")
+    rollout_root = _resolve_runtime_path(args.rollout_temp_root, runtime_root, "--rollout-temp-root")
+    task_store_dir = _resolve_runtime_path(args.task_store_dir, runtime_root, "--task-store-dir")
+    archive_repo_dir = _resolve_runtime_path(args.archive_repo_dir, runtime_root, "--archive-repo-dir")
+    bootstrap_seed_dir = _resolve_runtime_path(args.bootstrap_seed_dir, runtime_root, "--bootstrap-seed-dir")
+    dataset_cache_dir = _configure_runtime_environment(runtime_root)
+    _ensure_runtime_bootstrap_seed(bootstrap_seed_dir)
+
     ensure_local_world_repo(archive_repo_dir)
     archive_git_lock = threading.Lock()
-    bootstrap_seed_dir = Path(args.bootstrap_seed_dir).resolve()
 
-    rollout_root = Path(args.rollout_temp_root)
     rollout_root.mkdir(parents=True, exist_ok=True)
     archive_worktree_root = rollout_root / "archive_worktrees"
 
@@ -945,8 +1029,6 @@ def main() -> None:
             return rng.sample(successes, target_size)
         return [rng.choice(successes) for _ in range(target_size)]
 
-    runs_log_path = Path(args.runs_log)
-    task_store_dir = Path(args.task_store_dir)
     existing_records: list[dict[str, Any]] = []
     if not args.no_resume:
         all_records = load_existing_run_records(runs_log_path)
@@ -1004,6 +1086,7 @@ def main() -> None:
             id_key=args.id_key,
             start_task_index=task_start_index,
             max_tasks=task_limit,
+            dataset_cache_dir=dataset_cache_dir,
         )
     elif args.all_tasks:
         tasks = iter_tasks(
@@ -1016,6 +1099,7 @@ def main() -> None:
             id_key=args.id_key,
             start_task_index=args.start_task_index,
             max_tasks=args.max_tasks,
+            dataset_cache_dir=dataset_cache_dir,
         )
     else:
         tasks = [
@@ -1029,6 +1113,7 @@ def main() -> None:
                     question_key=args.question_key,
                     answer_key=args.answer_key,
                     id_key=args.id_key,
+                    dataset_cache_dir=dataset_cache_dir,
                 ),
             )
         ]
@@ -1075,7 +1160,7 @@ def main() -> None:
             )
             archive_result: dict[str, Any] = {}
 
-            temp_dir = Path(args.fixed_temp_dir) / f"{task_index:06d}" / f"rollout_{rollout_index:03d}"
+            temp_dir = fixed_temp_dir / f"{task_index:06d}" / f"rollout_{rollout_index:03d}"
             shutil.rmtree(temp_dir, ignore_errors=True)
             temp_dir.mkdir(parents=True, exist_ok=True)
             if sampled_parent is not None:
@@ -1108,13 +1193,15 @@ def main() -> None:
             runtime_file = temp_dir / "runtime.md"
             runtime_file.write_text(
                 "# Runtime\n\n"
+                f"runtime_root: {runtime_root}\n"
                 f"working_directory: {temp_dir}\n"
                 f"task_file: {task_file}\n"
                 f"next_seed_dir: {next_seed_dir}\n"
                 f"archive_repo_dir: {archive_worktree.path}\n"
                 f"shared_workspace_dir: {shared_workspace_dir}\n"
                 f"shared_workspace_attribution: {shared_workspace_dir / SHARED_ATTRIBUTION_FILENAME}\n"
-                f"durable_shared_workspace_write_log: {shared_workspace_write_log}\n",
+                f"durable_shared_workspace_write_log: {shared_workspace_write_log}\n"
+                f"dataset_cache_dir: {dataset_cache_dir}\n",
                 encoding="utf-8",
             )
 
@@ -1182,7 +1269,7 @@ def main() -> None:
 
             output_dir = persist_episode_outputs(
                 temp_dir,
-                Path(args.outputs_dir),
+                outputs_dir,
                 f"{task.task_id}_rollout_{rollout_index:03d}",
             )
 
@@ -1214,6 +1301,8 @@ def main() -> None:
                 "model": args.model,
                 "num_rollouts": args.num_rollouts,
                 "config_name": args.config_name,
+                "runtime_root": str(runtime_root),
+                "dataset_cache_dir": str(dataset_cache_dir),
                 **archive_result,
             }
 
@@ -1291,6 +1380,8 @@ def main() -> None:
                                     "model": args.model,
                                     "num_rollouts": args.num_rollouts,
                                     "config_name": args.config_name,
+                                    "runtime_root": str(runtime_root),
+                                    "dataset_cache_dir": str(dataset_cache_dir),
                                 },
                                 successful_dir=None,
                                 summary=(
