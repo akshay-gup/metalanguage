@@ -72,6 +72,7 @@ class WorkerResult:
 
 
 SHARED_ATTRIBUTION_FILENAME = ".writers.jsonl"
+DEFAULT_MODEL = "moonshotai/kimi-k2.6"
 DEFAULT_RUNTIME_ROOT = Path.home() / "Documents" / "metalanguage_runs"
 BUNDLED_BOOTSTRAP_SEED_DIR = Path(__file__).resolve().parent / "seeds" / "bootstrap"
 
@@ -901,7 +902,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset-name", default="m-a-p/SuperGPQA")
     parser.add_argument("--split", default="train")
     parser.add_argument("--config-name", default=None)
-    parser.add_argument("--model", required=True)
+    parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--generation", type=int, default=0)
     parser.add_argument(
