@@ -75,6 +75,7 @@ SHARED_ATTRIBUTION_FILENAME = ".writers.jsonl"
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_ENV_PATH = PROJECT_ROOT / ".env"
 DEFAULT_MODEL = "moonshotai/kimi-k2.6"
+DEFAULT_NUM_ROLLOUTS = 8
 DEFAULT_RUNTIME_ROOT = Path.home() / "Documents" / "metalanguage_runs"
 BUNDLED_BOOTSTRAP_SEED_DIR = PROJECT_ROOT / "seeds" / "bootstrap"
 
@@ -937,7 +938,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--num-rollouts",
         type=int,
-        default=1,
+        default=DEFAULT_NUM_ROLLOUTS,
         help="Number of rollouts to run per task.",
     )
     parser.add_argument("--question-key", default=None)
