@@ -21,6 +21,15 @@ Useful variants:
 ./setup.sh --with-legacy-reward
 ```
 
+Set the OpenRouter key in a local `.env` file:
+
+```bash
+OPENROUTER_API_KEY=your-key-here
+```
+
+The runner loads `.env` from the repository root. Real environment variables
+take precedence over values in `.env`.
+
 ## Utilities
 
 - `utils/reward.py`: reward/evaluation helpers used by training workflows.

@@ -72,9 +72,38 @@ class WorkerResult:
 
 
 SHARED_ATTRIBUTION_FILENAME = ".writers.jsonl"
+PROJECT_ROOT = Path(__file__).resolve().parent
+DEFAULT_ENV_PATH = PROJECT_ROOT / ".env"
 DEFAULT_MODEL = "moonshotai/kimi-k2.6"
 DEFAULT_RUNTIME_ROOT = Path.home() / "Documents" / "metalanguage_runs"
-BUNDLED_BOOTSTRAP_SEED_DIR = Path(__file__).resolve().parent / "seeds" / "bootstrap"
+BUNDLED_BOOTSTRAP_SEED_DIR = PROJECT_ROOT / "seeds" / "bootstrap"
+
+
+def _strip_env_quotes(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
+
+
+def load_dotenv(env_path: Path = DEFAULT_ENV_PATH) -> None:
+    """Load simple KEY=VALUE lines from .env without overriding real environment."""
+    if not env_path.exists():
+        return
+
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].strip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key:
+            continue
+        os.environ.setdefault(key, _strip_env_quotes(value))
 
 
 def _first_present(row: dict[str, Any], keys: list[str]) -> Any:
@@ -988,9 +1017,10 @@ def main() -> None:
         raise ValueError("--num-rollouts must be > 0")
     rollout_usernames = [f"rollout_user_{idx:03d}" for idx in range(args.num_rollouts)]
 
+    load_dotenv()
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
-        raise RuntimeError("OPENROUTER_API_KEY is required.")
+        raise RuntimeError(f"OPENROUTER_API_KEY is required. Set it in the environment or {DEFAULT_ENV_PATH}.")
 
     runtime_root = _resolve_runtime_root(args.runtime_root)
     runs_log_path = _resolve_runtime_path(args.runs_log, runtime_root, "--runs-log")
