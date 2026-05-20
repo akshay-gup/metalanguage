@@ -21,6 +21,7 @@ import random
 import shutil
 import subprocess
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -76,6 +77,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_ENV_PATH = PROJECT_ROOT / ".env"
 DEFAULT_MODEL = "moonshotai/kimi-k2.6"
 DEFAULT_NUM_ROLLOUTS = 8
+DEFAULT_WORKER_TIMEOUT_SECONDS = 3600
 DEFAULT_RUNTIME_ROOT = Path.home() / "Documents" / "metalanguage_runs"
 BUNDLED_BOOTSTRAP_SEED_DIR = PROJECT_ROOT / "seeds" / "bootstrap"
 
@@ -553,6 +555,8 @@ def run_worker(
     task_id: str,
     rollout_index: int,
     rollout_username: str,
+    timeout_seconds: int,
+    progress_callback: Any = None,
 ) -> WorkerResult:
     """Run a multi-turn tool-calling worker loop and return final assistant text."""
     conversation: list[dict[str, Any]] = [
@@ -569,7 +573,33 @@ def run_worker(
 
     final_text = ""
     command_index = 0
+    turn_count = 0
+    started_at = time.monotonic()
     while True:
+        turn_count += 1
+        elapsed_seconds = time.monotonic() - started_at
+        if elapsed_seconds > timeout_seconds:
+            if progress_callback is not None:
+                progress_callback(
+                    "worker_timeout",
+                    elapsed_seconds=round(elapsed_seconds, 3),
+                    turn_count=turn_count,
+                    timeout_seconds=timeout_seconds,
+                )
+            return WorkerResult(
+                final_text=final_text,
+                status="timeout",
+                stop_reason="worker_timeout",
+                error_code="worker_timeout",
+                error_message=f"Worker exceeded {timeout_seconds} seconds.",
+            )
+        if progress_callback is not None:
+            progress_callback(
+                "worker_turn_started",
+                elapsed_seconds=round(elapsed_seconds, 3),
+                turn_count=turn_count,
+                conversation_items=len(conversation),
+            )
         try:
             response = call_openrouter_with_tools(
                 api_key=api_key,
@@ -605,6 +635,14 @@ def run_worker(
             )
 
         tool_calls = get_tool_calls(response)
+        if progress_callback is not None:
+            progress_callback(
+                "worker_turn_completed",
+                elapsed_seconds=round(time.monotonic() - started_at, 3),
+                turn_count=turn_count,
+                tool_call_count=len(tool_calls),
+                response_status=response.get("status"),
+            )
         if not tool_calls:
             final_text = _extract_text_from_response(response)
             break
@@ -647,6 +685,14 @@ def run_worker(
                 tool_result = {"error": "missing or malformed 'command' argument"}
             else:
                 command_index += 1
+                if progress_callback is not None:
+                    progress_callback(
+                        "worker_tool_started",
+                        elapsed_seconds=round(time.monotonic() - started_at, 3),
+                        turn_count=turn_count,
+                        command_index=command_index,
+                        command=command[:1000],
+                    )
                 wd = str(args.get("working_directory") or workdir)
                 try:
                     resolved_wd = Path(wd).resolve()
@@ -698,6 +744,15 @@ def run_worker(
                             }
                             for event in shared_events
                         ]
+                if progress_callback is not None:
+                    progress_callback(
+                        "worker_tool_completed",
+                        elapsed_seconds=round(time.monotonic() - started_at, 3),
+                        turn_count=turn_count,
+                        command_index=command_index,
+                        exit_code=tool_result.get("exit_code"),
+                        timed_out=tool_result.get("timed_out"),
+                    )
 
             conversation.append(call)
             conversation.append(
@@ -722,6 +777,13 @@ def append_run_log(log_path: Path, record: dict[str, Any]) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def append_progress_log(log_path: Path, lock: threading.Lock, record: dict[str, Any]) -> None:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock:
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 def load_existing_run_records(log_path: Path) -> list[dict[str, Any]]:
@@ -941,6 +1003,12 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_NUM_ROLLOUTS,
         help="Number of rollouts to run per task.",
     )
+    parser.add_argument(
+        "--worker-timeout-seconds",
+        type=int,
+        default=DEFAULT_WORKER_TIMEOUT_SECONDS,
+        help="Maximum wall-clock seconds per rollout before marking that rollout failed.",
+    )
     parser.add_argument("--question-key", default=None)
     parser.add_argument("--answer-key", default=None)
     parser.add_argument("--id-key", default=None)
@@ -972,6 +1040,11 @@ def parse_args() -> argparse.Namespace:
         help="Root for all generated run state. Must stay inside ~/Documents.",
     )
     parser.add_argument("--runs-log", default="logs/runs.jsonl")
+    parser.add_argument(
+        "--progress-log",
+        default="logs/progress.jsonl",
+        help="JSONL progress events for rollout starts, worker turns, tools, scoring, and persistence.",
+    )
     parser.add_argument("--outputs-dir", default="logs/episodes")
     parser.add_argument(
         "--fixed-temp-dir",
@@ -1016,6 +1089,8 @@ def main() -> None:
     args = parse_args()
     if args.num_rollouts <= 0:
         raise ValueError("--num-rollouts must be > 0")
+    if args.worker_timeout_seconds <= 0:
+        raise ValueError("--worker-timeout-seconds must be > 0")
     rollout_usernames = [f"rollout_user_{idx:03d}" for idx in range(args.num_rollouts)]
 
     load_dotenv()
@@ -1025,6 +1100,7 @@ def main() -> None:
 
     runtime_root = _resolve_runtime_root(args.runtime_root)
     runs_log_path = _resolve_runtime_path(args.runs_log, runtime_root, "--runs-log")
+    progress_log_path = _resolve_runtime_path(args.progress_log, runtime_root, "--progress-log")
     outputs_dir = _resolve_runtime_path(args.outputs_dir, runtime_root, "--outputs-dir")
     fixed_temp_dir = _resolve_runtime_path(args.fixed_temp_dir, runtime_root, "--fixed-temp-dir")
     rollout_root = _resolve_runtime_path(args.rollout_temp_root, runtime_root, "--rollout-temp-root")
@@ -1045,6 +1121,7 @@ def main() -> None:
     shared_workspace_dir.mkdir(parents=True, exist_ok=True)
     shared_workspace_write_log = rollout_root / "shared_workspace_writes.jsonl"
     shared_workspace_lock = threading.Lock()
+    progress_log_lock = threading.Lock()
 
     parent_pool: list[Path] = []
     rng = random.Random(args.seed)
@@ -1179,11 +1256,34 @@ def main() -> None:
             sampled_parent: Path | None = (
                 parent_pool[rollout_index % len(parent_pool)] if parent_pool else None
             )
+            started_at = time.monotonic()
+
+            def _progress(event: str, **fields: Any) -> None:
+                record = {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "event": event,
+                    "generation": args.generation,
+                    "seed": args.seed,
+                    "task_index": task_index,
+                    "rollout_index": rollout_index,
+                    "rollout_username": rollout_username,
+                    "task_id": task.task_id,
+                    "problem_uid": problem_uid,
+                    "elapsed_seconds": round(time.monotonic() - started_at, 3),
+                    **fields,
+                }
+                append_progress_log(progress_log_path, progress_log_lock, record)
+
             if sampled_parent is None and task_index > 0:
                 raise RuntimeError(
                     "No parent seed available for non-bootstrap rollout; "
                     f"task_index={task_index} rollout_index={rollout_index}"
                 )
+            _progress(
+                "rollout_started",
+                parent_rollout_dir=str(sampled_parent) if sampled_parent else None,
+                bootstrap_seed_dir=str(bootstrap_seed_dir) if sampled_parent is None else None,
+            )
             archive_worktree = create_archive_worktree(
                 archive_repo_dir=archive_repo_dir,
                 worktree_root=archive_worktree_root,
@@ -1191,6 +1291,11 @@ def main() -> None:
                 git_lock=archive_git_lock,
             )
             archive_result: dict[str, Any] = {}
+            _progress(
+                "archive_worktree_created",
+                archive_worktree_dir=str(archive_worktree.path),
+                archive_branch=archive_worktree.branch,
+            )
 
             temp_dir = fixed_temp_dir / f"{task_index:06d}" / f"rollout_{rollout_index:03d}"
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -1233,8 +1338,16 @@ def main() -> None:
                 f"shared_workspace_dir: {shared_workspace_dir}\n"
                 f"shared_workspace_attribution: {shared_workspace_dir / SHARED_ATTRIBUTION_FILENAME}\n"
                 f"durable_shared_workspace_write_log: {shared_workspace_write_log}\n"
+                f"progress_log: {progress_log_path}\n"
                 f"dataset_cache_dir: {dataset_cache_dir}\n",
                 encoding="utf-8",
+            )
+            _progress(
+                "workspace_prepared",
+                working_directory=str(temp_dir),
+                task_file=str(task_file),
+                runtime_file=str(runtime_file),
+                next_seed_dir=str(next_seed_dir),
             )
 
             try:
@@ -1252,6 +1365,8 @@ def main() -> None:
                         task_id=task.task_id,
                         rollout_index=rollout_index,
                         rollout_username=rollout_username,
+                        timeout_seconds=args.worker_timeout_seconds,
+                        progress_callback=_progress,
                     )
                 except BaseException as exc:
                     worker_result = WorkerResult(
@@ -1267,6 +1382,7 @@ def main() -> None:
                         worktree=archive_worktree,
                         git_lock=archive_git_lock,
                     )
+                    _progress("archive_finalized", **archive_result)
             except BaseException as exc:
                 archive_result = {
                     **archive_result,
@@ -1279,6 +1395,13 @@ def main() -> None:
                     error_code=None,
                     error_message=str(exc),
                 )
+            _progress(
+                "worker_finished",
+                worker_status=worker_result.status,
+                worker_stop_reason=worker_result.stop_reason,
+                worker_error_code=worker_result.error_code,
+                worker_error_message=worker_result.error_message,
+            )
             if worker_result.status == "completed":
                 reported_problem_uid, reported_task_id, submitted_answer = load_rollout_answer(
                     temp_dir,
@@ -1298,12 +1421,20 @@ def main() -> None:
                 reported_task_id = None
                 reward = 0.0
                 solved = False
+            _progress(
+                "rollout_scored",
+                solved=solved,
+                reward=reward,
+                reported_problem_uid=reported_problem_uid,
+                reported_task_id=reported_task_id,
+            )
 
             output_dir = persist_episode_outputs(
                 temp_dir,
                 outputs_dir,
                 f"{task.task_id}_rollout_{rollout_index:03d}",
             )
+            _progress("episode_persisted", output_path=str(output_dir))
 
             record = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -1328,10 +1459,12 @@ def main() -> None:
                 "output_path": str(output_dir),
                 "private_problem_path": str(private_problem_path),
                 "shared_workspace_write_log": str(shared_workspace_write_log),
+                "progress_log": str(progress_log_path),
                 "dataset_name": args.dataset_name,
                 "split": args.split,
                 "model": args.model,
                 "num_rollouts": args.num_rollouts,
+                "worker_timeout_seconds": args.worker_timeout_seconds,
                 "config_name": args.config_name,
                 "runtime_root": str(runtime_root),
                 "dataset_cache_dir": str(dataset_cache_dir),
@@ -1346,6 +1479,7 @@ def main() -> None:
                 summary += f" error={worker_result.stop_reason}"
             if next_seed_dir.exists():
                 shutil.copytree(next_seed_dir, seed_rollout_dir, dirs_exist_ok=True)
+                _progress("next_seed_copied", next_rollout_dir=str(seed_rollout_dir))
             return RolloutResult(
                 rollout_index=rollout_index,
                 record=record,
@@ -1381,6 +1515,24 @@ def main() -> None:
                     try:
                         results.append(future.result())
                     except BaseException as exc:
+                        append_progress_log(
+                            progress_log_path,
+                            progress_log_lock,
+                            {
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                                "event": "rollout_future_failed",
+                                "generation": args.generation,
+                                "seed": args.seed,
+                                "task_index": task_index,
+                                "rollout_index": rollout_index,
+                                "rollout_username": rollout_usernames[rollout_index],
+                                "task_id": task.task_id,
+                                "problem_uid": problem_uid,
+                                "worker_status": "error",
+                                "worker_stop_reason": type(exc).__name__,
+                                "worker_error_message": str(exc),
+                            },
+                        )
                         results.append(
                             RolloutResult(
                                 rollout_index=rollout_index,
@@ -1407,10 +1559,12 @@ def main() -> None:
                                     "output_path": None,
                                     "private_problem_path": str(private_problem_path),
                                     "shared_workspace_write_log": str(shared_workspace_write_log),
+                                    "progress_log": str(progress_log_path),
                                     "dataset_name": args.dataset_name,
                                     "split": args.split,
                                     "model": args.model,
                                     "num_rollouts": args.num_rollouts,
+                                    "worker_timeout_seconds": args.worker_timeout_seconds,
                                     "config_name": args.config_name,
                                     "runtime_root": str(runtime_root),
                                     "dataset_cache_dir": str(dataset_cache_dir),
