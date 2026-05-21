@@ -307,12 +307,9 @@ def _replace_with_symlink(link_path: Path, target_path: Path) -> None:
     link_path.symlink_to(target_path, target_is_directory=target_path.is_dir())
 
 
-def _format_task_markdown(*, task: Task, problem_uid: str) -> str:
+def _format_task_markdown(*, task: Task) -> str:
     lines = [
         "# Task",
-        "",
-        f"problem_uid: {problem_uid}",
-        f"task_id: {task.task_id}",
         "",
         "## Question",
         "",
@@ -322,8 +319,9 @@ def _format_task_markdown(*, task: Task, problem_uid: str) -> str:
     options = _first_present(task.raw, ["options", "choices", "answer_choices", "candidates"])
     if isinstance(options, list) and options:
         lines.extend(["", "## Options", ""])
-        for idx, option in enumerate(options, start=1):
-            lines.append(f"{idx}. {option}")
+        for idx, option in enumerate(options):
+            label = chr(65 + idx) if idx < 26 else str(idx)
+            lines.append(f"{label}. {option}")
     elif isinstance(options, dict) and options:
         lines.extend(["", "## Options", ""])
         for key, option in options.items():
@@ -331,6 +329,14 @@ def _format_task_markdown(*, task: Task, problem_uid: str) -> str:
 
     lines.append("")
     return "\n".join(lines)
+
+
+def _clear_rollout_answer_artifacts(workdir: Path) -> None:
+    """Remove inherited answers before presenting a new task to a rollout."""
+    for filename in ("solution.json", "solution.md"):
+        path = workdir / filename
+        if path.exists() or path.is_symlink():
+            path.unlink()
 
 
 def _is_within(path: Path, root: Path) -> bool:
@@ -1344,6 +1350,7 @@ def main() -> None:
                 if not bootstrap_seed_dir.exists():
                     raise RuntimeError(f"Bootstrap seed directory does not exist: {bootstrap_seed_dir}")
                 copy_seed_workspace(bootstrap_seed_dir, temp_dir)
+            _clear_rollout_answer_artifacts(temp_dir)
 
             next_seed_dir = temp_dir / "next_seed"
             next_seed_dir.mkdir(parents=True, exist_ok=True)
@@ -1359,7 +1366,7 @@ def main() -> None:
             seed_rollout_dir.mkdir(parents=True, exist_ok=True)
 
             task_file = temp_dir / "task.md"
-            task_file.write_text(_format_task_markdown(task=task, problem_uid=problem_uid), encoding="utf-8")
+            task_file.write_text(_format_task_markdown(task=task), encoding="utf-8")
             runtime_file = temp_dir / "runtime.md"
             runtime_file.write_text(
                 "# Runtime\n\n"

@@ -7,8 +7,8 @@ the operating system you inherit and must pass forward. Start here, then read
 Read in this order:
 
 1. `README.md`: inherited doctrine, workspace habits, and seed contract.
-2. `runtime.md`: exact paths for the current workspace, next seed, archive, and
-   shared live workspace.
+2. `runtime.md`: workspace-relative paths for the current task, next seed,
+   archive, and shared live workspace.
 3. `task.md`: the task to solve. Solution-like fields are redacted.
 
 After those three files, inspect the archive or shared workspace only when it
@@ -26,16 +26,13 @@ Write the final answer in `solution.json` when possible:
 
 ```json
 {
-  "problem_uid": "...",
-  "task_id": "...",
   "answer": "..."
 }
 ```
 
-Use the exact `problem_uid` and `task_id` from `task.md`. For multiple choice
-tasks, write the requested option label or value exactly as the scorer expects.
-If JSON is unsuitable, write `solution.md`, but prefer `solution.json` unless
-the task format makes that impossible.
+For multiple choice tasks, write the option letter or exact option text. If JSON
+is unsuitable, write `solution.md`, but prefer
+`solution.json` unless the task format makes that impossible.
 
 Good task work is concrete:
 
