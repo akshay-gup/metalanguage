@@ -342,7 +342,7 @@ def compute_rollout_reward(
     if private_task_id is not None and private_task_id != expected_task_id:
         return 0.0
 
-    if "answer_letter" in private_row and "options" in private_row:
+    if "options" in private_row:
         return compute_score_supergpqa(
             submitted_answer,
             str(private_row.get("answer_letter") or private_answer),
@@ -385,6 +385,18 @@ def _normalize_supergpqa_label(value: Any, valid_labels: str = "ABCDEFGHIJ") -> 
         return None
     label = match.group(1).upper()
     return label if label in valid_labels else None
+
+
+def _normalize_supergpqa_index(value: Any, options: Any = None) -> int | None:
+    options_count = len(_supergpqa_options_list(options))
+    if value is None or options_count <= 0:
+        return None
+    text = str(value).strip()
+    match = re.fullmatch(r"[\s\(\[\{]*(?:#|index\s*)?(\d+)[\s\)\]\}\.\:]*", text, flags=re.IGNORECASE)
+    if not match:
+        return None
+    index = int(match.group(1))
+    return index if 0 <= index < options_count else None
 
 
 def _normalize_supergpqa_text(value: Any) -> str:
@@ -430,6 +442,13 @@ def extract_supergpqa_option_label(text: Any, options: Any = None) -> str | None
         direct = _normalize_supergpqa_label(json_answer, valid_labels)
         if direct is not None:
             return direct
+        direct_index = _normalize_supergpqa_index(json_answer, options)
+        if direct_index is not None:
+            return chr(65 + direct_index)
+
+    direct_index = _normalize_supergpqa_index(text, options)
+    if direct_index is not None:
+        return chr(65 + direct_index)
 
     candidates = [line.strip() for line in text.rstrip().splitlines() if line.strip()]
     if text.strip():
@@ -441,17 +460,31 @@ def extract_supergpqa_option_label(text: Any, options: Any = None) -> str | None
         rf"(?i:answer)[\*\s]*:\s*{_supergpqa_label_pattern(valid_labels)}",
         rf"^[^\w\r\n]*{_supergpqa_label_pattern(valid_labels)}",
     ]
+    index_patterns = [
+        r"(?:the\s+)?(?:final\s+)?(?:answer|index)"
+        r"(?:\s+\w+)*\s*(?:is|:|：|\-)?\s*(\d+)",
+        r"(?:option|choice)\s+index\s*(?:is|:|：|\-)?\s*(\d+)",
+    ]
 
     for candidate in candidates[-3:]:
         direct = _normalize_supergpqa_label(candidate, valid_labels)
         if direct is not None:
             return direct
+        direct_index = _normalize_supergpqa_index(candidate, options)
+        if direct_index is not None:
+            return chr(65 + direct_index)
         for pattern in answer_patterns:
             match = re.search(pattern, candidate, flags=re.IGNORECASE)
             if match:
                 label = match.group(1).upper()
                 if label in valid_labels:
                     return label
+        for pattern in index_patterns:
+            match = re.search(pattern, candidate, flags=re.IGNORECASE)
+            if match:
+                direct_index = _normalize_supergpqa_index(match.group(1), options)
+                if direct_index is not None:
+                    return chr(65 + direct_index)
 
     for pattern in answer_patterns:
         match = re.search(pattern, text, flags=re.IGNORECASE)
@@ -459,6 +492,12 @@ def extract_supergpqa_option_label(text: Any, options: Any = None) -> str | None
             label = match.group(1).upper()
             if label in valid_labels:
                 return label
+    for pattern in index_patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            direct_index = _normalize_supergpqa_index(match.group(1), options)
+            if direct_index is not None:
+                return chr(65 + direct_index)
 
     return None
 
