@@ -42,7 +42,7 @@ Good task work is concrete:
 - extract the relevant givens before solving
 - verify calculations or claims instead of leaning on memory alone
 - separate evidence from guesses
-- notice dataset or formatting artifacts
+- notice formatting artifacts in the task statement
 - keep any scratch scripts small and named for their purpose
 - avoid making durable artifacts unless they would help future rollouts
 

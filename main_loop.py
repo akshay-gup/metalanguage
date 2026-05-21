@@ -34,7 +34,6 @@ from utils.reward import compute_rollout_reward
 from utils.task_store import (
     compute_problem_uid,
     load_rollout_answer,
-    redact_solution_fields,
     write_private_problem_record,
 )
 
@@ -274,7 +273,6 @@ def _run_bash_tool(command: str, working_directory: str, rollout_username: str |
             "exit_code": proc.returncode,
             "stdout": proc.stdout,
             "stderr": proc.stderr,
-            "working_directory": working_directory,
             "timed_out": False,
         }
     except subprocess.TimeoutExpired as exc:
@@ -282,7 +280,6 @@ def _run_bash_tool(command: str, working_directory: str, rollout_username: str |
             "exit_code": 124,
             "stdout": exc.stdout or "",
             "stderr": (exc.stderr or "") + "\nCommand timed out after 30 seconds.",
-            "working_directory": working_directory,
             "timed_out": True,
         }
 
@@ -300,6 +297,40 @@ def _run_git(args: list[str], cwd: Path, *, check: bool = True) -> subprocess.Co
 def _sanitize_for_path(value: str) -> str:
     safe = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in value.strip())
     return safe or "unknown_task"
+
+
+def _replace_with_symlink(link_path: Path, target_path: Path) -> None:
+    if link_path.is_symlink() or link_path.is_file():
+        link_path.unlink()
+    elif link_path.exists():
+        shutil.rmtree(link_path)
+    link_path.symlink_to(target_path, target_is_directory=target_path.is_dir())
+
+
+def _format_task_markdown(*, task: Task, problem_uid: str) -> str:
+    lines = [
+        "# Task",
+        "",
+        f"problem_uid: {problem_uid}",
+        f"task_id: {task.task_id}",
+        "",
+        "## Question",
+        "",
+        task.question.strip(),
+    ]
+
+    options = _first_present(task.raw, ["options", "choices", "answer_choices", "candidates"])
+    if isinstance(options, list) and options:
+        lines.extend(["", "## Options", ""])
+        for idx, option in enumerate(options, start=1):
+            lines.append(f"{idx}. {option}")
+    elif isinstance(options, dict) and options:
+        lines.extend(["", "## Options", ""])
+        for key, option in options.items():
+            lines.append(f"- {key}: {option}")
+
+    lines.append("")
+    return "\n".join(lines)
 
 
 def _is_within(path: Path, root: Path) -> bool:
@@ -769,7 +800,7 @@ def run_worker(
 def persist_episode_outputs(temp_dir: Path, dest_root: Path, task_id: str) -> Path:
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     dest = dest_root / f"{ts}_{task_id}"
-    shutil.copytree(temp_dir, dest, dirs_exist_ok=True)
+    shutil.copytree(temp_dir, dest, dirs_exist_ok=True, symlinks=True)
     return dest
 
 
@@ -1250,7 +1281,6 @@ def main() -> None:
             problem_uid=problem_uid,
             row=task.raw,
         )
-        model_visible_row = redact_solution_fields(task.raw)
 
         if len(existing_task_records) >= args.num_rollouts:
             continue
@@ -1317,6 +1347,10 @@ def main() -> None:
 
             next_seed_dir = temp_dir / "next_seed"
             next_seed_dir.mkdir(parents=True, exist_ok=True)
+            archive_link = temp_dir / "archive"
+            shared_workspace_link = temp_dir / "shared_workspace"
+            _replace_with_symlink(archive_link, archive_worktree.path)
+            _replace_with_symlink(shared_workspace_link, shared_workspace_dir)
 
             seed_rollout_dir = rollout_root / (
                 f"{task_index:06d}_{_sanitize_for_path(task.task_id)}_{_sanitize_for_path(rollout_username)}"
@@ -1325,29 +1359,17 @@ def main() -> None:
             seed_rollout_dir.mkdir(parents=True, exist_ok=True)
 
             task_file = temp_dir / "task.md"
-            task_file.write_text(
-                "# Task\n\n"
-                f"problem_uid: {problem_uid}\n"
-                f"task_id: {task.task_id}\n\n"
-                "## Dataset Row\n\n"
-                "```json\n"
-                f"{json.dumps(model_visible_row, ensure_ascii=False, indent=2)}\n"
-                "```\n",
-                encoding="utf-8",
-            )
+            task_file.write_text(_format_task_markdown(task=task, problem_uid=problem_uid), encoding="utf-8")
             runtime_file = temp_dir / "runtime.md"
             runtime_file.write_text(
                 "# Runtime\n\n"
-                f"runtime_root: {runtime_root}\n"
-                f"working_directory: {temp_dir}\n"
-                f"task_file: {task_file}\n"
-                f"next_seed_dir: {next_seed_dir}\n"
-                f"archive_repo_dir: {archive_worktree.path}\n"
-                f"shared_workspace_dir: {shared_workspace_dir}\n"
-                f"shared_workspace_attribution: {shared_workspace_dir / SHARED_ATTRIBUTION_FILENAME}\n"
-                f"durable_shared_workspace_write_log: {shared_workspace_write_log}\n"
-                f"progress_log: {progress_log_path}\n"
-                f"dataset_cache_dir: {dataset_cache_dir}\n",
+                "Use these workspace-relative paths:\n\n"
+                "- task: task.md\n"
+                "- solution: solution.json\n"
+                "- next_seed: next_seed/README.md\n"
+                "- archive: archive/\n"
+                "- shared_workspace: shared_workspace/\n"
+                f"- shared_workspace_attribution: shared_workspace/{SHARED_ATTRIBUTION_FILENAME}\n",
                 encoding="utf-8",
             )
             _progress(
