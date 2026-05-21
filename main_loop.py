@@ -78,6 +78,7 @@ DEFAULT_MODEL = "moonshotai/kimi-k2.6"
 DEFAULT_NUM_ROLLOUTS = 8
 DEFAULT_WORKER_TIMEOUT_SECONDS = 3600
 DEFAULT_BASH_TIMEOUT_SECONDS = 120
+DEFAULT_OPENROUTER_MAX_RETRIES = 5
 DEFAULT_RUNTIME_ROOT = Path.home() / "Documents" / "metalanguage_runs"
 BUNDLED_BOOTSTRAP_SEED_DIR = PROJECT_ROOT / "seeds" / "bootstrap"
 
@@ -601,6 +602,7 @@ def run_worker(
     rollout_username: str,
     timeout_seconds: int,
     bash_timeout_seconds: int,
+    openrouter_max_retries: int,
     progress_callback: Any = None,
 ) -> WorkerResult:
     """Run a multi-turn tool-calling worker loop and return final assistant text."""
@@ -645,6 +647,15 @@ def run_worker(
                 turn_count=turn_count,
                 conversation_items=len(conversation),
             )
+        def retry_callback(event: dict[str, Any]) -> None:
+            if progress_callback is not None:
+                progress_callback(
+                    "worker_api_retry",
+                    elapsed_seconds=round(time.monotonic() - started_at, 3),
+                    turn_count=turn_count,
+                    **event,
+                )
+
         try:
             response = call_openrouter_with_tools(
                 api_key=api_key,
@@ -653,6 +664,8 @@ def run_worker(
                 tools=[bash_tool],
                 tool_choice="auto",
                 timeout=120,
+                max_retries=openrouter_max_retries,
+                retry_callback=retry_callback if progress_callback is not None else None,
             )
         except OpenRouterAPIError as exc:
             status, code, message = _api_error_limit_stop(exc)
@@ -1062,6 +1075,12 @@ def parse_args() -> argparse.Namespace:
         help="Maximum wall-clock seconds per worker bash command before returning a command timeout.",
     )
     parser.add_argument(
+        "--openrouter-max-retries",
+        type=int,
+        default=DEFAULT_OPENROUTER_MAX_RETRIES,
+        help="Maximum retries for transient OpenRouter request failures per model turn.",
+    )
+    parser.add_argument(
         "--fail-on-rollout-error",
         action="store_true",
         help=(
@@ -1153,6 +1172,8 @@ def main() -> None:
         raise ValueError("--worker-timeout-seconds must be > 0")
     if args.bash_timeout_seconds <= 0:
         raise ValueError("--bash-timeout-seconds must be > 0")
+    if args.openrouter_max_retries < 0:
+        raise ValueError("--openrouter-max-retries must be >= 0")
     rollout_usernames = [f"rollout_user_{idx:03d}" for idx in range(args.num_rollouts)]
 
     load_dotenv()
@@ -1421,6 +1442,7 @@ def main() -> None:
                         rollout_username=rollout_username,
                         timeout_seconds=args.worker_timeout_seconds,
                         bash_timeout_seconds=args.bash_timeout_seconds,
+                        openrouter_max_retries=args.openrouter_max_retries,
                         progress_callback=_progress,
                     )
                 except BaseException as exc:
@@ -1521,6 +1543,7 @@ def main() -> None:
                 "num_rollouts": args.num_rollouts,
                 "worker_timeout_seconds": args.worker_timeout_seconds,
                 "bash_timeout_seconds": args.bash_timeout_seconds,
+                "openrouter_max_retries": args.openrouter_max_retries,
                 "config_name": args.config_name,
                 "runtime_root": str(runtime_root),
                 "dataset_cache_dir": str(dataset_cache_dir),

@@ -2,12 +2,35 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any, Literal
+import time
 import requests
 
 
 OPENROUTER_RESPONSES_URL = "https://openrouter.ai/api/v1/responses"
 ToolChoice = Literal["auto", "none"] | dict[str, str]
+RetryCallback = Callable[[dict[str, Any]], None]
+RETRYABLE_REQUEST_EXCEPTIONS = (
+    requests.exceptions.ConnectionError,
+    requests.exceptions.SSLError,
+    requests.exceptions.Timeout,
+)
+
+
+def _retry_delay_seconds(attempt: int, initial_delay: float, max_delay: float) -> float:
+    return min(max_delay, initial_delay * (2 ** max(0, attempt - 1)))
+
+
+def _is_retryable_status(status_code: int) -> bool:
+    return status_code == 429 or 500 <= status_code < 600
+
+
+def _parse_error_body(response: requests.Response) -> dict[str, Any] | str:
+    try:
+        return response.json()
+    except ValueError:
+        return response.text
 
 
 class OpenRouterAPIError(RuntimeError):
@@ -44,6 +67,10 @@ def call_openrouter_with_tools(
     stream: bool = False,
     timeout: int = 60,
     reasoning_effort: Literal["low", "medium", "high"] | None = None,
+    max_retries: int = 5,
+    retry_initial_delay: float = 1.0,
+    retry_max_delay: float = 10.0,
+    retry_callback: RetryCallback | None = None,
 ) -> dict[str, Any] | requests.Response:
     """Call OpenRouter's Responses API with optional function tools.
 
@@ -66,28 +93,72 @@ def call_openrouter_with_tools(
     if reasoning_effort:
         payload["reasoning"] = {"effort": reasoning_effort}
 
-    response = requests.post(
-        OPENROUTER_RESPONSES_URL,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        json=payload,
-        timeout=timeout,
-        stream=stream,
-    )
+    if max_retries < 0:
+        raise ValueError("max_retries must be >= 0")
 
-    if not response.ok:
+    for attempt in range(max_retries + 1):
         try:
-            response_body: dict[str, Any] | str = response.json()
-        except ValueError:
-            response_body = response.text
+            response = requests.post(
+                OPENROUTER_RESPONSES_URL,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=timeout,
+                stream=stream,
+            )
+        except RETRYABLE_REQUEST_EXCEPTIONS as exc:
+            if attempt >= max_retries:
+                raise
+            delay_seconds = _retry_delay_seconds(
+                attempt + 1,
+                retry_initial_delay,
+                retry_max_delay,
+            )
+            if retry_callback is not None:
+                retry_callback(
+                    {
+                        "attempt": attempt + 1,
+                        "max_retries": max_retries,
+                        "delay_seconds": delay_seconds,
+                        "error_type": type(exc).__name__,
+                        "error_message": str(exc),
+                    }
+                )
+            time.sleep(delay_seconds)
+            continue
+
+        if response.ok:
+            if stream:
+                return response
+            return response.json()
+
+        response_body = _parse_error_body(response)
+        if _is_retryable_status(response.status_code) and attempt < max_retries:
+            delay_seconds = _retry_delay_seconds(
+                attempt + 1,
+                retry_initial_delay,
+                retry_max_delay,
+            )
+            if retry_callback is not None:
+                retry_callback(
+                    {
+                        "attempt": attempt + 1,
+                        "max_retries": max_retries,
+                        "delay_seconds": delay_seconds,
+                        "status_code": response.status_code,
+                        "error_type": "OpenRouterAPIError",
+                        "error_message": str(response_body),
+                    }
+                )
+            response.close()
+            time.sleep(delay_seconds)
+            continue
+
         raise OpenRouterAPIError(response.status_code, response_body)
 
-    if stream:
-        return response
-
-    return response.json()
+    raise RuntimeError("OpenRouter retry loop exhausted unexpectedly.")
 
 
 def get_tool_calls(response_json: dict[str, Any]) -> list[dict[str, Any]]:
