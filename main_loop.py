@@ -77,6 +77,7 @@ DEFAULT_ENV_PATH = PROJECT_ROOT / ".env"
 DEFAULT_MODEL = "moonshotai/kimi-k2.6"
 DEFAULT_NUM_ROLLOUTS = 8
 DEFAULT_WORKER_TIMEOUT_SECONDS = 3600
+DEFAULT_BASH_TIMEOUT_SECONDS = 120
 DEFAULT_RUNTIME_ROOT = Path.home() / "Documents" / "metalanguage_runs"
 BUNDLED_BOOTSTRAP_SEED_DIR = PROJECT_ROOT / "seeds" / "bootstrap"
 
@@ -240,7 +241,13 @@ def _extract_text_from_response(response_json: dict[str, Any]) -> str:
     return "\n".join(parts).strip()
 
 
-def _run_bash_tool(command: str, working_directory: str, rollout_username: str | None = None) -> dict[str, Any]:
+def _run_bash_tool(
+    command: str,
+    working_directory: str,
+    *,
+    timeout_seconds: int,
+    rollout_username: str | None = None,
+) -> dict[str, Any]:
     try:
         git_identity = rollout_username or Path(working_directory).name
         env = os.environ.copy()
@@ -266,7 +273,7 @@ def _run_bash_tool(command: str, working_directory: str, rollout_username: str |
             cwd=working_directory,
             text=True,
             capture_output=True,
-            timeout=30,
+            timeout=timeout_seconds,
             env=env,
         )
         return {
@@ -279,7 +286,7 @@ def _run_bash_tool(command: str, working_directory: str, rollout_username: str |
         return {
             "exit_code": 124,
             "stdout": exc.stdout or "",
-            "stderr": (exc.stderr or "") + "\nCommand timed out after 30 seconds.",
+            "stderr": (exc.stderr or "") + f"\nCommand timed out after {timeout_seconds} seconds.",
             "timed_out": True,
         }
 
@@ -593,6 +600,7 @@ def run_worker(
     rollout_index: int,
     rollout_username: str,
     timeout_seconds: int,
+    bash_timeout_seconds: int,
     progress_callback: Any = None,
 ) -> WorkerResult:
     """Run a multi-turn tool-calling worker loop and return final assistant text."""
@@ -753,6 +761,7 @@ def run_worker(
                     tool_result = _run_bash_tool(
                         command=command,
                         working_directory=safe_wd,
+                        timeout_seconds=bash_timeout_seconds,
                         rollout_username=rollout_username,
                     )
                     after_shared = _snapshot_workspace_files(shared_workspace_dir)
@@ -1047,6 +1056,12 @@ def parse_args() -> argparse.Namespace:
         help="Maximum wall-clock seconds per rollout before marking that rollout failed.",
     )
     parser.add_argument(
+        "--bash-timeout-seconds",
+        type=int,
+        default=DEFAULT_BASH_TIMEOUT_SECONDS,
+        help="Maximum wall-clock seconds per worker bash command before returning a command timeout.",
+    )
+    parser.add_argument(
         "--fail-on-rollout-error",
         action="store_true",
         help=(
@@ -1136,6 +1151,8 @@ def main() -> None:
         raise ValueError("--num-rollouts must be > 0")
     if args.worker_timeout_seconds <= 0:
         raise ValueError("--worker-timeout-seconds must be > 0")
+    if args.bash_timeout_seconds <= 0:
+        raise ValueError("--bash-timeout-seconds must be > 0")
     rollout_usernames = [f"rollout_user_{idx:03d}" for idx in range(args.num_rollouts)]
 
     load_dotenv()
@@ -1403,6 +1420,7 @@ def main() -> None:
                         rollout_index=rollout_index,
                         rollout_username=rollout_username,
                         timeout_seconds=args.worker_timeout_seconds,
+                        bash_timeout_seconds=args.bash_timeout_seconds,
                         progress_callback=_progress,
                     )
                 except BaseException as exc:
@@ -1502,6 +1520,7 @@ def main() -> None:
                 "model": args.model,
                 "num_rollouts": args.num_rollouts,
                 "worker_timeout_seconds": args.worker_timeout_seconds,
+                "bash_timeout_seconds": args.bash_timeout_seconds,
                 "config_name": args.config_name,
                 "runtime_root": str(runtime_root),
                 "dataset_cache_dir": str(dataset_cache_dir),
