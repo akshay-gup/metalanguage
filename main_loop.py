@@ -1009,6 +1009,14 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_WORKER_TIMEOUT_SECONDS,
         help="Maximum wall-clock seconds per rollout before marking that rollout failed.",
     )
+    parser.add_argument(
+        "--fail-on-rollout-error",
+        action="store_true",
+        help=(
+            "Exit nonzero when any rollout has a worker/runtime error, even if "
+            "successful parent seeds were produced."
+        ),
+    )
     parser.add_argument("--question-key", default=None)
     parser.add_argument("--answer-key", default=None)
     parser.add_argument("--id-key", default=None)
@@ -1603,7 +1611,30 @@ def main() -> None:
                 f"rollout {result.rollout_index}: {result.error}"
                 for result in sorted(failed_results, key=lambda item: item.rollout_index)
             )
-            raise RuntimeError(f"One or more rollouts failed after logging results: {details}")
+            append_progress_log(
+                progress_log_path,
+                progress_log_lock,
+                {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "event": "rollout_errors_detected",
+                    "generation": args.generation,
+                    "seed": args.seed,
+                    "task_index": task_index,
+                    "task_id": task.task_id,
+                    "problem_uid": problem_uid,
+                    "failed_rollout_count": len(failed_results),
+                    "fatal": args.fail_on_rollout_error,
+                    "failed_rollout_indices": [
+                        result.rollout_index
+                        for result in sorted(failed_results, key=lambda item: item.rollout_index)
+                    ],
+                    "details": details,
+                    "parent_pool_path": str(parent_pool_path),
+                },
+            )
+            if args.fail_on_rollout_error:
+                raise RuntimeError(f"One or more rollouts failed after logging results: {details}")
+            print(f"warning: one or more rollouts failed after logging results: {details}")
 
 
 if __name__ == "__main__":
