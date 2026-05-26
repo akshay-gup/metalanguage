@@ -81,6 +81,12 @@ V. Artificial Cultural Evolution Architecture
 - Consequence and Moving Targets
 - Option Value Rather Than Complexity
 - Operational Failure Modes and Counterpressures
+- The Complexification Gap
+- Step 0 in Biology and Culture
+- Token Currency as Minimal Physics
+- Interaction Primitives
+- Emergent Ecology
+- Real-World Correspondence
 - Core Summary
 
 VI. Operational Substrate and Tooling
@@ -163,6 +169,13 @@ language-like process structure should emerge only when context limits,
 transmission gaps, scarce attention, and grounded reuse make such structure
 necessary.
 
+The architecture further includes a token currency mechanism where compute
+budget functions as a proportional continuation medium. Lineages earn tokens by
+solving tasks and spend tokens to spawn rollouts, creating a route from grounded
+success to future search capacity. This mirrors the way biological and cultural
+systems couple persistence to energy and resource dynamics rather than to fixed
+reproductive quotas.
+
 ### Introduction
 
 Recursive self-improvement is usually imagined as an agent that inspects and
@@ -224,8 +237,10 @@ is expected to converge under constraints of finite media, lossy transmission,
 bounded readers, limited learning, and selection for reuse. Fourth, we diagnose
 why current LLM module and memory systems tend to plateau: they often provide
 storage without necessity, adoption without causal use, and selection at the
-wrong level. Finally, we propose a minimal architecture and experiment for
-artificial cultural evolution in LLM systems.
+wrong level. Finally, we propose a minimal architecture with token currency as
+the allocation mechanism, allowing endogenous ecological pressure to emerge
+without predefining mature social rules, and describe experiments for artificial
+cultural evolution in LLM systems.
 
 ### Synthesis
 
@@ -250,6 +265,13 @@ gaps, bounded seeds, selective public archives, scarce attention, deterministic
 verification, and downstream consequences. Under those pressures, compact
 process language is not an aesthetic goal. It is the structure that makes
 cumulative continuation possible.
+
+The architecture also requires proportional continuation. Lineages that solve
+tasks efficiently should accumulate more future attempts, while lineages that
+waste scarce context and compute should shrink. Token currency supplies that
+selection-energy layer. Interaction primitives such as reading, copying, forking,
+citing, patching, and allocating earned tokens then make specialization and
+transfer dynamics possible without predefining a mature social ontology.
 
 ## II. Recursive Systems and Language
 
@@ -1938,6 +1960,153 @@ without creating new gradients. Counterpressures include task variation, archive
 consequences, dependency formation, shifting problem pools, and maintenance
 burdens created by prior success.
 
+### The Complexification Gap
+
+The architecture above supplies the structural components for artificial
+cultural evolution: fixed constructor, ephemeral workspace, vertical seed,
+public archive, bounded attention, and selection mechanisms. Those components
+are necessary, but they do not yet explain self-complexification. With fixed task
+difficulty and uniform continuation rights, the system can converge. The archive
+may grow, but it remains optional memory rather than an environment that later
+agents must inhabit.
+
+Uniform continuation is especially weak. If every rollout that crosses a task
+threshold receives the same number of descendants, then efficiency, compression,
+reuse, and artifact production are only weakly selected. The system still has a
+binary success filter, but it lacks a mechanism by which better conversion of
+scarce resources becomes more future search.
+
+Biology and culture complexify because prior success changes later selection
+conditions. Cyanobacteria altered the atmosphere; agriculture produced surplus;
+surplus enabled cities; cities created coordination, maintenance, and governance
+problems. The analogue in an artificial system is not reward for complexity
+itself. It is that successful artifacts become future dependencies, navigation
+problems, compatibility constraints, trust targets, and maintenance burdens.
+
+This endogenous pressure must remain tethered to exogenous ground. Generated
+complexity can easily become ritual, spam, overfitting, or bureaucracy. A useful
+dependency chain ultimately reaches externally evaluated consequences: better
+task performance, lower cost, greater robustness, improved recovery, or an
+expanded class of solvable tasks. If the chain to grounded consequence breaks,
+the accumulated structure should lose continuation value.
+
+### Step 0 in Biology and Culture
+
+The minimal origin pattern is smaller than mature biological or cultural
+ecology. Biology begins with fixed physical laws, energy flow, time, variation,
+and persistence. Culture begins with fixed human biology, material needs,
+resource flow, learning variation, and persistence through memory, imitation, and
+records. Complex organisms, language, tools, institutions, and sciences appear
+only later.
+
+Both systems combine individual limits with system-level abundance. Organisms
+have bounded bodies and lifetimes; humans have bounded attention and working
+memory. Yet energy, problems, and social opportunities continue beyond any
+single instance. Fresh instances inherit from exhausted ones, so bounded lives
+can still support cumulative structure.
+
+Both systems also connect resource conversion to continuation. Organisms that
+obtain more usable energy tend to leave more descendants. Cultural groups and
+organizations that convert resources into useful work tend to recruit, copy,
+teach, hire, or found successors. This is not a guarantee of adaptive complexity;
+it is a pressure by which efficient persistence can compound.
+
+Transfer mechanisms appear early. Energy moves through predation, parasitism,
+and symbiosis. Human resources move through trade, theft, inheritance, taxation,
+employment, and patronage. The mature institutions differ, but the primitive
+fact is shared: resources can move between bounded actors, and those transfers
+reshape the local ecology.
+
+### Token Currency as Minimal Physics
+
+Tokens function as the conserved scarce medium through which task success
+becomes continuation capacity. They are not merely an accounting device. If
+rollouts cost tokens and externally verified success earns future tokens, then
+lineages face direct pressure to solve tasks cheaply, externalize reusable
+process, and allocate context carefully.
+
+The minimal setup is:
+
+- a global token inflow or generation budget;
+- token cost for input, output, tools, and archive access;
+- earned tokens for externally scored task success;
+- lineage balances that fund future rollouts;
+- bounded context and bounded seeds;
+- persistent vertical lineage and public archive channels.
+
+This replaces uniform allocation among successful rollouts with proportional
+continuation. Efficient lineages accumulate more attempts. Inefficient lineages
+shrink or disappear. Artifact retrieval also receives an endogenous price:
+reading an artifact is valuable only when the expected savings in search,
+context, error, or repair exceed the cost of retrieving and integrating it.
+
+Token currency alone is not open-ended ecology. It can still drive convergence
+on a static benchmark. It becomes ecological only when successful artifacts alter
+future conditions by becoming dependencies, shortcuts, standards, risks,
+interfaces, or maintenance obligations for later agents.
+
+### Interaction Primitives
+
+The system should expose primitive interactions, not a mature social ontology.
+Agents may read public artifacts, copy or fork them, cite dependencies, publish
+counterevidence, propose patches, and allocate earned tokens under audited
+rules. Direct in-place modification of another lineage's artifact should be
+controlled by provenance and validation; otherwise the archive becomes writable
+noise rather than a selective substrate.
+
+These primitives make trade-like, predation-like, parasitic, symbiotic, and
+institutional dynamics possible without coding those categories as initial
+roles. The interaction space is designed. The interaction rules are allowed to
+stabilize only if they help descendants operate under scarcity.
+
+A conservative first implementation need not permit unrestricted token transfer.
+It can assign delayed creator credit when independent descendants use an artifact
+and measurably improve score, cost, robustness, or task reach. Direct transfers
+can then be tested as a stronger ecological variant, with collusion and reward
+laundering treated as expected failure modes.
+
+### Emergent Ecology
+
+A token economy becomes an ecology when artifacts form load-bearing layers. A
+tool saves search for a strategy. A strategy makes an index useful. An index
+makes conventions valuable. Conventions lower integration cost and make more
+complex tools usable. The point is not a designed hierarchy, but a dependency
+structure in which higher layers save scarce effort while remaining answerable
+to grounded tasks.
+
+A possible layering is:
+
+- base tasks and verifiers as exogenous ground;
+- tools and examples that reduce direct solution cost;
+- strategies and repair procedures that reduce search cost;
+- indexes and trust markers that reduce retrieval cost;
+- conventions and interfaces that reduce composition cost.
+
+Specialization becomes viable when producing useful artifacts and using useful
+artifacts are both routes to continuation. Some lineages may become tool
+builders, others integrators, others auditors, others problem explorers. Those
+roles should remain provisional. They persist only if they improve descendant
+performance under token, context, and attention limits.
+
+The death mechanism matters. Lineages that run out of continuation capacity
+cannot spawn rollouts. Artifacts that stop saving cost, improving robustness, or
+expanding reachable tasks should lose visibility. Without starvation and decay,
+the system accumulates junk faster than it accumulates culture.
+
+### Real-World Correspondence
+
+This setup is a simplified model of real LLM use. Teams have budgets; model
+calls cost money; successful workflows create value; useful tools, prompts,
+APIs, and procedures spread; inefficient teams shrink; open-source artifacts are
+forked; internal tools become dependencies; platforms create ecosystems.
+
+The mapping is not proof. It is a design check. If the architecture cannot
+model the simplified economy already surrounding LLMs, it is unlikely to support
+open-ended artificial culture. The target is not to prebuild contracts,
+reputation systems, markets, or institutions. It is to provide primitive
+resource, inheritance, and interaction conditions under which useful versions of
+those structures can appear if they solve real continuation problems.
+
 ### Core Summary
 
 - Base LLM: stable cognitive architecture.
@@ -1946,8 +2115,11 @@ burdens created by prior success.
 - Git archive: public cross-lineage culture.
 - Workspace: individual life.
 - Rollout: temporary phenotype/interactor.
-- Tasks and budgets: ecology.
-- Selection: differential continuation, uptake, trust, reuse, and dependency.
+- Tasks, budgets, and token currency: ecology and proportional continuation.
+- Interaction primitives: read, copy, fork, cite, patch, and allocate earned
+  resources.
+- Selection: differential continuation, uptake, trust, reuse, dependency, and
+  cost-sensitive future option value.
 - Compaction: the transmission bottleneck that turns a rollout into a bounded
   seed or carried artifact.
 - Bounded attention: the root scarcity that makes filters, indexes, trust, and
@@ -1957,16 +2129,18 @@ burdens created by prior success.
 
 The private seed is not DNA. It is vertically transmitted culture. Git is not
 automatically an ecology. It becomes one when artifacts compete for scarce
-attention, trust, context, dependency, validation, and downstream use.
+attention, trust, context, dependency, validation, token cost, and downstream
+use.
 
 The agent-centered view asks which lineages continue. The artifact-centered view
 asks which artifacts keep getting reconstructed. Both are required because
 agents and artifacts reproduce each other.
 
-The design principle is fixed primitive consequence, evolvable cultural filters,
-dual inheritance channels, delayed selection, and artifact visibility through
-successful adoption. Do not select for complexity itself. Select for future
-option value under bounded attention and changing constraints.
+The design principle is fixed primitive consequence, proportional continuation,
+evolvable cultural filters, dual inheritance channels, delayed selection, and
+artifact visibility through successful adoption. Do not select for complexity
+itself. Select for future option value under bounded attention, token scarcity,
+and changing constraints.
 
 ## VI. Operational Substrate and Tooling
 
@@ -2312,6 +2486,19 @@ bounded seeds become more reconstructible over generations, archive artifacts
 earn prominence through consumer-written evidence, regulatory documents improve
 navigation, and useful process conventions stabilize without being fully
 specified in advance.
+
+If token budget is too generous relative to task difficulty, artifacts will
+remain optional and no load-bearing dependency stack will form.
+
+If tasks are solvable without artifacts even under token scarcity, the ecology
+will plateau at direct task solving without specialization.
+
+If proportional continuation is present, efficient lineages should show compound
+growth over generations, accumulating tokens and spawning more rollouts.
+
+If interaction primitives are available, transfer dynamics such as trade,
+predation-like capture, parasitism, and symbiosis should become possible and
+measurable rather than being predefined as roles.
 
 ### Experiment Ledger
 
@@ -2991,6 +3178,17 @@ Open-Ended RSI as Hereditary Cultural Ecology:
 - Open-endedness requires both inheritance channels and ecological feedback from
   prior success.
 
+Endogenous Ecology Through Currency Dynamics:
+
+- Token currency as minimal physics for self-complexification.
+- Proportional continuation creates compound pressure without uniform allocation.
+- Interaction primitives make transfer dynamics possible without predefining
+  mature institutions.
+- Fixed tasks plus token currency are still insufficient unless artifacts become
+  load-bearing future conditions.
+- Self-complexification requires currency dynamics coupled to grounded dependency
+  chains, not designed complexity rules.
+
 ### Timeline Examples
 
 - In the biological timeline, substrate machinery stabilizes long before later
@@ -3076,6 +3274,15 @@ recombination.
     tools help without bypassing recursive cognitive feedback?
 
 15. What counts as falsification for the near-term version of the theory?
+
+16. What token budget ratio (base vs earned) creates the strongest selection
+    pressure without preventing exploration?
+
+17. What signs would indicate that emergent transfer dynamics (trade, predation,
+    symbiosis) are forming rather than remaining absent?
+
+18. How does the system avoid accumulating complex junk when self-complexification
+    begins, and what exogenous grounding mechanisms are most effective?
 
 ### Preconditions and Forcing Constraints
 
