@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from utils.hf_datasets import HFDatasetDataLoader
+from utils.codex_runner import resolve_codex_runner_bin, run_codex_rollout
 from utils.openrouter import OpenRouterAPIError, bash_tool, call_openrouter_with_tools, get_tool_calls
 from utils.reward import compute_rollout_reward
 from utils.task_store import (
@@ -69,6 +70,7 @@ class WorkerResult:
     stop_reason: str | None = None
     error_code: str | int | None = None
     error_message: str | None = None
+    metadata: dict[str, Any] | None = None
 
 
 SHARED_ATTRIBUTION_FILENAME = ".writers.jsonl"
@@ -80,6 +82,7 @@ DEFAULT_WORKER_TIMEOUT_SECONDS = 3600
 DEFAULT_BASH_TIMEOUT_SECONDS = 120
 DEFAULT_OPENROUTER_MAX_RETRIES = 5
 DEFAULT_RUNTIME_ROOT = Path.home() / "Documents" / "metalanguage_runs"
+DEFAULT_CODEX_HOME = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
 BUNDLED_BOOTSTRAP_SEED_DIR = PROJECT_ROOT / "seeds" / "bootstrap"
 
 
@@ -825,6 +828,51 @@ def run_worker(
     return WorkerResult(final_text=final_text, status="completed", stop_reason="final_message")
 
 
+def run_codex_worker(
+    *,
+    runner_bin: Path,
+    model: str,
+    workdir: Path,
+    codex_home: Path,
+    next_seed_dir: Path,
+    archive_repo_dir: Path,
+    shared_workspace_dir: Path,
+    rollout_username: str,
+    timeout_seconds: int,
+    sandbox_mode: str,
+    initial_user_text: str,
+    progress_callback: Any = None,
+) -> WorkerResult:
+    """Run one rollout through the Metalanguage-owned Codex runner."""
+    result = run_codex_rollout(
+        runner_bin=runner_bin,
+        model=model,
+        workdir=workdir,
+        codex_home=codex_home,
+        next_seed_dir=next_seed_dir,
+        archive_repo_dir=archive_repo_dir,
+        shared_workspace_dir=shared_workspace_dir,
+        rollout_username=rollout_username,
+        timeout_seconds=timeout_seconds,
+        sandbox_mode=sandbox_mode,
+        initial_user_text=initial_user_text,
+        progress_callback=progress_callback,
+    )
+    metadata = {
+        key: result.get(key)
+        for key in ["thread_id", "session_id", "request_path", "stderr_path", "events_path"]
+        if result.get(key) is not None
+    }
+    return WorkerResult(
+        final_text=str(result.get("final_text") or ""),
+        status=str(result.get("status") or "error"),
+        stop_reason=result.get("stop_reason"),
+        error_code=result.get("error_code"),
+        error_message=result.get("error_message"),
+        metadata=metadata,
+    )
+
+
 def persist_episode_outputs(temp_dir: Path, dest_root: Path, task_id: str) -> Path:
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     dest = dest_root / f"{ts}_{task_id}"
@@ -1054,6 +1102,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--split", default="train")
     parser.add_argument("--config-name", default=None)
     parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument(
+        "--worker-backend",
+        choices=["openrouter", "codex"],
+        default="openrouter",
+        help="Worker runtime to use for rollouts.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--generation", type=int, default=0)
     parser.add_argument(
@@ -1161,6 +1215,40 @@ def parse_args() -> argparse.Namespace:
         default="archive/world_repo",
         help="Durable cross-lineage Git archive exposed to every rollout.",
     )
+    parser.add_argument(
+        "--codex-home",
+        default=str(DEFAULT_CODEX_HOME),
+        help="Codex home used for auth/config when --worker-backend=codex.",
+    )
+    parser.add_argument(
+        "--codex-runner-bin",
+        default=None,
+        help=(
+            "Optional prebuilt metalanguage-codex-runner binary. If omitted, "
+            "the default crate target path is used and must already exist."
+        ),
+    )
+    parser.add_argument(
+        "--codex-build-runner",
+        action="store_true",
+        help="Build the Codex runner before starting. Off by default.",
+    )
+    parser.add_argument(
+        "--codex-runner-release",
+        action="store_true",
+        help="Use the release-profile Codex runner path, and build release when --codex-build-runner is set.",
+    )
+    parser.add_argument(
+        "--codex-sandbox-mode",
+        choices=["read-only", "workspace-write", "danger-full-access"],
+        default="workspace-write",
+        help="Codex sandbox mode for rollout workers.",
+    )
+    parser.add_argument(
+        "--codex-initial-prompt",
+        default="Read README.md.",
+        help="Initial user text submitted to the Codex runner for each rollout.",
+    )
     return parser.parse_args()
 
 
@@ -1177,9 +1265,17 @@ def main() -> None:
     rollout_usernames = [f"rollout_user_{idx:03d}" for idx in range(args.num_rollouts)]
 
     load_dotenv()
-    api_key = os.environ.get("OPENROUTER_API_KEY")
-    if not api_key:
+    api_key: str | None = os.environ.get("OPENROUTER_API_KEY")
+    if args.worker_backend == "openrouter" and not api_key:
         raise RuntimeError(f"OPENROUTER_API_KEY is required. Set it in the environment or {DEFAULT_ENV_PATH}.")
+    codex_home = Path(args.codex_home).expanduser().resolve()
+    codex_runner_bin: Path | None = None
+    if args.worker_backend == "codex":
+        codex_runner_bin = resolve_codex_runner_bin(
+            Path(args.codex_runner_bin) if args.codex_runner_bin else None,
+            release=args.codex_runner_release,
+            build=args.codex_build_runner,
+        )
 
     runtime_root = _resolve_runtime_root(args.runtime_root)
     runs_log_path = _resolve_runtime_path(args.runs_log, runtime_root, "--runs-log")
@@ -1427,24 +1523,44 @@ def main() -> None:
 
             try:
                 try:
-                    worker_result = run_worker(
-                        api_key=api_key,
-                        model=args.model,
-                        workdir=temp_dir,
-                        next_seed_dir=next_seed_dir,
-                        archive_repo_dir=archive_worktree.path,
-                        shared_workspace_dir=shared_workspace_dir,
-                        shared_workspace_write_log=shared_workspace_write_log,
-                        shared_workspace_lock=shared_workspace_lock,
-                        task_index=task_index,
-                        task_id=task.task_id,
-                        rollout_index=rollout_index,
-                        rollout_username=rollout_username,
-                        timeout_seconds=args.worker_timeout_seconds,
-                        bash_timeout_seconds=args.bash_timeout_seconds,
-                        openrouter_max_retries=args.openrouter_max_retries,
-                        progress_callback=_progress,
-                    )
+                    if args.worker_backend == "codex":
+                        if codex_runner_bin is None:
+                            raise RuntimeError("Codex runner binary was not initialized.")
+                        worker_result = run_codex_worker(
+                            runner_bin=codex_runner_bin,
+                            model=args.model,
+                            workdir=temp_dir,
+                            codex_home=codex_home,
+                            next_seed_dir=next_seed_dir,
+                            archive_repo_dir=archive_worktree.path,
+                            shared_workspace_dir=shared_workspace_dir,
+                            rollout_username=rollout_username,
+                            timeout_seconds=args.worker_timeout_seconds,
+                            sandbox_mode=args.codex_sandbox_mode,
+                            initial_user_text=args.codex_initial_prompt,
+                            progress_callback=_progress,
+                        )
+                    else:
+                        if api_key is None:
+                            raise RuntimeError("OPENROUTER_API_KEY is required for the OpenRouter backend.")
+                        worker_result = run_worker(
+                            api_key=api_key,
+                            model=args.model,
+                            workdir=temp_dir,
+                            next_seed_dir=next_seed_dir,
+                            archive_repo_dir=archive_worktree.path,
+                            shared_workspace_dir=shared_workspace_dir,
+                            shared_workspace_write_log=shared_workspace_write_log,
+                            shared_workspace_lock=shared_workspace_lock,
+                            task_index=task_index,
+                            task_id=task.task_id,
+                            rollout_index=rollout_index,
+                            rollout_username=rollout_username,
+                            timeout_seconds=args.worker_timeout_seconds,
+                            bash_timeout_seconds=args.bash_timeout_seconds,
+                            openrouter_max_retries=args.openrouter_max_retries,
+                            progress_callback=_progress,
+                        )
                 except BaseException as exc:
                     worker_result = WorkerResult(
                         final_text="",
@@ -1531,6 +1647,8 @@ def main() -> None:
                 "worker_stop_reason": worker_result.stop_reason,
                 "worker_error_code": worker_result.error_code,
                 "worker_error_message": worker_result.error_message,
+                "worker_backend": args.worker_backend,
+                "worker_metadata": worker_result.metadata,
                 "solved": solved,
                 "reward": reward,
                 "output_path": str(output_dir),
@@ -1544,6 +1662,10 @@ def main() -> None:
                 "worker_timeout_seconds": args.worker_timeout_seconds,
                 "bash_timeout_seconds": args.bash_timeout_seconds,
                 "openrouter_max_retries": args.openrouter_max_retries,
+                "codex_home": str(codex_home) if args.worker_backend == "codex" else None,
+                "codex_runner_bin": str(codex_runner_bin) if codex_runner_bin is not None else None,
+                "codex_sandbox_mode": args.codex_sandbox_mode if args.worker_backend == "codex" else None,
+                "codex_initial_prompt": args.codex_initial_prompt if args.worker_backend == "codex" else None,
                 "config_name": args.config_name,
                 "runtime_root": str(runtime_root),
                 "dataset_cache_dir": str(dataset_cache_dir),
@@ -1633,6 +1755,8 @@ def main() -> None:
                                     "worker_stop_reason": type(exc).__name__,
                                     "worker_error_code": None,
                                     "worker_error_message": str(exc),
+                                    "worker_backend": args.worker_backend,
+                                    "worker_metadata": None,
                                     "solved": False,
                                     "reward": 0.0,
                                     "output_path": None,
@@ -1644,6 +1768,12 @@ def main() -> None:
                                     "model": args.model,
                                     "num_rollouts": args.num_rollouts,
                                     "worker_timeout_seconds": args.worker_timeout_seconds,
+                                    "bash_timeout_seconds": args.bash_timeout_seconds,
+                                    "openrouter_max_retries": args.openrouter_max_retries,
+                                    "codex_home": str(codex_home) if args.worker_backend == "codex" else None,
+                                    "codex_runner_bin": str(codex_runner_bin) if codex_runner_bin is not None else None,
+                                    "codex_sandbox_mode": args.codex_sandbox_mode if args.worker_backend == "codex" else None,
+                                    "codex_initial_prompt": args.codex_initial_prompt if args.worker_backend == "codex" else None,
                                     "config_name": args.config_name,
                                     "runtime_root": str(runtime_root),
                                     "dataset_cache_dir": str(dataset_cache_dir),

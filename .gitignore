@@ -4,6 +4,8 @@
 .uv-cache/
 __pycache__/
 *.py[cod]
+target/
+build_logs/
 
 logs/
 archive/

@@ -71,3 +71,31 @@ take precedence over values in `.env`.
 - Manual iteration:
   - use `--step` to run exactly one task iteration, choosing the first incomplete task from the resume log or the next new task;
   - use `--all-tasks --start-task-index N --max-tasks 1` to run a specific shuffled dataset task index.
+
+### Codex rollout backend
+
+The default rollout backend remains OpenRouter. To run rollouts through the
+Metalanguage-owned Codex runner, build the Rust runner once:
+
+```bash
+cargo build --release --manifest-path crates/metalanguage-codex-runner/Cargo.toml
+```
+
+Then run one Codex-backed rollout:
+
+```bash
+uv run python -B main_loop.py \
+  --worker-backend codex \
+  --model gpt-5.5 \
+  --codex-runner-release \
+  --step \
+  --num-rollouts 1
+```
+
+Useful flags:
+
+- `--codex-build-runner`: build the runner before starting the episode.
+- `--codex-runner-bin PATH`: use an explicit prebuilt runner binary.
+- `--codex-home PATH`: choose the Codex auth/config directory.
+- `--codex-sandbox-mode read-only|workspace-write|danger-full-access`: choose the
+  rollout sandbox mode.
