@@ -84,6 +84,7 @@ DEFAULT_OPENROUTER_MAX_RETRIES = 5
 DEFAULT_RUNTIME_ROOT = Path.home() / "Documents" / "metalanguage_runs"
 DEFAULT_CODEX_HOME = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
 BUNDLED_BOOTSTRAP_SEED_DIR = PROJECT_ROOT / "seeds" / "bootstrap"
+CODEX_READ_README_BASE_INSTRUCTIONS = "Read README.md."
 
 
 def _strip_env_quotes(value: str) -> str:
@@ -841,6 +842,7 @@ def run_codex_worker(
     timeout_seconds: int,
     sandbox_mode: str,
     initial_user_text: str,
+    base_instructions: str | None = None,
     progress_callback: Any = None,
 ) -> WorkerResult:
     """Run one rollout through the Metalanguage-owned Codex runner."""
@@ -856,6 +858,7 @@ def run_codex_worker(
         timeout_seconds=timeout_seconds,
         sandbox_mode=sandbox_mode,
         initial_user_text=initial_user_text,
+        base_instructions=base_instructions,
         progress_callback=progress_callback,
     )
     metadata = {
@@ -871,6 +874,15 @@ def run_codex_worker(
         error_message=result.get("error_message"),
         metadata=metadata,
     )
+
+
+def resolve_codex_base_instructions(mode: str) -> str | None:
+    """Return fixed Codex base instructions, or None for Codex defaults."""
+    if mode == "codex":
+        return None
+    if mode == "read-readme":
+        return CODEX_READ_README_BASE_INSTRUCTIONS
+    raise ValueError(f"Unknown Codex base instructions mode: {mode}")
 
 
 def persist_episode_outputs(temp_dir: Path, dest_root: Path, task_id: str) -> Path:
@@ -1249,6 +1261,15 @@ def parse_args() -> argparse.Namespace:
         default="Read README.md.",
         help="Initial user text submitted to the Codex runner for each rollout.",
     )
+    parser.add_argument(
+        "--codex-base-instructions-mode",
+        choices=["codex", "read-readme"],
+        default="read-readme",
+        help=(
+            "Codex base-instructions mode. 'codex' uses the model catalog default; "
+            "'read-readme' uses the fixed scaffold instruction `Read README.md.`."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -1320,6 +1341,9 @@ def main() -> None:
     existing_records: list[dict[str, Any]] = []
     if not args.no_resume:
         all_records = load_existing_run_records(runs_log_path)
+        expected_codex_base_mode = (
+            args.codex_base_instructions_mode if args.worker_backend == "codex" else None
+        )
         existing_records = [
             rec
             for rec in all_records
@@ -1330,6 +1354,11 @@ def main() -> None:
             and rec.get("generation") == args.generation
             and rec.get("num_rollouts") == args.num_rollouts
             and rec.get("config_name") == args.config_name
+            and rec.get("worker_backend", "openrouter") == args.worker_backend
+            and (
+                args.worker_backend != "codex"
+                or rec.get("codex_base_instructions_mode", "codex") == expected_codex_base_mode
+            )
         ]
 
     existing_by_task: dict[int, dict[int, dict[str, Any]]] = {}
@@ -1513,12 +1542,23 @@ def main() -> None:
                 f"- shared_workspace_attribution: shared_workspace/{SHARED_ATTRIBUTION_FILENAME}\n",
                 encoding="utf-8",
             )
+            codex_base_instructions = (
+                resolve_codex_base_instructions(args.codex_base_instructions_mode)
+                if args.worker_backend == "codex"
+                else None
+            )
             _progress(
                 "workspace_prepared",
                 working_directory=str(temp_dir),
                 task_file=str(task_file),
                 runtime_file=str(runtime_file),
                 next_seed_dir=str(next_seed_dir),
+                codex_base_instructions_mode=(
+                    args.codex_base_instructions_mode if args.worker_backend == "codex" else None
+                ),
+                codex_base_instructions_chars=(
+                    len(codex_base_instructions) if codex_base_instructions is not None else None
+                ),
             )
 
             try:
@@ -1538,6 +1578,7 @@ def main() -> None:
                             timeout_seconds=args.worker_timeout_seconds,
                             sandbox_mode=args.codex_sandbox_mode,
                             initial_user_text=args.codex_initial_prompt,
+                            base_instructions=codex_base_instructions,
                             progress_callback=_progress,
                         )
                     else:
@@ -1666,6 +1707,14 @@ def main() -> None:
                 "codex_runner_bin": str(codex_runner_bin) if codex_runner_bin is not None else None,
                 "codex_sandbox_mode": args.codex_sandbox_mode if args.worker_backend == "codex" else None,
                 "codex_initial_prompt": args.codex_initial_prompt if args.worker_backend == "codex" else None,
+                "codex_base_instructions_mode": (
+                    args.codex_base_instructions_mode if args.worker_backend == "codex" else None
+                ),
+                "codex_base_instructions_chars": (
+                    len(codex_base_instructions)
+                    if args.worker_backend == "codex" and codex_base_instructions is not None
+                    else None
+                ),
                 "config_name": args.config_name,
                 "runtime_root": str(runtime_root),
                 "dataset_cache_dir": str(dataset_cache_dir),
@@ -1774,6 +1823,12 @@ def main() -> None:
                                     "codex_runner_bin": str(codex_runner_bin) if codex_runner_bin is not None else None,
                                     "codex_sandbox_mode": args.codex_sandbox_mode if args.worker_backend == "codex" else None,
                                     "codex_initial_prompt": args.codex_initial_prompt if args.worker_backend == "codex" else None,
+                                    "codex_base_instructions_mode": (
+                                        args.codex_base_instructions_mode
+                                        if args.worker_backend == "codex"
+                                        else None
+                                    ),
+                                    "codex_base_instructions_chars": None,
                                     "config_name": args.config_name,
                                     "runtime_root": str(runtime_root),
                                     "dataset_cache_dir": str(dataset_cache_dir),

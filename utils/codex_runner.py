@@ -94,6 +94,7 @@ def run_codex_rollout(
     timeout_seconds: int,
     sandbox_mode: str = "workspace-write",
     initial_user_text: str = "Read README.md.",
+    base_instructions: str | None = None,
     progress_callback: Callable[..., None] | None = None,
 ) -> dict[str, Any]:
     runner_bin = runner_bin.expanduser().resolve()
@@ -119,6 +120,8 @@ def run_codex_rollout(
             str(shared_workspace_dir),
         ],
     }
+    if base_instructions is not None and base_instructions.strip():
+        request["base_instructions"] = base_instructions
     request_path = workdir / "codex_runner.request.json"
     stderr_path = workdir / "codex_runner.stderr.log"
     stdout_events_path = workdir / "codex_runner.events.jsonl"

@@ -42,6 +42,7 @@ use serde_json::json;
 #[serde(rename_all = "snake_case")]
 struct RunnerRequest {
     model: Option<String>,
+    base_instructions: Option<String>,
     cwd: PathBuf,
     codex_home: Option<PathBuf>,
     initial_user_text: Option<String>,
@@ -87,9 +88,13 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
     let additional_writable_roots =
         normalize_paths(request.additional_writable_roots.unwrap_or_default())?;
     let sandbox_mode = parse_sandbox_mode(request.sandbox_mode.as_deref())?;
+    let base_instructions = request
+        .base_instructions
+        .filter(|value| !value.trim().is_empty());
 
     let mut overrides = ConfigOverrides {
         model: request.model.filter(|value| !value.trim().is_empty()),
+        base_instructions,
         cwd: Some(cwd.clone()),
         approval_policy: Some(AskForApproval::Never),
         sandbox_mode: Some(sandbox_mode),

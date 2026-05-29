@@ -51,6 +51,7 @@ take precedence over values in `.env`.
      using a per-rollout temporary worktree so only committed archive changes are merged back and uncommitted archive edits are discarded,
   5. copy the selected parent seed workspace into the child workspace, then write the current task as `task.md` with solution-like fields redacted,
   6. run OpenRouter worker with `run_bash` tool access and the minimal fixed prompt `Read README.md.`; operating doctrine is expected to come from the inherited parent seed,
+     or run Codex with a fixed base-instructions pointer to the same inherited seed,
   7. score solution via `utils/reward.py`, grounding correctness against the private stored row and validating reported ids,
   8. after all child rollouts for the task finish, persist each successful rollout's separate `next_seed/` directory as a parent seed candidate for the next task,
   9. append run metadata to a growing JSONL log and print one-line summary per rollout.
@@ -78,7 +79,7 @@ The default rollout backend remains OpenRouter. To run rollouts through the
 Metalanguage-owned Codex runner, build the Rust runner once:
 
 ```bash
-cargo build --release --manifest-path crates/metalanguage-codex-runner/Cargo.toml
+cargo build --manifest-path crates/metalanguage-codex-runner/Cargo.toml
 ```
 
 Then run one Codex-backed rollout:
@@ -87,7 +88,6 @@ Then run one Codex-backed rollout:
 uv run python -B main_loop.py \
   --worker-backend codex \
   --model gpt-5.5 \
-  --codex-runner-release \
   --step \
   --num-rollouts 1
 ```
@@ -99,3 +99,23 @@ Useful flags:
 - `--codex-home PATH`: choose the Codex auth/config directory.
 - `--codex-sandbox-mode read-only|workspace-write|danger-full-access`: choose the
   rollout sandbox mode.
+- `--codex-base-instructions-mode read-readme|codex`: choose whether Codex uses
+  the fixed scaffold base instruction `Read README.md.` (`read-readme`, the
+  default) or its model-catalog base instructions (`codex`).
+- `--codex-initial-prompt TEXT`: choose the first user message. With
+  `--codex-base-instructions-mode read-readme`, a useful value is
+  `"Read runtime.md, then task.md."` so the seed README is not duplicated in the
+  user turn.
+
+Example with the seed README as the evolvable prompt and Codex base instructions
+kept to the fixed scaffold pointer:
+
+```bash
+uv run python -B main_loop.py \
+  --worker-backend codex \
+  --model gpt-5.5 \
+  --codex-base-instructions-mode read-readme \
+  --codex-initial-prompt "Read runtime.md, then task.md." \
+  --step \
+  --num-rollouts 1
+```
