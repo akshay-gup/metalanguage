@@ -18,6 +18,7 @@ use codex_core_api::AuthManager;
 use codex_core_api::EnvironmentManager;
 use codex_core_api::EventMsg;
 use codex_core_api::ExecServerRuntimePaths;
+use codex_core_api::Feature;
 use codex_core_api::NewThread;
 use codex_core_api::Op;
 use codex_core_api::SessionSource;
@@ -112,12 +113,24 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
         overrides.workspace_roots = None;
     }
 
-    let config = ConfigBuilder::default()
+    let mut config = ConfigBuilder::default()
         .codex_home(codex_home.clone())
         .harness_overrides(overrides)
         .build()
         .await
         .context("load Codex config")?;
+    config
+        .features
+        .disable(Feature::SpawnCsv)
+        .context("disable Codex spawn CSV feature")?;
+    config
+        .features
+        .disable(Feature::Collab)
+        .context("disable Codex collab feature")?;
+    config
+        .features
+        .disable(Feature::MultiAgentV2)
+        .context("disable Codex multi-agent feature")?;
 
     let state_db = init_state_db(&config).await;
     let auth_manager =
@@ -382,6 +395,16 @@ async fn run_turn(
                 }))?;
                 bail!("turn aborted: {:?}", event.reason);
             }
+            EventMsg::CollabAgentSpawnBegin(_)
+            | EventMsg::CollabAgentSpawnEnd(_)
+            | EventMsg::CollabAgentInteractionBegin(_)
+            | EventMsg::CollabAgentInteractionEnd(_)
+            | EventMsg::CollabWaitingBegin(_)
+            | EventMsg::CollabWaitingEnd(_)
+            | EventMsg::CollabCloseBegin(_)
+            | EventMsg::CollabCloseEnd(_)
+            | EventMsg::CollabResumeBegin(_)
+            | EventMsg::CollabResumeEnd(_) => bail_with_event("collab_event_blocked")?,
             EventMsg::ExecApprovalRequest(_) => bail_with_event("exec_approval_requested")?,
             EventMsg::ApplyPatchApprovalRequest(_) => bail_with_event("patch_approval_requested")?,
             EventMsg::RequestPermissions(_) => bail_with_event("permissions_requested")?,
