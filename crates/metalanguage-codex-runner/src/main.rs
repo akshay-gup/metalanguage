@@ -11,6 +11,7 @@ use anyhow::anyhow;
 use anyhow::bail;
 use codex_core::config::ConfigBuilder;
 use codex_core::config::ConfigOverrides;
+use codex_core_api::AbsolutePathBuf;
 use codex_core_api::Arg0DispatchPaths;
 use codex_core_api::AskForApproval;
 use codex_core_api::AuthManager;
@@ -85,6 +86,7 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
     };
     let workspace_roots =
         normalize_paths(request.workspace_roots.unwrap_or_else(|| vec![cwd.clone()]))?;
+    let workspace_root_overrides = absolute_paths(&workspace_roots)?;
     let additional_writable_roots =
         normalize_paths(request.additional_writable_roots.unwrap_or_default())?;
     let sandbox_mode = parse_sandbox_mode(request.sandbox_mode.as_deref())?;
@@ -99,7 +101,7 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
         approval_policy: Some(AskForApproval::Never),
         sandbox_mode: Some(sandbox_mode),
         ephemeral: Some(true),
-        workspace_roots: Some(workspace_roots.clone()),
+        workspace_roots: Some(workspace_root_overrides),
         additional_writable_roots,
         codex_self_exe: arg0_paths.codex_self_exe.clone(),
         codex_linux_sandbox_exe: arg0_paths.codex_linux_sandbox_exe.clone(),
@@ -435,6 +437,16 @@ fn normalize_paths(paths: Vec<PathBuf>) -> anyhow::Result<Vec<PathBuf>> {
     paths
         .into_iter()
         .map(|path| normalize_existing_path(&path))
+        .collect()
+}
+
+fn absolute_paths(paths: &[PathBuf]) -> anyhow::Result<Vec<AbsolutePathBuf>> {
+    paths
+        .iter()
+        .map(|path| {
+            AbsolutePathBuf::from_absolute_path(path)
+                .with_context(|| format!("convert {} to absolute path", path.display()))
+        })
         .collect()
 }
 
