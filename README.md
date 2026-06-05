@@ -35,6 +35,7 @@ take precedence over values in `.env`.
 - `utils/reward.py`: reward/evaluation helpers used by training workflows.
 - `utils/openrouter.py`: helpers for OpenRouter Responses API calls.
 - `utils/task_store.py`: task-store persistence/redaction and rollout answer artifact helpers.
+- `utils/budget_ledger.py`: file-backed token-budget ledger and seed budget metadata helpers.
 - `utils/hf_datasets.py`:
   - `download_hf_dataset_to_file(...)` writes a Hugging Face dataset split to JSONL.
   - `HFDatasetDataLoader(...)` pulls dataset rows and yields mini-batches for training loops.
@@ -47,6 +48,7 @@ take precedence over values in `.env`.
   2. run 8 `--num-rollouts` child rollouts per task by default, concurrently in isolated temp workspaces (each with an auto-assigned unique rollout username),
   3. sample each child's parent (with replacement) from the prior task's successful rollouts,
   3.5. expose a shared cross-rollout workspace at `--rollout-temp-root/shared_workspace` where any rollout agent can leave files/messages for any other rollout agent (files written during the task batch are cleaned up after the batch; durable consequences must be copied into a seed, archive artifact, solution, or later behavior),
+  3.6. assign every rollout instance a UUID and record an `instance_created` event in the token-budget ledger,
   4. expose `archive/world_repo` by default as the durable cross-lineage Git archive available to every rollout (override with `--archive-repo-dir`),
      using a per-rollout temporary worktree so only committed archive changes are merged back and uncommitted archive edits are discarded,
   5. copy the selected parent seed workspace into the child workspace, then write the current task as `task.md` with solution-like fields redacted,
@@ -61,6 +63,10 @@ take precedence over values in `.env`.
   - absolute overrides for those paths are rejected unless they stay inside `--runtime-root`;
   - `--runtime-root` itself is rejected unless it stays inside `~/Documents`;
   - Hugging Face caches, process temp files, and worker shell home/cache/temp defaults are also redirected under the runtime root.
+- Budget ledger:
+  - append-only ledger events are written to `logs/budget_ledger.jsonl` under the runtime root;
+  - every rollout receives an internal `instance_uuid` recorded in progress logs, run logs, and the ledger;
+  - budget allocation, solve rewards, and direct inter-instance transfers are intentionally left for future parent tool-call mechanics.
 - Lineage behavior:
   - the first task can bootstrap without a parent seed;
   - after bootstrap, missing parent seeds are terminal and the loop will not silently continue as a fresh lineage.

@@ -28,8 +28,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from utils.hf_datasets import HFDatasetDataLoader
+from utils.budget_ledger import append_budget_event, new_instance_uuid
 from utils.codex_runner import resolve_codex_runner_bin, run_codex_rollout
+from utils.hf_datasets import HFDatasetDataLoader
 from utils.openrouter import OpenRouterAPIError, bash_tool, call_openrouter_with_tools, get_tool_calls
 from utils.reward import compute_rollout_reward
 from utils.task_store import (
@@ -1307,6 +1308,7 @@ def main() -> None:
     task_store_dir = _resolve_runtime_path(args.task_store_dir, runtime_root, "--task-store-dir")
     archive_repo_dir = _resolve_runtime_path(args.archive_repo_dir, runtime_root, "--archive-repo-dir")
     bootstrap_seed_dir = _resolve_runtime_path(args.bootstrap_seed_dir, runtime_root, "--bootstrap-seed-dir")
+    budget_ledger_events = runtime_root / "logs" / "budget_ledger.jsonl"
     dataset_cache_dir = _configure_runtime_environment(runtime_root)
     _ensure_runtime_bootstrap_seed(bootstrap_seed_dir)
 
@@ -1461,6 +1463,7 @@ def main() -> None:
             sampled_parent: Path | None = (
                 parent_pool[rollout_index % len(parent_pool)] if parent_pool else None
             )
+            instance_uuid = new_instance_uuid()
             started_at = time.monotonic()
 
             def _progress(event: str, **fields: Any) -> None:
@@ -1484,8 +1487,23 @@ def main() -> None:
                     "No parent seed available for non-bootstrap rollout; "
                     f"task_index={task_index} rollout_index={rollout_index}"
                 )
+            append_budget_event(
+                budget_ledger_events,
+                event_type="instance_created",
+                instance_uuid=instance_uuid,
+                metadata={
+                    "generation": args.generation,
+                    "seed": args.seed,
+                    "task_index": task_index,
+                    "rollout_index": rollout_index,
+                    "rollout_username": rollout_username,
+                    "task_id": task.task_id,
+                    "problem_uid": problem_uid,
+                },
+            )
             _progress(
                 "rollout_started",
+                instance_uuid=instance_uuid,
                 parent_rollout_dir=str(sampled_parent) if sampled_parent else None,
                 bootstrap_seed_dir=str(bootstrap_seed_dir) if sampled_parent is None else None,
             )
@@ -1683,6 +1701,7 @@ def main() -> None:
                 "task_index": task_index,
                 "rollout_index": rollout_index,
                 "rollout_username": rollout_username,
+                "instance_uuid": instance_uuid,
                 "task_id": task.task_id,
                 "problem_uid": problem_uid,
                 "reported_problem_uid": reported_problem_uid,
@@ -1691,6 +1710,7 @@ def main() -> None:
                 "bootstrap_seed_dir": str(bootstrap_seed_dir) if sampled_parent is None else None,
                 "next_rollout_dir": str(next_rollout_dir) if next_rollout_dir is not None else None,
                 "seed_viable": seed_viable,
+                "budget_ledger_events": str(budget_ledger_events),
                 "worker_status": worker_result.status,
                 "worker_stop_reason": worker_result.stop_reason,
                 "worker_error_code": worker_result.error_code,
@@ -1813,6 +1833,7 @@ def main() -> None:
                                     "parent_rollout_dir": None,
                                     "bootstrap_seed_dir": str(bootstrap_seed_dir),
                                     "next_rollout_dir": None,
+                                    "seed_viable": False,
                                     "worker_status": "error",
                                     "worker_stop_reason": type(exc).__name__,
                                     "worker_error_code": None,
