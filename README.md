@@ -46,7 +46,7 @@ take precedence over values in `.env`.
   1.5. use `moonshotai/kimi-k2.6` as the default OpenRouter model (override with `--model`),
   2. run 8 `--num-rollouts` child rollouts per task by default, concurrently in isolated temp workspaces (each with an auto-assigned unique rollout username),
   3. sample each child's parent (with replacement) from the prior task's successful rollouts,
-  3.5. expose a shared cross-rollout workspace at `--rollout-temp-root/shared_workspace` where any rollout agent can leave files/messages for any other rollout agent (files written by each rollout are cleaned up after that rollout ends),
+  3.5. expose a shared cross-rollout workspace at `--rollout-temp-root/shared_workspace` where any rollout agent can leave files/messages for any other rollout agent (files written during the task batch are cleaned up after the batch; durable consequences must be copied into a seed, archive artifact, solution, or later behavior),
   4. expose `archive/world_repo` by default as the durable cross-lineage Git archive available to every rollout (override with `--archive-repo-dir`),
      using a per-rollout temporary worktree so only committed archive changes are merged back and uncommitted archive edits are discarded,
   5. copy the selected parent seed workspace into the child workspace, then write the current task as `task.md` with solution-like fields redacted,
