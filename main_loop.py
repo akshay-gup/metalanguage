@@ -1329,13 +1329,11 @@ def main() -> None:
     def _build_parent_pool(successes: list[Path], target_size: int) -> list[Path]:
         """Construct the next-task parent pool.
 
-        If we have fewer successful workspaces than rollouts, sample with replacement
-        so every child rollout has an assigned parent.
+        Sample with replacement so strong parent seeds can receive multiple
+        child attempts and every child rollout has an assigned parent.
         """
         if not successes or target_size <= 0:
             return []
-        if len(successes) >= target_size:
-            return rng.sample(successes, target_size)
         return [rng.choice(successes) for _ in range(target_size)]
 
     existing_records: list[dict[str, Any]] = []
