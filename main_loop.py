@@ -591,11 +591,30 @@ def _api_error_limit_stop(exc: OpenRouterAPIError) -> tuple[str | None, str | in
     return None, None, None
 
 
+def _extract_token_usage(response_json: dict[str, Any]) -> dict[str, int] | None:
+    usage = response_json.get("usage")
+    response = response_json.get("response")
+    if not isinstance(usage, dict) and isinstance(response, dict):
+        usage = response.get("usage")
+    if not isinstance(usage, dict):
+        return None
+
+    input_tokens = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
+    output_tokens = int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
+    total_tokens = int(usage.get("total_tokens") or input_tokens + output_tokens)
+    if total_tokens <= 0:
+        return None
+    return {"input_tokens": input_tokens, "output_tokens": output_tokens, "total_tokens": total_tokens}
+
+
 def run_worker(
     *,
     api_key: str,
     model: str,
     workdir: Path,
+    budget_ledger_events: Path,
+    instance_uuid: str,
+    rollout_token_budget_tokens: int | None,
     next_seed_dir: Path,
     archive_repo_dir: Path,
     shared_workspace_dir: Path,
@@ -626,10 +645,19 @@ def run_worker(
     final_text = ""
     command_index = 0
     turn_count = 0
+    tokens_spent = 0
     started_at = time.monotonic()
     while True:
         turn_count += 1
         elapsed_seconds = time.monotonic() - started_at
+        if rollout_token_budget_tokens is not None and tokens_spent >= rollout_token_budget_tokens:
+            return WorkerResult(
+                final_text=final_text,
+                status="budget_exhausted",
+                stop_reason="token_budget_exhausted",
+                error_code="token_budget_exhausted",
+                error_message=f"Token budget exhausted: {tokens_spent}/{rollout_token_budget_tokens}.",
+            )
         if elapsed_seconds > timeout_seconds:
             if progress_callback is not None:
                 progress_callback(
@@ -669,6 +697,11 @@ def run_worker(
                 tools=[bash_tool],
                 tool_choice="auto",
                 timeout=120,
+                max_output_tokens=(
+                    max(1, rollout_token_budget_tokens - tokens_spent)
+                    if rollout_token_budget_tokens is not None
+                    else None
+                ),
                 max_retries=openrouter_max_retries,
                 retry_callback=retry_callback if progress_callback is not None else None,
             )
@@ -686,6 +719,32 @@ def run_worker(
 
         if not isinstance(response, dict):
             raise RuntimeError("Unexpected non-JSON response in non-stream mode.")
+
+        usage = _extract_token_usage(response)
+        if usage is None and rollout_token_budget_tokens is not None:
+            return WorkerResult(
+                final_text=_extract_text_from_response(response) or final_text,
+                status="budget_tracking_error",
+                stop_reason="missing_token_usage",
+                error_code="missing_token_usage",
+                error_message="OpenRouter response did not include token usage for budget enforcement.",
+            )
+        if usage is not None:
+            tokens_used = usage["total_tokens"]
+            tokens_spent += tokens_used
+            append_budget_event(
+                budget_ledger_events,
+                event_type="token_usage",
+                instance_uuid=instance_uuid,
+                amount_tokens=tokens_used,
+                metadata={
+                    "turn_count": turn_count,
+                    "backend": "openrouter",
+                    "input_tokens": usage["input_tokens"],
+                    "output_tokens": usage["output_tokens"],
+                    "tokens_spent": tokens_spent,
+                },
+            )
 
         status, code, message = _response_limit_stop(response)
         if status is not None:
@@ -705,6 +764,17 @@ def run_worker(
                 turn_count=turn_count,
                 tool_call_count=len(tool_calls),
                 response_status=response.get("status"),
+                token_usage=usage,
+                tokens_spent=tokens_spent,
+                rollout_token_budget_tokens=rollout_token_budget_tokens,
+            )
+        if rollout_token_budget_tokens is not None and tokens_spent > rollout_token_budget_tokens:
+            return WorkerResult(
+                final_text=_extract_text_from_response(response) or final_text,
+                status="budget_exhausted",
+                stop_reason="token_budget_exceeded",
+                error_code="token_budget_exceeded",
+                error_message=f"Token budget exceeded: {tokens_spent}/{rollout_token_budget_tokens}.",
             )
         if not tool_calls:
             final_text = _extract_text_from_response(response)
@@ -827,7 +897,12 @@ def run_worker(
                 }
             )
 
-    return WorkerResult(final_text=final_text, status="completed", stop_reason="final_message")
+    return WorkerResult(
+        final_text=final_text,
+        status="completed",
+        stop_reason="final_message",
+        metadata={"tokens_spent": tokens_spent},
+    )
 
 
 def run_codex_worker(
@@ -835,6 +910,9 @@ def run_codex_worker(
     runner_bin: Path,
     model: str,
     workdir: Path,
+    budget_ledger_events: Path,
+    instance_uuid: str,
+    rollout_token_budget_tokens: int | None,
     codex_home: Path,
     next_seed_dir: Path,
     archive_repo_dir: Path,
@@ -847,6 +925,23 @@ def run_codex_worker(
     progress_callback: Any = None,
 ) -> WorkerResult:
     """Run one rollout through the Metalanguage-owned Codex runner."""
+
+    def record_token_usage(usage: dict[str, int], tokens_spent: int) -> None:
+        append_budget_event(
+            budget_ledger_events,
+            event_type="token_usage",
+            instance_uuid=instance_uuid,
+            amount_tokens=usage["total_tokens"],
+            metadata={
+                "backend": "codex",
+                "input_tokens": usage["input_tokens"],
+                "cached_input_tokens": usage["cached_input_tokens"],
+                "output_tokens": usage["output_tokens"],
+                "reasoning_output_tokens": usage["reasoning_output_tokens"],
+                "tokens_spent": tokens_spent,
+            },
+        )
+
     result = run_codex_rollout(
         runner_bin=runner_bin,
         model=model,
@@ -860,11 +955,21 @@ def run_codex_worker(
         sandbox_mode=sandbox_mode,
         initial_user_text=initial_user_text,
         base_instructions=base_instructions,
+        rollout_token_budget_tokens=rollout_token_budget_tokens,
+        token_usage_callback=record_token_usage,
         progress_callback=progress_callback,
     )
     metadata = {
         key: result.get(key)
-        for key in ["thread_id", "session_id", "request_path", "stderr_path", "events_path"]
+        for key in [
+            "thread_id",
+            "session_id",
+            "tokens_spent",
+            "rollout_token_budget_tokens",
+            "request_path",
+            "stderr_path",
+            "events_path",
+        ]
         if result.get(key) is not None
     }
     return WorkerResult(
@@ -1224,6 +1329,12 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--rollout-token-budget-tokens",
+        type=int,
+        default=None,
+        help="Optional per-rollout model token budget. When set, no further model calls are made after reported usage exhausts it.",
+    )
+    parser.add_argument(
         "--archive-repo-dir",
         default="archive/world_repo",
         help="Durable cross-lineage Git archive exposed to every rollout.",
@@ -1284,6 +1395,8 @@ def main() -> None:
         raise ValueError("--bash-timeout-seconds must be > 0")
     if args.openrouter_max_retries < 0:
         raise ValueError("--openrouter-max-retries must be >= 0")
+    if args.rollout_token_budget_tokens is not None and args.rollout_token_budget_tokens <= 0:
+        raise ValueError("--rollout-token-budget-tokens must be > 0 when set")
     rollout_usernames = [f"rollout_user_{idx:03d}" for idx in range(args.num_rollouts)]
 
     load_dotenv()
@@ -1355,6 +1468,7 @@ def main() -> None:
             and rec.get("num_rollouts") == args.num_rollouts
             and rec.get("config_name") == args.config_name
             and rec.get("worker_backend", "openrouter") == args.worker_backend
+            and rec.get("rollout_token_budget_tokens") == args.rollout_token_budget_tokens
             and (
                 args.worker_backend != "codex"
                 or rec.get("codex_base_instructions_mode", "codex") == expected_codex_base_mode
@@ -1586,6 +1700,9 @@ def main() -> None:
                             runner_bin=codex_runner_bin,
                             model=args.model,
                             workdir=temp_dir,
+                            budget_ledger_events=budget_ledger_events,
+                            instance_uuid=instance_uuid,
+                            rollout_token_budget_tokens=args.rollout_token_budget_tokens,
                             codex_home=codex_home,
                             next_seed_dir=next_seed_dir,
                             archive_repo_dir=archive_worktree.path,
@@ -1604,6 +1721,9 @@ def main() -> None:
                             api_key=api_key,
                             model=args.model,
                             workdir=temp_dir,
+                            budget_ledger_events=budget_ledger_events,
+                            instance_uuid=instance_uuid,
+                            rollout_token_budget_tokens=args.rollout_token_budget_tokens,
                             next_seed_dir=next_seed_dir,
                             archive_repo_dir=archive_worktree.path,
                             shared_workspace_dir=shared_workspace_dir,
@@ -1730,6 +1850,7 @@ def main() -> None:
                 "worker_timeout_seconds": args.worker_timeout_seconds,
                 "bash_timeout_seconds": args.bash_timeout_seconds,
                 "openrouter_max_retries": args.openrouter_max_retries,
+                "rollout_token_budget_tokens": args.rollout_token_budget_tokens,
                 "codex_home": str(codex_home) if args.worker_backend == "codex" else None,
                 "codex_runner_bin": str(codex_runner_bin) if codex_runner_bin is not None else None,
                 "codex_sandbox_mode": args.codex_sandbox_mode if args.worker_backend == "codex" else None,
@@ -1853,6 +1974,7 @@ def main() -> None:
                                     "worker_timeout_seconds": args.worker_timeout_seconds,
                                     "bash_timeout_seconds": args.bash_timeout_seconds,
                                     "openrouter_max_retries": args.openrouter_max_retries,
+                                    "rollout_token_budget_tokens": args.rollout_token_budget_tokens,
                                     "codex_home": str(codex_home) if args.worker_backend == "codex" else None,
                                     "codex_runner_bin": str(codex_runner_bin) if codex_runner_bin is not None else None,
                                     "codex_sandbox_mode": args.codex_sandbox_mode if args.worker_backend == "codex" else None,

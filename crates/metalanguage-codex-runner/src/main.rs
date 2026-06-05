@@ -227,6 +227,16 @@ async fn run_turn(
                     "model_context_window": event.model_context_window,
                 }))?;
             }
+            EventMsg::TokenCount(event) => {
+                let info = event.info.as_ref();
+                emit(json!({
+                    "event": "token_usage",
+                    "turn_id": current_turn_id.as_deref(),
+                    "last": info.map(|info| &info.last_token_usage),
+                    "total": info.map(|info| &info.total_token_usage),
+                    "model_context_window": info.and_then(|info| info.model_context_window),
+                }))?;
+            }
             EventMsg::AgentMessageContentDelta(event) => {
                 emit(json!({
                     "event": "agent_message_delta",

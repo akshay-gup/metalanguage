@@ -66,6 +66,9 @@ take precedence over values in `.env`.
 - Budget ledger:
   - append-only ledger events are written to `logs/budget_ledger.jsonl` under the runtime root;
   - every rollout receives an internal `instance_uuid` recorded in progress logs, run logs, and the ledger;
+  - provider-reported model usage is recorded as `token_usage` events after OpenRouter calls and Codex usage events;
+  - `--rollout-token-budget-tokens` optionally stops a rollout when reported usage exhausts its per-rollout budget;
+  - tool responses are counted when they are sent back as model input on the next model call;
   - budget allocation, solve rewards, and direct inter-instance transfers are intentionally left for future parent tool-call mechanics.
 - Lineage behavior:
   - the first task can bootstrap without a parent seed;
