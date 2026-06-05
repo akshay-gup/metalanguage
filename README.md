@@ -53,7 +53,7 @@ take precedence over values in `.env`.
   6. run OpenRouter worker with `run_bash` tool access and the minimal fixed prompt `Read README.md.`; operating doctrine is expected to come from the inherited parent seed,
      or run Codex with a fixed base-instructions pointer to the same inherited seed,
   7. score solution via `utils/reward.py`, grounding correctness against the private stored row and validating reported ids,
-  8. after all child rollouts for the task finish, persist each successful rollout's separate `next_seed/` directory as a parent seed candidate for the next task,
+  8. after all child rollouts for the task finish, persist each successful rollout's separate `next_seed/` directory as a parent seed candidate for the next task only when `next_seed/README.md` exists and is non-empty,
   9. append run metadata to a growing JSONL log and print one-line summary per rollout.
 - Runtime containment:
   - generated state is rooted at `~/Documents/metalanguage_runs` by default;

@@ -1668,6 +1668,14 @@ def main() -> None:
             )
             _progress("episode_persisted", output_path=str(output_dir))
 
+            next_seed_readme = next_seed_dir / "README.md"
+            seed_viable = bool(
+                solved
+                and next_seed_readme.is_file()
+                and next_seed_readme.read_text(encoding="utf-8").strip()
+            )
+            next_rollout_dir = seed_rollout_dir if seed_viable else None
+
             record = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "generation": args.generation,
@@ -1681,7 +1689,8 @@ def main() -> None:
                 "reported_task_id": reported_task_id,
                 "parent_rollout_dir": str(sampled_parent) if sampled_parent else None,
                 "bootstrap_seed_dir": str(bootstrap_seed_dir) if sampled_parent is None else None,
-                "next_rollout_dir": str(seed_rollout_dir),
+                "next_rollout_dir": str(next_rollout_dir) if next_rollout_dir is not None else None,
+                "seed_viable": seed_viable,
                 "worker_status": worker_result.status,
                 "worker_stop_reason": worker_result.stop_reason,
                 "worker_error_code": worker_result.error_code,
@@ -1725,13 +1734,19 @@ def main() -> None:
             )
             if worker_result.status == "error":
                 summary += f" error={worker_result.stop_reason}"
-            if next_seed_dir.exists():
+            if seed_viable:
                 shutil.copytree(next_seed_dir, seed_rollout_dir, dirs_exist_ok=True)
                 _progress("next_seed_copied", next_rollout_dir=str(seed_rollout_dir))
+            elif solved:
+                _progress(
+                    "next_seed_rejected",
+                    next_seed_dir=str(next_seed_dir),
+                    reason="missing_or_empty_readme",
+                )
             return RolloutResult(
                 rollout_index=rollout_index,
                 record=record,
-                successful_dir=seed_rollout_dir if solved else None,
+                successful_dir=next_rollout_dir,
                 summary=summary,
                 error=worker_result.error_message if worker_result.status == "error" else None,
             )
