@@ -34,6 +34,8 @@ use codex_core_api::thread_store_from_config;
 use codex_protocol::config_types::SandboxMode;
 use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::TurnItem;
+use codex_protocol::models::PermissionProfile;
+use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::ExecOutputStream;
 use codex_protocol::protocol::PatchApplyStatus;
 use serde::Deserialize;
@@ -92,6 +94,18 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
     let additional_writable_roots =
         normalize_paths(request.additional_writable_roots.unwrap_or_default())?;
     let sandbox_mode = parse_sandbox_mode(request.sandbox_mode.as_deref())?;
+    let (sandbox_mode_override, permission_profile_override) = match sandbox_mode {
+        SandboxMode::WorkspaceWrite => (
+            None,
+            Some(PermissionProfile::workspace_write_with(
+                &[],
+                NetworkSandboxPolicy::Enabled,
+                /*exclude_tmpdir_env_var*/ false,
+                /*exclude_slash_tmp*/ false,
+            )),
+        ),
+        SandboxMode::ReadOnly | SandboxMode::DangerFullAccess => (Some(sandbox_mode), None),
+    };
     let base_instructions = request
         .base_instructions
         .filter(|value| !value.trim().is_empty());
@@ -101,7 +115,9 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
         base_instructions,
         cwd: Some(cwd.clone()),
         approval_policy: Some(AskForApproval::Never),
-        sandbox_mode: Some(sandbox_mode),
+        sandbox_mode: sandbox_mode_override,
+        permission_profile: permission_profile_override,
+        tools_web_search_request: Some(true),
         ephemeral: Some(true),
         workspace_roots: Some(workspace_root_overrides),
         additional_writable_roots,
