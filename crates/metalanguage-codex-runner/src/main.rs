@@ -52,6 +52,7 @@ struct RunnerRequest {
     sandbox_mode: Option<String>,
     workspace_roots: Option<Vec<PathBuf>>,
     additional_writable_roots: Option<Vec<PathBuf>>,
+    rollout_token_budget_tokens: Option<i64>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -188,7 +189,13 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
     let prompt = request
         .initial_user_text
         .unwrap_or_else(|| "Read README.md.".to_string());
-    let turn_result = run_turn(&thread, &thread_id.to_string(), prompt).await;
+    let turn_result = run_turn(
+        &thread,
+        &thread_id.to_string(),
+        prompt,
+        request.rollout_token_budget_tokens,
+    )
+    .await;
     let shutdown_result = thread.shutdown_and_wait().await;
     let _ = thread_manager.remove_thread(&thread_id).await;
 
@@ -213,6 +220,7 @@ async fn run_turn(
     thread: &codex_core_api::CodexThread,
     thread_id: &str,
     prompt: String,
+    rollout_token_budget_tokens: Option<i64>,
 ) -> anyhow::Result<()> {
     thread
         .submit(Op::UserInput {
@@ -231,6 +239,7 @@ async fn run_turn(
 
     let mut current_turn_id: Option<String> = None;
     let mut final_text = String::new();
+    let mut tokens_spent = 0_i64;
     loop {
         let event = thread.next_event().await.context("read Codex event")?;
         match &event.msg {
@@ -244,13 +253,43 @@ async fn run_turn(
             }
             EventMsg::TokenCount(event) => {
                 let info = event.info.as_ref();
+                if let Some(info) = info {
+                    let total_tokens = info.total_token_usage.total_tokens.max(0);
+                    if total_tokens > 0 {
+                        tokens_spent = tokens_spent.max(total_tokens);
+                    } else {
+                        tokens_spent += info.last_token_usage.total_tokens.max(0);
+                    }
+                }
+                let tokens_remaining =
+                    rollout_token_budget_tokens.map(|budget| (budget - tokens_spent).max(0));
+                let budget_exhausted = rollout_token_budget_tokens
+                    .is_some_and(|budget| tokens_spent >= budget);
                 emit(json!({
                     "event": "token_usage",
                     "turn_id": current_turn_id.as_deref(),
                     "last": info.map(|info| &info.last_token_usage),
                     "total": info.map(|info| &info.total_token_usage),
                     "model_context_window": info.and_then(|info| info.model_context_window),
+                    "tokens_spent": tokens_spent,
+                    "tokens_remaining": tokens_remaining,
+                    "rollout_token_budget_tokens": rollout_token_budget_tokens,
+                    "budget_exhausted": budget_exhausted,
                 }))?;
+                if budget_exhausted {
+                    let budget = rollout_token_budget_tokens.unwrap_or_default();
+                    emit(json!({
+                        "event": "error",
+                        "error_code": "token_budget_exhausted",
+                        "error_message": format!(
+                            "Token budget exhausted: {tokens_spent}/{budget}."
+                        ),
+                        "tokens_spent": tokens_spent,
+                        "rollout_token_budget_tokens": budget,
+                    }))?;
+                    let _ = thread.submit(Op::Interrupt).await;
+                    bail!("token budget exhausted: {tokens_spent}/{budget}");
+                }
             }
             EventMsg::AgentMessageContentDelta(event) => {
                 emit(json!({

@@ -123,6 +123,8 @@ def run_codex_rollout(
             str(shared_workspace_dir),
         ],
     }
+    if rollout_token_budget_tokens is not None:
+        request["rollout_token_budget_tokens"] = rollout_token_budget_tokens
     if base_instructions is not None and base_instructions.strip():
         request["base_instructions"] = base_instructions
     request_path = workdir / "codex_runner.request.json"
@@ -368,6 +370,11 @@ def _handle_runner_line(
     elif name == "error":
         state["error_code"] = str(event.get("error_code") or "")
         state["error_message"] = str(event.get("error_message") or "")
+        if state["error_code"] == "token_budget_exhausted":
+            event_tokens_spent = _token_int(event.get("tokens_spent"))
+            if event_tokens_spent > int(state.get("tokens_spent") or 0):
+                state["tokens_spent"] = event_tokens_spent
+            state["budget_exhausted"] = True
 
     if progress_callback is not None:
         if name == "thread_started":
