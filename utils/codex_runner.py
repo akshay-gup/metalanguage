@@ -233,19 +233,6 @@ def run_codex_rollout(
                     final_text = str(event.get("final_text") or "")
             if state.get("budget_exhausted"):
                 budget_exhausted = True
-                proc.kill()
-                remaining = proc.stdout.read()
-                if remaining:
-                    for raw_line in remaining.splitlines():
-                        _handle_runner_line(
-                            raw_line,
-                            events_fh=events_fh,
-                            progress_callback=progress_callback,
-                            state=state,
-                            rollout_token_budget_tokens=rollout_token_budget_tokens,
-                            token_usage_callback=token_usage_callback,
-                        )
-                break
 
         return_code = proc.wait()
     thread_id = thread_id or state.get("thread_id") or None
@@ -357,7 +344,6 @@ def _handle_runner_line(
     token_usage = _record_codex_token_usage(
         event,
         state=state,
-        rollout_token_budget_tokens=rollout_token_budget_tokens,
         token_usage_callback=token_usage_callback,
     )
     if name == "thread_started":
@@ -432,28 +418,35 @@ def _record_codex_token_usage(
     event: dict[str, Any],
     *,
     state: dict[str, Any],
-    rollout_token_budget_tokens: int | None,
     token_usage_callback: TokenUsageCallback | None,
 ) -> dict[str, int] | None:
     if event.get("event") != "token_usage":
         return None
+    current_spent = int(state.get("tokens_spent") or 0)
+    event_tokens_spent = _token_int(event.get("tokens_spent"))
     total_usage = event.get("total")
     if isinstance(total_usage, dict):
         total_seen = _token_int(total_usage.get("total_tokens"))
         previous_seen = int(state.get("codex_total_tokens_seen") or 0)
-        if total_seen <= previous_seen:
+        if total_seen > 0 and total_seen <= previous_seen:
+            if event_tokens_spent > current_spent:
+                state["tokens_spent"] = event_tokens_spent
             return None
-        state["codex_total_tokens_seen"] = total_seen
+        if total_seen > 0:
+            state["codex_total_tokens_seen"] = total_seen
+
+    if event_tokens_spent > 0 and event_tokens_spent <= current_spent:
+        return None
 
     usage = _codex_usage_fields(event.get("last"))
     if usage is None:
+        if event_tokens_spent > current_spent:
+            state["tokens_spent"] = event_tokens_spent
         return None
-    tokens_spent = int(state.get("tokens_spent") or 0) + usage["total_tokens"]
+    tokens_spent = max(current_spent + usage["total_tokens"], event_tokens_spent)
     state["tokens_spent"] = tokens_spent
     if token_usage_callback is not None:
         token_usage_callback(usage, tokens_spent)
-    if rollout_token_budget_tokens is not None and tokens_spent >= rollout_token_budget_tokens:
-        state["budget_exhausted"] = True
     return usage
 
 
