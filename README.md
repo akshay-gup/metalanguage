@@ -62,7 +62,11 @@ take precedence over values in `.env`.
   - `--runs-log`, `--outputs-dir`, `--fixed-temp-dir`, `--rollout-temp-root`, `--task-store-dir`, `--archive-repo-dir`, and `--bootstrap-seed-dir` are resolved under `--runtime-root` when relative;
   - absolute overrides for those paths are rejected unless they stay inside `--runtime-root`;
   - `--runtime-root` itself is rejected unless it stays inside `~/Documents`;
-  - Hugging Face caches, process temp files, and worker shell home/cache/temp defaults are also redirected under the runtime root.
+  - Codex runner request, event, stderr, and continuation-context control files are written under `logs/rollout_control/<instance_uuid>/`, outside rollout and shared workspaces;
+  - worker home/cache/temp state is written under `logs/rollout_state/<instance_uuid>/`, outside rollout and shared workspaces;
+  - shared workspace write attribution is recorded only in the durable runtime log, not as supervisor-written files inside the shared workspace;
+  - rollout-created or modified shared workspace files are deleted after the active rollout batch finishes;
+  - Hugging Face caches and process temp files are also redirected under the runtime root.
 - Budget ledger:
   - append-only ledger events are written to `logs/budget_ledger.jsonl` under the runtime root;
   - a rebuildable projection cache is written next to the ledger and is used for live `budget_status`, transfer, and spawn budget checks;
