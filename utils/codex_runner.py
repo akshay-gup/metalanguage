@@ -57,11 +57,12 @@ def resolve_codex_runner_bin(
 def _prepare_rollout_env(
     *,
     workdir: Path,
+    worker_state_dir: Path,
     codex_home: Path,
     rollout_username: str | None,
 ) -> dict[str, str]:
     env = os.environ.copy()
-    worker_home = workdir / ".home"
+    worker_home = worker_state_dir / "home"
     worker_cache = worker_home / ".cache"
     worker_tmp = worker_home / "tmp"
     worker_hf_home = worker_cache / "huggingface"
@@ -88,6 +89,8 @@ def run_codex_rollout(
     runner_bin: Path,
     model: str,
     workdir: Path,
+    control_dir: Path,
+    worker_state_dir: Path,
     codex_home: Path,
     seed_output_dir: Path,
     archive_repo_dir: Path,
@@ -119,11 +122,13 @@ def run_codex_rollout(
             str(seed_output_dir),
             str(archive_repo_dir),
             str(shared_workspace_dir),
+            str(worker_state_dir),
         ],
         "additional_writable_roots": [
             str(seed_output_dir),
             str(archive_repo_dir),
             str(shared_workspace_dir),
+            str(worker_state_dir),
         ],
     }
     if rollout_token_budget_tokens is not None:
@@ -139,9 +144,11 @@ def run_codex_rollout(
         ]
     if base_instructions is not None and base_instructions.strip():
         request["base_instructions"] = base_instructions
-    request_path = workdir / "codex_runner.request.json"
-    stderr_path = workdir / "codex_runner.stderr.log"
-    stdout_events_path = workdir / "codex_runner.events.jsonl"
+    control_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(control_dir, 0o700)
+    request_path = control_dir / "codex_runner.request.json"
+    stderr_path = control_dir / "codex_runner.stderr.log"
+    stdout_events_path = control_dir / "codex_runner.events.jsonl"
     final_text = ""
     thread_id: str | None = None
     session_id: str | None = None
@@ -161,9 +168,11 @@ def run_codex_rollout(
         "budget_exhausted": False,
     }
     request_path.write_text(json.dumps(request, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.chmod(request_path, 0o600)
 
     env = _prepare_rollout_env(
         workdir=workdir,
+        worker_state_dir=worker_state_dir,
         codex_home=codex_home,
         rollout_username=rollout_username,
     )
@@ -171,6 +180,8 @@ def run_codex_rollout(
         "w",
         encoding="utf-8",
     ) as events_fh:
+        os.chmod(stderr_path, 0o600)
+        os.chmod(stdout_events_path, 0o600)
         proc = subprocess.Popen(
             [str(runner_bin)],
             cwd=PROJECT_ROOT,

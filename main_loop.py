@@ -88,8 +88,7 @@ class WorkerResult:
     metadata: dict[str, Any] | None = None
 
 
-SHARED_ATTRIBUTION_FILENAME = ".writers.jsonl"
-CONTINUATION_CONTEXT_FILENAME = ".continuation_context.json"
+CONTINUATION_CONTEXT_FILENAME = "continuation_context.json"
 SPAWN_CHILD_METADATA_FILENAME = ".spawn_child.json"
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_ENV_PATH = PROJECT_ROOT / ".env"
@@ -267,13 +266,14 @@ def _run_bash_tool(
     command: str,
     working_directory: str,
     *,
+    worker_state_dir: Path,
     timeout_seconds: int,
     rollout_username: str | None = None,
 ) -> dict[str, Any]:
     try:
         git_identity = rollout_username or Path(working_directory).name
         env = os.environ.copy()
-        worker_home = Path(working_directory) / ".home"
+        worker_home = worker_state_dir / "home"
         worker_cache = worker_home / ".cache"
         worker_tmp = worker_home / "tmp"
         worker_hf_home = worker_cache / "huggingface"
@@ -377,7 +377,6 @@ def _format_runtime_markdown(
         "- seed_output: seed_output/",
         "- archive: archive/",
         "- shared_workspace: shared_workspace/",
-        f"- shared_workspace_attribution: shared_workspace/{SHARED_ATTRIBUTION_FILENAME}",
         "",
         "Main-loop tools available to this rollout:",
         "",
@@ -449,9 +448,15 @@ def _resolve_spawn_seed_dir(context: dict[str, Any], seed_dir: str) -> tuple[Pat
     return candidate, None
 
 
-def _write_continuation_context(context: dict[str, Any]) -> Path:
-    context_path = Path(context["workdir"]) / CONTINUATION_CONTEXT_FILENAME
-    context_path.write_text(json.dumps(context, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+def _write_continuation_context(context: dict[str, Any], control_dir: Path) -> Path:
+    control_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(control_dir, 0o700)
+    context_path = control_dir / CONTINUATION_CONTEXT_FILENAME
+    temp_path = context_path.with_suffix(context_path.suffix + f".{os.getpid()}.tmp")
+    temp_path.write_text(json.dumps(context, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.chmod(temp_path, 0o600)
+    os.replace(temp_path, context_path)
+    os.chmod(context_path, 0o600)
     return context_path
 
 
@@ -814,8 +819,6 @@ def _snapshot_workspace_files(root: Path) -> dict[Path, tuple[int, int]]:
         if not path.is_file():
             continue
         rel = path.relative_to(root)
-        if rel.name == SHARED_ATTRIBUTION_FILENAME:
-            continue
         stat = path.stat()
         snapshot[rel] = (stat.st_size, stat.st_mtime_ns)
     return snapshot
@@ -877,18 +880,16 @@ def _append_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
 
 def _append_shared_attribution(
     *,
-    shared_workspace_dir: Path,
     durable_log_path: Path,
     events: list[dict[str, Any]],
 ) -> None:
     if not events:
         return
     _append_jsonl(durable_log_path, events)
-    _append_jsonl(shared_workspace_dir / SHARED_ATTRIBUTION_FILENAME, events)
 
 
 def _cleanup_rollout_shared_writes(root: Path, before: dict[Path, tuple[int, int]]) -> None:
-    """Delete files created or modified in the shared workspace by a rollout."""
+    """Delete files created or modified in the shared workspace by a completed rollout batch."""
     if not root.exists():
         return
 
@@ -899,15 +900,12 @@ def _cleanup_rollout_shared_writes(root: Path, before: dict[Path, tuple[int, int
         if target.exists() and target.is_file():
             target.unlink()
 
-    # Best-effort cleanup of now-empty directories under the shared root.
+    # Best-effort cleanup of directories emptied by removing rollout files.
     for directory in sorted((p for p in root.rglob("*") if p.is_dir()), key=lambda p: len(p.parts), reverse=True):
         try:
             directory.rmdir()
         except OSError:
             continue
-    attribution_path = root / SHARED_ATTRIBUTION_FILENAME
-    if attribution_path.exists():
-        attribution_path.unlink()
 
 
 def copy_seed_workspace(parent_dir: Path, workdir: Path) -> None:
@@ -1168,6 +1166,7 @@ def run_worker(
     seed_output_dir: Path,
     archive_repo_dir: Path,
     shared_workspace_dir: Path,
+    worker_state_dir: Path,
     shared_workspace_write_log: Path,
     shared_workspace_lock: threading.Lock,
     task_index: int,
@@ -1448,6 +1447,7 @@ def run_worker(
                     tool_result = _run_bash_tool(
                         command=command,
                         working_directory=safe_wd,
+                        worker_state_dir=worker_state_dir,
                         timeout_seconds=bash_timeout_seconds,
                         rollout_username=rollout_username,
                     )
@@ -1464,7 +1464,6 @@ def run_worker(
                         working_directory=safe_wd,
                     )
                     _append_shared_attribution(
-                        shared_workspace_dir=shared_workspace_dir,
                         durable_log_path=shared_workspace_write_log,
                         events=shared_events,
                     )
@@ -1519,6 +1518,8 @@ def run_codex_worker(
     runner_bin: Path,
     model: str,
     workdir: Path,
+    control_dir: Path,
+    worker_state_dir: Path,
     budget_ledger_events: Path,
     instance_uuid: str,
     rollout_token_budget_tokens: int | None,
@@ -1556,6 +1557,8 @@ def run_codex_worker(
         runner_bin=runner_bin,
         model=model,
         workdir=workdir,
+        control_dir=control_dir,
+        worker_state_dir=worker_state_dir,
         codex_home=codex_home,
         seed_output_dir=seed_output_dir,
         archive_repo_dir=archive_repo_dir,
@@ -2213,6 +2216,8 @@ def main() -> None:
             if rollout_budget_tokens is None:
                 rollout_budget_tokens = args.rollout_token_budget_tokens
             instance_uuid = task_instance_uuids[rollout_index]
+            rollout_control_dir = runtime_root / "logs" / "rollout_control" / instance_uuid
+            rollout_state_dir = runtime_root / "logs" / "rollout_state" / instance_uuid
             rollout_live_peer_instances = [
                 peer
                 for peer in live_peer_instances
@@ -2343,14 +2348,22 @@ def main() -> None:
                 codex_initial_prompt=args.codex_initial_prompt,
                 codex_base_instructions=codex_base_instructions,
             )
-            continuation_context_path = _write_continuation_context(continuation_context)
+            continuation_context_path = (
+                _write_continuation_context(continuation_context, rollout_control_dir)
+                if args.worker_backend == "codex"
+                else None
+            )
             _progress(
                 "workspace_prepared",
                 working_directory=str(temp_dir),
                 task_file=str(task_file),
                 runtime_file=str(runtime_file),
                 seed_output_dir=str(seed_output_dir),
-                continuation_context_path=str(continuation_context_path),
+                rollout_control_dir=str(rollout_control_dir) if args.worker_backend == "codex" else None,
+                rollout_state_dir=str(rollout_state_dir),
+                continuation_context_path=(
+                    str(continuation_context_path) if continuation_context_path is not None else None
+                ),
                 codex_base_instructions_mode=(
                     args.codex_base_instructions_mode if args.worker_backend == "codex" else None
                 ),
@@ -2368,6 +2381,8 @@ def main() -> None:
                             runner_bin=codex_runner_bin,
                             model=args.model,
                             workdir=temp_dir,
+                            control_dir=rollout_control_dir,
+                            worker_state_dir=rollout_state_dir,
                             budget_ledger_events=budget_ledger_events,
                             instance_uuid=instance_uuid,
                             rollout_token_budget_tokens=rollout_budget_tokens,
@@ -2396,6 +2411,7 @@ def main() -> None:
                             seed_output_dir=seed_output_dir,
                             archive_repo_dir=archive_worktree.path,
                             shared_workspace_dir=shared_workspace_dir,
+                            worker_state_dir=rollout_state_dir,
                             shared_workspace_write_log=shared_workspace_write_log,
                             shared_workspace_lock=shared_workspace_lock,
                             task_index=task_index,
@@ -2581,9 +2597,6 @@ def main() -> None:
                 continue
             missing_rollout_indices.append(rollout_index)
 
-        live_attribution_path = shared_workspace_dir / SHARED_ATTRIBUTION_FILENAME
-        if live_attribution_path.exists():
-            live_attribution_path.unlink()
         shared_snapshot = _snapshot_workspace_files(shared_workspace_dir)
         results: list[RolloutResult] = []
         if missing_rollout_indices:
