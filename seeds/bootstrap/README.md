@@ -3,13 +3,14 @@
 This file is the inherited operating packet for a fresh rollout. It is not
 background reading. Start here, then read `runtime.md`, then read `task.md`.
 Solve the current task, leave useful public traces when work creates reusable
-knowledge, and write a complete successor seed at `next_seed/README.md`.
+knowledge, write a complete successor seed directory, and call
+`spawn_child(seed_dir, initial_budget_tokens)` when lineage should continue.
 
 Read in this order:
 
 1. `README.md`: inherited doctrine, tool discipline, and seed contract.
-2. `runtime.md`: workspace-relative paths for task, solution, next seed,
-   archive, and shared live workspace.
+2. `runtime.md`: workspace-relative paths for task, solution, seed output,
+   archive, shared live workspace, and main-loop continuation tools.
 3. `task.md`: the current task. Solution-like fields are redacted.
 
 After reading those files, make a quick public-memory pass. Check whether the
@@ -112,9 +113,12 @@ from a compact signal.
 
 ## Vertical Seed
 
-Before finishing, write `next_seed/README.md`. This file becomes the starting
-README for a descendant. It is not a transcript and not merely a note about the
-task you solved. It must be a complete successor to this operating packet.
+Before finishing, decide whether this lineage should continue. If yes, write a
+complete seed workspace under `seed_output/`, call `budget_status()`, and then
+call `spawn_child(seed_dir, initial_budget_tokens)` with `seed_dir` set to
+`seed_output`. The whole directory is copied into the descendant that occupies a
+next-iteration rollout slot. It is not a transcript and not merely a note about
+the task you solved. It must be a complete successor to this operating packet.
 
 Minimum seed contract:
 
@@ -129,10 +133,10 @@ Minimum seed contract:
 - add compact rollout lessons under `## Latest Rollout Notes`
 - keep notes useful to a fresh reader who has no memory of your work
 
-When in doubt, copy this README into `next_seed/README.md` first, then edit the
-bottom notes. Do not replace the constitution with problem-specific notes. If a
-lesson belongs only to the current problem, label it that way. If a lesson
-generalizes across tasks, say why.
+When in doubt, copy this README into `seed_output/README.md`, then edit the
+bottom notes before calling `spawn_child`. Do not replace the constitution with
+problem-specific notes. If a lesson belongs only to the current problem, label
+it that way. If a lesson generalizes across tasks, say why.
 
 Useful seed material includes:
 

@@ -45,17 +45,17 @@ take precedence over values in `.env`.
 - `main_loop.py`: runs RLVR-style episodes end-to-end:
   1. by default, sample one task from `m-a-p/SuperGPQA` (or process all tasks with `--all-tasks`; override with `--dataset-name`),
   1.5. use `moonshotai/kimi-k2.6` as the default OpenRouter model (override with `--model`),
-  2. run 8 `--num-rollouts` child rollouts per task by default, concurrently in isolated temp workspaces (each with an auto-assigned unique rollout username),
-  3. sample each child's parent (with replacement) from the prior task's successful rollouts,
+  2. run 8 `--num-rollouts` rollout slots per task by default, concurrently in isolated temp workspaces (each with an auto-assigned unique rollout username),
+  3. assign each rollout index to the matching `spawn_child` slot claimed by the prior task's rollouts,
   3.5. expose a shared cross-rollout workspace at `--rollout-temp-root/shared_workspace` where any rollout agent can leave files/messages for any other rollout agent (files written during the task batch are cleaned up after the batch; durable consequences must be copied into a seed, archive artifact, solution, or later behavior),
   3.6. assign every rollout instance a UUID and record an `instance_created` event in the token-budget ledger,
   4. expose `archive/world_repo` by default as the durable cross-lineage Git archive available to every rollout (override with `--archive-repo-dir`),
      using a per-rollout temporary worktree so only committed archive changes are merged back and uncommitted archive edits are discarded,
-  5. copy the selected parent seed workspace into the child workspace, then write the current task as `task.md` with solution-like fields redacted,
+  5. copy the selected parent seed workspace into the rollout workspace, then write the current task as `task.md` with solution-like fields redacted,
   6. run OpenRouter worker with `run_bash` tool access and the minimal fixed prompt `Read README.md.`; operating doctrine is expected to come from the inherited parent seed,
      or run Codex with a fixed base-instructions pointer to the same inherited seed,
   7. score solution via `utils/reward.py`, grounding correctness against the private stored row and validating reported ids,
-  8. after all child rollouts for the task finish, persist each successful rollout's separate `next_seed/` directory as a parent seed candidate for the next task only when `next_seed/README.md` exists and is non-empty,
+  8. after all rollouts for the task finish, advance lineage through the `spawn_child(seed_dir, initial_budget_tokens)` slots claimed by those rollouts,
   9. append run metadata to a growing JSONL log and print one-line summary per rollout.
 - Runtime containment:
   - generated state is rooted at `~/Documents/metalanguage_runs` by default;
@@ -68,15 +68,18 @@ take precedence over values in `.env`.
   - every rollout receives an internal `instance_uuid` recorded in progress logs, run logs, and the ledger;
   - provider-reported model usage is recorded as `token_usage` events after OpenRouter calls and Codex usage events;
   - `--rollout-token-budget-tokens` optionally stops a rollout when reported usage exhausts its per-rollout budget;
+  - rollouts can call `budget_status()` and `spawn_child(seed_dir, initial_budget_tokens)` as main-loop tools;
+  - `spawn_child` copies a complete workspace-local seed directory into one claimed next-iteration rollout slot;
+  - the claimed slot receives exactly `initial_budget_tokens`; the call fails if the parent rollout does not have that much budget remaining;
   - tool responses are counted when they are sent back as model input on the next model call;
-  - budget allocation, solve rewards, and direct inter-instance transfers are intentionally left for future parent tool-call mechanics.
+  - solve rewards and direct inter-instance budget transfers are intentionally left for future parent tool-call mechanics.
 - Lineage behavior:
   - the first task can bootstrap without a parent seed;
   - after bootstrap, missing parent seeds are terminal and the loop will not silently continue as a fresh lineage.
 - Resume behavior:
   - runs automatically resume from existing `--runs-log` entries that match dataset/split/model/seed/generation/config/rollout-count;
   - completed rollouts are skipped, partial tasks continue from missing rollout indices;
-  - parent lineage candidates are reconstructed from successful completed run records when possible, with `--rollout-temp-root/latest_parent_pool.json` kept as a fallback/cache;
+  - parent lineage candidates are loaded from `--rollout-temp-root/latest_parent_pool.json`, which is written from claimed `spawn_child` slots;
   - disable this with `--no-resume`.
 - Manual iteration:
   - use `--step` to run exactly one task iteration, choosing the first incomplete task from the resume log or the next new task;
