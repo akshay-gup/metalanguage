@@ -99,6 +99,7 @@ def run_codex_rollout(
     base_instructions: str | None = None,
     rollout_token_budget_tokens: int | None = None,
     instance_uuid: str | None = None,
+    transfer_inbox_path: Path | None = None,
     spawn_child_handler_context_path: Path | None = None,
     token_usage_callback: TokenUsageCallback | None = None,
     progress_callback: Callable[..., None] | None = None,
@@ -130,6 +131,8 @@ def run_codex_rollout(
         request["rollout_token_budget_tokens"] = rollout_token_budget_tokens
     if instance_uuid is not None:
         request["instance_uuid"] = instance_uuid
+    if transfer_inbox_path is not None:
+        request["transfer_inbox_path"] = str(transfer_inbox_path)
     if spawn_child_handler_context_path is not None:
         request["spawn_child_handler_command"] = [
             sys.executable,
@@ -154,6 +157,9 @@ def run_codex_rollout(
         "error_message": "",
         "tokens_spent": 0,
         "tokens_reserved_for_children": 0,
+        "tokens_transferred_in": 0,
+        "tokens_transferred_out": 0,
+        "effective_rollout_token_budget_tokens": rollout_token_budget_tokens,
         "codex_total_tokens_seen": 0,
         "budget_exhausted": False,
     }
@@ -253,18 +259,26 @@ def run_codex_rollout(
     final_text = final_text or state.get("final_text", "")
 
     tokens_spent = int(state.get("tokens_spent") or 0)
+    tokens_reserved_for_children = int(state.get("tokens_reserved_for_children") or 0)
+    tokens_transferred_in = int(state.get("tokens_transferred_in") or 0)
+    tokens_transferred_out = int(state.get("tokens_transferred_out") or 0)
+    effective_budget = state.get("effective_rollout_token_budget_tokens")
+    charged_tokens = tokens_spent + tokens_reserved_for_children + tokens_transferred_out
     if budget_exhausted:
         return {
             "final_text": final_text,
             "status": "budget_exhausted",
             "stop_reason": "token_budget_exhausted",
             "error_code": "token_budget_exhausted",
-            "error_message": f"Token budget exhausted: {tokens_spent}/{rollout_token_budget_tokens}.",
+            "error_message": f"Token budget exhausted: {charged_tokens}/{effective_budget}.",
             "thread_id": thread_id,
             "session_id": session_id,
             "tokens_spent": tokens_spent,
-            "tokens_reserved_for_children": int(state.get("tokens_reserved_for_children") or 0),
+            "tokens_reserved_for_children": tokens_reserved_for_children,
+            "tokens_transferred_in": tokens_transferred_in,
+            "tokens_transferred_out": tokens_transferred_out,
             "rollout_token_budget_tokens": rollout_token_budget_tokens,
+            "effective_rollout_token_budget_tokens": effective_budget,
             "request_path": str(request_path),
             "stderr_path": str(stderr_path),
             "events_path": str(stdout_events_path),
@@ -279,8 +293,11 @@ def run_codex_rollout(
             "thread_id": thread_id,
             "session_id": session_id,
             "tokens_spent": tokens_spent,
-            "tokens_reserved_for_children": int(state.get("tokens_reserved_for_children") or 0),
+            "tokens_reserved_for_children": tokens_reserved_for_children,
+            "tokens_transferred_in": tokens_transferred_in,
+            "tokens_transferred_out": tokens_transferred_out,
             "rollout_token_budget_tokens": rollout_token_budget_tokens,
+            "effective_rollout_token_budget_tokens": effective_budget,
             "request_path": str(request_path),
             "stderr_path": str(stderr_path),
             "events_path": str(stdout_events_path),
@@ -295,8 +312,11 @@ def run_codex_rollout(
             "thread_id": thread_id,
             "session_id": session_id,
             "tokens_spent": tokens_spent,
-            "tokens_reserved_for_children": int(state.get("tokens_reserved_for_children") or 0),
+            "tokens_reserved_for_children": tokens_reserved_for_children,
+            "tokens_transferred_in": tokens_transferred_in,
+            "tokens_transferred_out": tokens_transferred_out,
             "rollout_token_budget_tokens": rollout_token_budget_tokens,
+            "effective_rollout_token_budget_tokens": effective_budget,
             "request_path": str(request_path),
             "stderr_path": str(stderr_path),
             "events_path": str(stdout_events_path),
@@ -312,8 +332,11 @@ def run_codex_rollout(
             "thread_id": thread_id,
             "session_id": session_id,
             "tokens_spent": tokens_spent,
-            "tokens_reserved_for_children": int(state.get("tokens_reserved_for_children") or 0),
+            "tokens_reserved_for_children": tokens_reserved_for_children,
+            "tokens_transferred_in": tokens_transferred_in,
+            "tokens_transferred_out": tokens_transferred_out,
             "rollout_token_budget_tokens": rollout_token_budget_tokens,
+            "effective_rollout_token_budget_tokens": effective_budget,
             "request_path": str(request_path),
             "stderr_path": str(stderr_path),
             "events_path": str(stdout_events_path),
@@ -327,8 +350,11 @@ def run_codex_rollout(
         "thread_id": thread_id,
         "session_id": session_id,
         "tokens_spent": tokens_spent,
-        "tokens_reserved_for_children": int(state.get("tokens_reserved_for_children") or 0),
+        "tokens_reserved_for_children": tokens_reserved_for_children,
+        "tokens_transferred_in": tokens_transferred_in,
+        "tokens_transferred_out": tokens_transferred_out,
         "rollout_token_budget_tokens": rollout_token_budget_tokens,
+        "effective_rollout_token_budget_tokens": effective_budget,
         "request_path": str(request_path),
         "stderr_path": str(stderr_path),
         "events_path": str(stdout_events_path),
@@ -371,11 +397,39 @@ def _handle_runner_line(
         reserved = _token_int(event.get("tokens_reserved_for_children"))
         if reserved > int(state.get("tokens_reserved_for_children") or 0):
             state["tokens_reserved_for_children"] = reserved
+        transferred_in = _token_int(event.get("tokens_transferred_in"))
+        if transferred_in > int(state.get("tokens_transferred_in") or 0):
+            state["tokens_transferred_in"] = transferred_in
+        transferred_out = _token_int(event.get("tokens_transferred_out"))
+        if transferred_out > int(state.get("tokens_transferred_out") or 0):
+            state["tokens_transferred_out"] = transferred_out
+        effective_budget = _token_int(event.get("effective_rollout_token_budget_tokens"))
+        if effective_budget > 0:
+            state["effective_rollout_token_budget_tokens"] = effective_budget
+    elif name == "budget_transfer_received":
+        transferred_in = _token_int(event.get("tokens_transferred_in"))
+        if transferred_in > int(state.get("tokens_transferred_in") or 0):
+            state["tokens_transferred_in"] = transferred_in
+        effective_budget = _token_int(event.get("effective_rollout_token_budget_tokens"))
+        if effective_budget > 0:
+            state["effective_rollout_token_budget_tokens"] = effective_budget
     elif name in {"agent_message", "turn_complete"}:
         text = str(event.get("final_text") or event.get("text") or "")
         if text:
             state["final_text"] = text
     elif name == "error":
+        reserved = _token_int(event.get("tokens_reserved_for_children"))
+        if reserved > int(state.get("tokens_reserved_for_children") or 0):
+            state["tokens_reserved_for_children"] = reserved
+        transferred_in = _token_int(event.get("tokens_transferred_in"))
+        if transferred_in > int(state.get("tokens_transferred_in") or 0):
+            state["tokens_transferred_in"] = transferred_in
+        transferred_out = _token_int(event.get("tokens_transferred_out"))
+        if transferred_out > int(state.get("tokens_transferred_out") or 0):
+            state["tokens_transferred_out"] = transferred_out
+        effective_budget = _token_int(event.get("effective_rollout_token_budget_tokens"))
+        if effective_budget > 0:
+            state["effective_rollout_token_budget_tokens"] = effective_budget
         state["error_code"] = str(event.get("error_code") or "")
         state["error_message"] = str(event.get("error_message") or "")
         if state["error_code"] == "token_budget_exhausted":
@@ -426,7 +480,18 @@ def _handle_runner_line(
                 token_usage=token_usage,
                 tokens_spent=state.get("tokens_spent"),
                 tokens_reserved_for_children=state.get("tokens_reserved_for_children"),
+                tokens_transferred_in=state.get("tokens_transferred_in"),
+                tokens_transferred_out=state.get("tokens_transferred_out"),
                 rollout_token_budget_tokens=rollout_token_budget_tokens,
+            )
+        elif name == "budget_transfer_received":
+            progress_callback(
+                "budget_transfer_received",
+                amount_tokens=event.get("amount_tokens"),
+                tokens_transferred_in=event.get("tokens_transferred_in"),
+                rollout_token_budget_tokens=event.get("rollout_token_budget_tokens"),
+                effective_rollout_token_budget_tokens=event.get("effective_rollout_token_budget_tokens"),
+                tokens_remaining=event.get("tokens_remaining"),
             )
         elif name == "error":
             progress_callback(

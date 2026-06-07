@@ -1,5 +1,10 @@
+use std::fs::File;
+use std::io::BufRead;
+use std::io::BufReader;
 use std::io::IsTerminal;
 use std::io::Read;
+use std::io::Seek;
+use std::io::SeekFrom;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
@@ -62,6 +67,7 @@ struct RunnerRequest {
     additional_writable_roots: Option<Vec<PathBuf>>,
     rollout_token_budget_tokens: Option<i64>,
     instance_uuid: Option<String>,
+    transfer_inbox_path: Option<PathBuf>,
     spawn_child_handler_command: Option<Vec<String>>,
 }
 
@@ -70,27 +76,98 @@ struct BudgetState {
     rollout_token_budget_tokens: Option<i64>,
     tokens_spent: i64,
     reserved_child_tokens: i64,
+    transferred_in_tokens: i64,
+    transferred_out_tokens: i64,
+    transfer_inbox_path: Option<PathBuf>,
+    transfer_inbox_offset: u64,
 }
 
 impl BudgetState {
-    fn tokens_remaining(&self) -> Option<i64> {
+    fn effective_rollout_token_budget_tokens(&self) -> Option<i64> {
         self.rollout_token_budget_tokens
-            .map(|budget| (budget - self.tokens_spent - self.reserved_child_tokens).max(0))
+            .map(|budget| budget + self.transferred_in_tokens)
+    }
+
+    fn tokens_remaining(&self) -> Option<i64> {
+        self.effective_rollout_token_budget_tokens()
+            .map(|budget| {
+                (budget
+                    - self.tokens_spent
+                    - self.reserved_child_tokens
+                    - self.transferred_out_tokens)
+                    .max(0)
+            })
     }
 
     fn exhausted(&self) -> bool {
-        self.rollout_token_budget_tokens
-            .is_some_and(|budget| self.tokens_spent + self.reserved_child_tokens >= budget)
+        self.effective_rollout_token_budget_tokens()
+            .is_some_and(|budget| {
+                self.tokens_spent + self.reserved_child_tokens + self.transferred_out_tokens
+                    >= budget
+            })
     }
 
     fn snapshot(&self) -> Value {
         json!({
             "budget_configured": self.rollout_token_budget_tokens.is_some(),
             "rollout_token_budget_tokens": self.rollout_token_budget_tokens,
+            "effective_rollout_token_budget_tokens": self.effective_rollout_token_budget_tokens(),
             "tokens_spent": self.tokens_spent,
             "tokens_reserved_for_children": self.reserved_child_tokens,
+            "tokens_transferred_in": self.transferred_in_tokens,
+            "tokens_transferred_out": self.transferred_out_tokens,
             "tokens_remaining": self.tokens_remaining(),
         })
+    }
+
+    fn apply_incoming_transfers(&mut self) -> anyhow::Result<i64> {
+        let Some(path) = self.transfer_inbox_path.as_ref() else {
+            return Ok(0);
+        };
+        let mut file = match File::open(path) {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(err) => return Err(err).with_context(|| format!("open transfer inbox {path:?}")),
+        };
+        let file_len = file
+            .metadata()
+            .with_context(|| format!("stat transfer inbox {path:?}"))?
+            .len();
+        if self.transfer_inbox_offset > file_len {
+            self.transfer_inbox_offset = 0;
+        }
+        file.seek(SeekFrom::Start(self.transfer_inbox_offset))
+            .with_context(|| format!("seek transfer inbox {path:?}"))?;
+        let mut reader = BufReader::new(file);
+        let mut line = String::new();
+        let mut transferred = 0_i64;
+        loop {
+            line.clear();
+            let bytes = reader
+                .read_line(&mut line)
+                .with_context(|| format!("read transfer inbox {path:?}"))?;
+            if bytes == 0 {
+                break;
+            }
+            let Ok(event) = serde_json::from_str::<Value>(line.trim()) else {
+                continue;
+            };
+            let amount = event
+                .get("amount_tokens")
+                .and_then(Value::as_i64)
+                .unwrap_or_default();
+            if amount <= 0 {
+                continue;
+            }
+            transferred += amount;
+        }
+        self.transfer_inbox_offset = reader
+            .stream_position()
+            .with_context(|| format!("read transfer inbox position {path:?}"))?;
+        if transferred > 0 {
+            self.transferred_in_tokens += transferred;
+        }
+        Ok(transferred)
     }
 }
 
@@ -241,6 +318,7 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
 
     let rollout_token_budget_tokens = request.rollout_token_budget_tokens;
     let instance_uuid = request.instance_uuid.clone();
+    let transfer_inbox_path = request.transfer_inbox_path.clone();
     let spawn_child_handler_command = request.spawn_child_handler_command.clone();
     let prompt = request
         .initial_user_text
@@ -251,6 +329,7 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
         prompt,
         rollout_token_budget_tokens,
         instance_uuid,
+        transfer_inbox_path,
         spawn_child_handler_command,
     )
     .await;
@@ -280,6 +359,7 @@ async fn run_turn(
     prompt: String,
     rollout_token_budget_tokens: Option<i64>,
     instance_uuid: Option<String>,
+    transfer_inbox_path: Option<PathBuf>,
     spawn_child_handler_command: Option<Vec<String>>,
 ) -> anyhow::Result<()> {
     thread
@@ -303,9 +383,25 @@ async fn run_turn(
         rollout_token_budget_tokens,
         tokens_spent: 0,
         reserved_child_tokens: 0,
+        transferred_in_tokens: 0,
+        transferred_out_tokens: 0,
+        transfer_inbox_path,
+        transfer_inbox_offset: 0,
     };
     loop {
         let event = thread.next_event().await.context("read Codex event")?;
+        let transfer_delta = budget_state.apply_incoming_transfers()?;
+        if transfer_delta > 0 {
+            emit(json!({
+                "event": "budget_transfer_received",
+                "turn_id": current_turn_id.as_deref(),
+                "amount_tokens": transfer_delta,
+                "tokens_transferred_in": budget_state.transferred_in_tokens,
+                "rollout_token_budget_tokens": budget_state.rollout_token_budget_tokens,
+                "effective_rollout_token_budget_tokens": budget_state.effective_rollout_token_budget_tokens(),
+                "tokens_remaining": budget_state.tokens_remaining(),
+            }))?;
+        }
         match &event.msg {
             EventMsg::TurnStarted(event) => {
                 current_turn_id = Some(event.turn_id.clone());
@@ -335,28 +431,40 @@ async fn run_turn(
                     "model_context_window": info.and_then(|info| info.model_context_window),
                     "tokens_spent": budget_state.tokens_spent,
                     "tokens_reserved_for_children": budget_state.reserved_child_tokens,
+                    "tokens_transferred_in": budget_state.transferred_in_tokens,
+                    "tokens_transferred_out": budget_state.transferred_out_tokens,
                     "tokens_remaining": tokens_remaining,
-                    "rollout_token_budget_tokens": rollout_token_budget_tokens,
+                    "rollout_token_budget_tokens": budget_state.rollout_token_budget_tokens,
+                    "effective_rollout_token_budget_tokens": budget_state.effective_rollout_token_budget_tokens(),
                     "budget_exhausted": budget_exhausted,
                 }))?;
                 if budget_exhausted {
-                    let budget = rollout_token_budget_tokens.unwrap_or_default();
+                    let budget = budget_state
+                        .effective_rollout_token_budget_tokens()
+                        .unwrap_or_default();
                     emit(json!({
                         "event": "error",
                         "error_code": "token_budget_exhausted",
                         "error_message": format!(
                             "Token budget exhausted: {}/{}.",
-                            budget_state.tokens_spent + budget_state.reserved_child_tokens,
+                            budget_state.tokens_spent
+                                + budget_state.reserved_child_tokens
+                                + budget_state.transferred_out_tokens,
                             budget
                         ),
                         "tokens_spent": budget_state.tokens_spent,
                         "tokens_reserved_for_children": budget_state.reserved_child_tokens,
-                        "rollout_token_budget_tokens": budget,
+                        "tokens_transferred_in": budget_state.transferred_in_tokens,
+                        "tokens_transferred_out": budget_state.transferred_out_tokens,
+                        "rollout_token_budget_tokens": budget_state.rollout_token_budget_tokens,
+                        "effective_rollout_token_budget_tokens": budget,
                     }))?;
                     let _ = thread.submit(Op::Interrupt).await;
                     bail!(
                         "token budget exhausted: {}/{}",
-                        budget_state.tokens_spent + budget_state.reserved_child_tokens,
+                        budget_state.tokens_spent
+                            + budget_state.reserved_child_tokens
+                            + budget_state.transferred_out_tokens,
                         budget
                     );
                 }
@@ -541,6 +649,9 @@ async fn run_turn(
                     "turn_id": request.turn_id,
                     "success": response.success,
                     "tokens_reserved_for_children": budget_state.reserved_child_tokens,
+                    "tokens_transferred_in": budget_state.transferred_in_tokens,
+                    "tokens_transferred_out": budget_state.transferred_out_tokens,
+                    "effective_rollout_token_budget_tokens": budget_state.effective_rollout_token_budget_tokens(),
                     "tokens_remaining": budget_state.tokens_remaining(),
                 }))?;
                 thread
@@ -551,23 +662,32 @@ async fn run_turn(
                     .await
                     .context("submit dynamic tool response")?;
                 if budget_state.exhausted() {
-                    let budget = rollout_token_budget_tokens.unwrap_or_default();
+                    let budget = budget_state
+                        .effective_rollout_token_budget_tokens()
+                        .unwrap_or_default();
                     emit(json!({
                         "event": "error",
                         "error_code": "token_budget_exhausted",
                         "error_message": format!(
                             "Token budget exhausted: {}/{}.",
-                            budget_state.tokens_spent + budget_state.reserved_child_tokens,
+                            budget_state.tokens_spent
+                                + budget_state.reserved_child_tokens
+                                + budget_state.transferred_out_tokens,
                             budget
                         ),
                         "tokens_spent": budget_state.tokens_spent,
                         "tokens_reserved_for_children": budget_state.reserved_child_tokens,
-                        "rollout_token_budget_tokens": budget,
+                        "tokens_transferred_in": budget_state.transferred_in_tokens,
+                        "tokens_transferred_out": budget_state.transferred_out_tokens,
+                        "rollout_token_budget_tokens": budget_state.rollout_token_budget_tokens,
+                        "effective_rollout_token_budget_tokens": budget,
                     }))?;
                     let _ = thread.submit(Op::Interrupt).await;
                     bail!(
                         "token budget exhausted: {}/{}",
-                        budget_state.tokens_spent + budget_state.reserved_child_tokens,
+                        budget_state.tokens_spent
+                            + budget_state.reserved_child_tokens
+                            + budget_state.transferred_out_tokens,
                         budget
                     );
                 }
@@ -630,6 +750,31 @@ fn metalanguage_dynamic_tools() -> Vec<DynamicToolSpec> {
             }),
             defer_loading: false,
         },
+        DynamicToolSpec {
+            namespace: None,
+            name: "transfer_tokens".to_string(),
+            description: (
+                "Transfer part of this rollout's remaining token budget to a live "
+                "peer rollout in the same task. The target receives exactly amount_tokens."
+            )
+            .to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "target_instance_uuid": {
+                        "type": "string",
+                        "description": "Instance UUID of a live peer rollout listed in runtime.md."
+                    },
+                    "amount_tokens": {
+                        "type": "integer",
+                        "description": "Positive token budget amount to transfer."
+                    }
+                },
+                "required": ["target_instance_uuid", "amount_tokens"],
+                "additionalProperties": false,
+            }),
+            defer_loading: false,
+        },
     ]
 }
 
@@ -654,11 +799,102 @@ fn handle_metalanguage_dynamic_tool(
             instance_uuid,
             spawn_child_handler_command,
         ),
+        "transfer_tokens" => handle_transfer_tokens_tool(
+            request,
+            budget_state,
+            instance_uuid,
+            spawn_child_handler_command,
+        ),
         other => dynamic_tool_json_response(
             false,
             json!({"error": "unsupported dynamic tool", "tool": other}),
         ),
     }
+}
+
+fn handle_transfer_tokens_tool(
+    request: &DynamicToolCallRequest,
+    budget_state: &mut BudgetState,
+    instance_uuid: Option<&str>,
+    spawn_child_handler_command: Option<&[String]>,
+) -> DynamicToolResponse {
+    let Some(command) = spawn_child_handler_command else {
+        return dynamic_tool_json_response(
+            false,
+            json!({"error": "transfer_tokens handler command is not configured"}),
+        );
+    };
+    if command.is_empty() {
+        return dynamic_tool_json_response(
+            false,
+            json!({"error": "transfer_tokens handler command is empty"}),
+        );
+    }
+    if budget_state.rollout_token_budget_tokens.is_none() {
+        return dynamic_tool_json_response(
+            false,
+            json!({"error": "transfer_tokens requires rollout_token_budget_tokens"}),
+        );
+    }
+
+    let (target_instance_uuid, amount_tokens) = match parse_transfer_tokens_args(&request.arguments) {
+        Ok(parsed) => parsed,
+        Err(message) => return dynamic_tool_json_response(false, json!({"error": message})),
+    };
+    let remaining = budget_state.tokens_remaining().unwrap_or_default();
+    if amount_tokens > remaining {
+        return dynamic_tool_json_response(
+            false,
+            json!({
+                "error": "insufficient source token budget",
+                "requested_amount_tokens": amount_tokens,
+                "tokens_remaining": remaining,
+                "budget_status": budget_state.snapshot(),
+            }),
+        );
+    }
+
+    let transferred_out_before = budget_state.transferred_out_tokens;
+    budget_state.transferred_out_tokens += amount_tokens;
+    let handler_payload = json!({
+        "tool": request.tool,
+        "namespace": request.namespace,
+        "call_id": request.call_id,
+        "arguments": request.arguments,
+        "source_budget": {
+            "instance_uuid": instance_uuid,
+            "rollout_token_budget_tokens": budget_state.rollout_token_budget_tokens,
+            "effective_rollout_token_budget_tokens": budget_state.effective_rollout_token_budget_tokens(),
+            "tokens_spent": budget_state.tokens_spent,
+            "tokens_reserved_for_children": budget_state.reserved_child_tokens,
+            "tokens_transferred_in": budget_state.transferred_in_tokens,
+            "tokens_transferred_out_before": transferred_out_before,
+            "transferred_for_this_call": amount_tokens,
+            "tokens_transferred_out_after": budget_state.transferred_out_tokens,
+            "tokens_remaining_after_transfer": budget_state.tokens_remaining(),
+        },
+        "target_instance_uuid": target_instance_uuid,
+    });
+
+    let output = match run_spawn_child_handler(command, &handler_payload) {
+        Ok(value) => value,
+        Err(message) => {
+            budget_state.transferred_out_tokens = transferred_out_before;
+            return dynamic_tool_json_response(false, json!({"error": message}));
+        }
+    };
+    let transfer_committed = output
+        .get("transfer_committed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !transfer_committed {
+        budget_state.transferred_out_tokens = transferred_out_before;
+    }
+    let success = output
+        .get("success")
+        .and_then(Value::as_bool)
+        .unwrap_or(transfer_committed);
+    dynamic_tool_json_response(success, output)
 }
 
 fn handle_spawn_child_tool(
@@ -716,6 +952,7 @@ fn handle_spawn_child_tool(
         "parent_budget": {
             "instance_uuid": instance_uuid,
             "rollout_token_budget_tokens": budget_state.rollout_token_budget_tokens,
+            "effective_rollout_token_budget_tokens": budget_state.effective_rollout_token_budget_tokens(),
             "tokens_spent": budget_state.tokens_spent,
             "tokens_reserved_for_children_before": reserved_before,
             "reserved_for_this_child": child_budget,
@@ -766,6 +1003,31 @@ fn parse_spawn_child_args(arguments: &Value) -> Result<(String, i64), String> {
         return Err("initial_budget_tokens must be > 0".to_string());
     }
     Ok((seed_dir, child_budget))
+}
+
+fn parse_transfer_tokens_args(arguments: &Value) -> Result<(String, i64), String> {
+    let Some(args) = arguments.as_object() else {
+        return Err("transfer_tokens arguments must be an object".to_string());
+    };
+    let target_instance_uuid = args
+        .get("target_instance_uuid")
+        .or_else(|| args.get("targetInstanceUuid"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| "transfer_tokens requires string target_instance_uuid".to_string())?
+        .to_string();
+    if target_instance_uuid.trim().is_empty() {
+        return Err("target_instance_uuid must be non-empty".to_string());
+    }
+    let amount_value = args
+        .get("amount_tokens")
+        .or_else(|| args.get("amountTokens"));
+    let amount_tokens = amount_value
+        .and_then(Value::as_i64)
+        .ok_or_else(|| "transfer_tokens requires integer amount_tokens".to_string())?;
+    if amount_tokens <= 0 {
+        return Err("amount_tokens must be > 0".to_string());
+    }
+    Ok((target_instance_uuid, amount_tokens))
 }
 
 fn run_spawn_child_handler(command: &[String], payload: &Value) -> Result<Value, String> {

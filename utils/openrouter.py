@@ -204,12 +204,38 @@ bash_tool: dict[str, Any] = {
 budget_status_tool: dict[str, Any] = {
     "type": "function",
     "name": "budget_status",
-    "description": "Return this rollout's token budget, spent tokens, reserved continuation budget, and remaining budget.",
+    "description": "Return this rollout's token budget, spent tokens, reserved/spent continuation budget, transfers, and remaining budget.",
     "strict": None,
     "parameters": {
         "type": "object",
         "properties": {},
         "required": [],
+    },
+}
+
+
+transfer_tokens_tool: dict[str, Any] = {
+    "type": "function",
+    "name": "transfer_tokens",
+    "description": (
+        "Transfer part of this rollout's remaining token budget to a live peer "
+        "rollout in the same task. The target's budget increases by exactly "
+        "amount_tokens."
+    ),
+    "strict": None,
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "target_instance_uuid": {
+                "type": "string",
+                "description": "Instance UUID of a live peer rollout listed in runtime.md.",
+            },
+            "amount_tokens": {
+                "type": "integer",
+                "description": "Positive token budget amount to transfer.",
+            },
+        },
+        "required": ["target_instance_uuid", "amount_tokens"],
     },
 }
 

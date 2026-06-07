@@ -39,6 +39,7 @@ from utils.openrouter import (
     call_openrouter_with_tools,
     get_tool_calls,
     spawn_child_tool,
+    transfer_tokens_tool,
 )
 from utils.reward import compute_rollout_reward
 from utils.task_store import (
@@ -358,6 +359,7 @@ def _format_runtime_markdown(
     *,
     instance_uuid: str,
     rollout_token_budget_tokens: int | None,
+    live_peer_instances: list[dict[str, Any]] | None = None,
     parent_instance_uuid: str | None = None,
 ) -> str:
     lines = [
@@ -374,8 +376,9 @@ def _format_runtime_markdown(
         "",
         "Main-loop tools available to this rollout:",
         "",
-        "- budget_status(): returns token budget, spent tokens, reserved continuation budget, and remaining budget.",
+        "- budget_status(): returns configured/effective token budget, spent tokens, reserved continuation budget, transfers, and remaining budget.",
         "- spawn_child(seed_dir, initial_budget_tokens): copies a complete seed directory into one claimed next-iteration rollout slot with exactly that starting budget.",
+        "- transfer_tokens(target_instance_uuid, amount_tokens): transfers budget to a live peer rollout listed below.",
         "",
         "Continuation budget facts:",
         "",
@@ -383,6 +386,15 @@ def _format_runtime_markdown(
         f"- parent_instance_uuid: {parent_instance_uuid or ''}",
         f"- rollout_token_budget_tokens: {rollout_token_budget_tokens if rollout_token_budget_tokens is not None else ''}",
     ]
+    if live_peer_instances:
+        lines.extend(["", "Live peer instances:", ""])
+        for peer in live_peer_instances:
+            lines.append(
+                "- "
+                f"rollout_index={peer.get('rollout_index')} "
+                f"rollout_username={peer.get('rollout_username')} "
+                f"instance_uuid={peer.get('instance_uuid')}"
+            )
     return "\n".join(lines) + "\n"
 
 
@@ -391,19 +403,51 @@ def _budget_status_payload(
     rollout_token_budget_tokens: int | None,
     tokens_spent: int,
     reserved_child_tokens: int,
+    transferred_in_tokens: int = 0,
+    transferred_out_tokens: int = 0,
 ) -> dict[str, Any]:
-    tokens_remaining = (
-        max(0, rollout_token_budget_tokens - tokens_spent - reserved_child_tokens)
+    effective_rollout_token_budget_tokens = (
+        rollout_token_budget_tokens + transferred_in_tokens
         if rollout_token_budget_tokens is not None
+        else None
+    )
+    tokens_remaining = (
+        max(
+            0,
+            effective_rollout_token_budget_tokens
+            - tokens_spent
+            - reserved_child_tokens
+            - transferred_out_tokens,
+        )
+        if effective_rollout_token_budget_tokens is not None
         else None
     )
     return {
         "budget_configured": rollout_token_budget_tokens is not None,
         "rollout_token_budget_tokens": rollout_token_budget_tokens,
+        "effective_rollout_token_budget_tokens": effective_rollout_token_budget_tokens,
         "tokens_spent": tokens_spent,
         "tokens_reserved_for_children": reserved_child_tokens,
+        "tokens_transferred_in": transferred_in_tokens,
+        "tokens_transferred_out": transferred_out_tokens,
         "tokens_remaining": tokens_remaining,
     }
+
+
+def _parse_transfer_tokens_arguments(args: dict[str, Any]) -> tuple[str | None, int | None, str | None]:
+    target_instance_uuid = args.get("target_instance_uuid", args.get("targetInstanceUuid"))
+    if not isinstance(target_instance_uuid, str) or not target_instance_uuid.strip():
+        return None, None, "transfer_tokens requires a non-empty string target_instance_uuid"
+
+    raw_amount = args.get("amount_tokens", args.get("amountTokens"))
+    try:
+        amount_tokens = int(raw_amount)
+    except (TypeError, ValueError):
+        return None, None, "transfer_tokens requires integer amount_tokens"
+    if amount_tokens <= 0:
+        return None, None, "amount_tokens must be > 0"
+
+    return target_instance_uuid.strip(), amount_tokens, None
 
 
 def _parse_spawn_child_arguments(args: dict[str, Any]) -> tuple[str | None, int | None, str | None]:
@@ -452,8 +496,11 @@ def _make_continuation_context(
     shared_workspace_dir: Path,
     shared_workspace_write_log: Path,
     budget_ledger_events: Path,
+    transfer_inbox_dir: Path,
+    transfer_inbox_path: Path,
     spawn_slots_path: Path,
     spawn_slots_dir: Path,
+    live_peer_instances: list[dict[str, Any]],
     progress_log_path: Path,
     generation: int,
     seed: int,
@@ -485,8 +532,11 @@ def _make_continuation_context(
         "shared_workspace_dir": str(shared_workspace_dir),
         "shared_workspace_write_log": str(shared_workspace_write_log),
         "budget_ledger_events": str(budget_ledger_events),
+        "transfer_inbox_dir": str(transfer_inbox_dir),
+        "transfer_inbox_path": str(transfer_inbox_path),
         "spawn_slots_path": str(spawn_slots_path),
         "spawn_slots_dir": str(spawn_slots_dir),
+        "live_peer_instances": live_peer_instances,
         "progress_log": str(progress_log_path),
         "generation": generation,
         "seed": seed,
@@ -523,6 +573,166 @@ def _write_json_file_atomic(path: Path, payload: Any) -> None:
     temp_path = path.with_suffix(path.suffix + ".tmp")
     temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     os.replace(temp_path, path)
+
+
+def _transfer_inbox_path(transfer_inbox_dir: Path, instance_uuid: str) -> Path:
+    return transfer_inbox_dir / f"{_sanitize_for_path(instance_uuid)}.jsonl"
+
+
+def _append_transfer_inbox_event(inbox_path: Path, event: dict[str, Any]) -> None:
+    inbox_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = inbox_path.with_suffix(inbox_path.suffix + ".lock")
+    with lock_path.open("w", encoding="utf-8") as lock_fh:
+        fcntl.flock(lock_fh, fcntl.LOCK_EX)
+        with inbox_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def _read_transfer_inbox_events(inbox_path: Path, offset: int) -> tuple[list[dict[str, Any]], int]:
+    try:
+        with inbox_path.open("r", encoding="utf-8") as fh:
+            file_size = inbox_path.stat().st_size
+            if offset > file_size:
+                offset = 0
+            fh.seek(offset)
+            events: list[dict[str, Any]] = []
+            for line in fh:
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(event, dict):
+                    events.append(event)
+            return events, fh.tell()
+    except FileNotFoundError:
+        return [], offset
+
+
+def _apply_incoming_transfers(
+    *,
+    inbox_path: Path,
+    inbox_offset: int,
+) -> tuple[int, int, list[dict[str, Any]]]:
+    events, next_offset = _read_transfer_inbox_events(inbox_path, inbox_offset)
+    total = 0
+    accepted: list[dict[str, Any]] = []
+    for event in events:
+        try:
+            amount = int(event.get("amount_tokens"))
+        except (TypeError, ValueError):
+            continue
+        if amount <= 0:
+            continue
+        total += amount
+        accepted.append(event)
+    return next_offset, total, accepted
+
+
+def _transfer_tokens(
+    *,
+    context: dict[str, Any],
+    args: dict[str, Any],
+    source_budget: dict[str, Any],
+) -> dict[str, Any]:
+    target_instance_uuid, amount_tokens, error = _parse_transfer_tokens_arguments(args)
+    if error is not None or target_instance_uuid is None or amount_tokens is None:
+        return {
+            "success": False,
+            "transfer_committed": False,
+            "error": error or "invalid transfer_tokens arguments",
+        }
+
+    source_instance_uuid = str(context["instance_uuid"])
+    if target_instance_uuid == source_instance_uuid:
+        return {
+            "success": False,
+            "transfer_committed": False,
+            "error": "transfer_tokens target_instance_uuid must be a different live peer",
+        }
+
+    peers = context.get("live_peer_instances")
+    if not isinstance(peers, list):
+        peers = []
+    target_peer = next(
+        (
+            peer
+            for peer in peers
+            if isinstance(peer, dict) and peer.get("instance_uuid") == target_instance_uuid
+        ),
+        None,
+    )
+    if target_peer is None:
+        return {
+            "success": False,
+            "transfer_committed": False,
+            "error": "target_instance_uuid is not a live peer for this task",
+            "target_instance_uuid": target_instance_uuid,
+        }
+
+    transfer_event = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "transfer_id": new_instance_uuid(),
+        "source_instance_uuid": source_instance_uuid,
+        "target_instance_uuid": target_instance_uuid,
+        "amount_tokens": amount_tokens,
+        "source_task_index": context["task_index"],
+        "source_task_id": context["task_id"],
+        "source_rollout_index": context["rollout_index"],
+        "source_rollout_username": context["rollout_username"],
+        "target_rollout_index": target_peer.get("rollout_index"),
+        "target_rollout_username": target_peer.get("rollout_username"),
+        "source_budget": source_budget,
+    }
+
+    target_inbox_path = _transfer_inbox_path(
+        Path(str(context["transfer_inbox_dir"])),
+        target_instance_uuid,
+    )
+    transfer_committed = False
+    try:
+        _append_transfer_inbox_event(target_inbox_path, transfer_event)
+        transfer_committed = True
+        budget_ledger_events = Path(str(context["budget_ledger_events"]))
+        append_budget_event(
+            budget_ledger_events,
+            event_type="budget_transferred_out",
+            instance_uuid=source_instance_uuid,
+            amount_tokens=amount_tokens,
+            metadata={
+                "transfer_id": transfer_event["transfer_id"],
+                "target_instance_uuid": target_instance_uuid,
+                "target_rollout_index": target_peer.get("rollout_index"),
+                "target_rollout_username": target_peer.get("rollout_username"),
+                "source_budget": source_budget,
+            },
+        )
+        append_budget_event(
+            budget_ledger_events,
+            event_type="budget_transferred_in",
+            instance_uuid=target_instance_uuid,
+            amount_tokens=amount_tokens,
+            metadata={
+                "transfer_id": transfer_event["transfer_id"],
+                "source_instance_uuid": source_instance_uuid,
+                "source_rollout_index": context["rollout_index"],
+                "source_rollout_username": context["rollout_username"],
+            },
+        )
+        return {
+            "success": True,
+            "transfer_committed": True,
+            "transfer_id": transfer_event["transfer_id"],
+            "target_instance_uuid": target_instance_uuid,
+            "amount_tokens": amount_tokens,
+        }
+    except BaseException as exc:
+        return {
+            "success": False,
+            "transfer_committed": transfer_committed,
+            "target_instance_uuid": target_instance_uuid,
+            "amount_tokens": amount_tokens,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
 
 
 def _claim_spawn_slot(
@@ -1059,15 +1269,42 @@ def run_worker(
     turn_count = 0
     tokens_spent = 0
     reserved_child_tokens = 0
+    transferred_in_tokens = 0
+    transferred_out_tokens = 0
+    transfer_inbox_offset = 0
+    transfer_events_received: list[dict[str, Any]] = []
     spawned_child_slots: list[dict[str, Any]] = []
     started_at = time.monotonic()
+
+    def _poll_incoming_budget_transfers() -> None:
+        nonlocal transfer_inbox_offset, transferred_in_tokens
+        transfer_inbox_offset, transfer_delta, transfer_events = _apply_incoming_transfers(
+            inbox_path=Path(str(continuation_context["transfer_inbox_path"])),
+            inbox_offset=transfer_inbox_offset,
+        )
+        if not transfer_delta:
+            return
+        transferred_in_tokens += transfer_delta
+        transfer_events_received.extend(transfer_events)
+        if progress_callback is not None:
+            progress_callback(
+                "budget_transfer_received",
+                elapsed_seconds=round(time.monotonic() - started_at, 3),
+                turn_count=turn_count,
+                amount_tokens=transfer_delta,
+                transfer_events=transfer_events,
+            )
+
     while True:
         turn_count += 1
+        _poll_incoming_budget_transfers()
         elapsed_seconds = time.monotonic() - started_at
         budget_status = _budget_status_payload(
             rollout_token_budget_tokens=rollout_token_budget_tokens,
             tokens_spent=tokens_spent,
             reserved_child_tokens=reserved_child_tokens,
+            transferred_in_tokens=transferred_in_tokens,
+            transferred_out_tokens=transferred_out_tokens,
         )
         if rollout_token_budget_tokens is not None and int(budget_status["tokens_remaining"] or 0) <= 0:
             return WorkerResult(
@@ -1077,11 +1314,15 @@ def run_worker(
                 error_code="token_budget_exhausted",
                 error_message=(
                     "Token budget exhausted: "
-                    f"{tokens_spent + reserved_child_tokens}/{rollout_token_budget_tokens}."
+                    f"{int(budget_status['effective_rollout_token_budget_tokens'] or 0) - int(budget_status['tokens_remaining'] or 0)}/"
+                    f"{budget_status['effective_rollout_token_budget_tokens']}."
                 ),
                 metadata={
                     "tokens_spent": tokens_spent,
                     "tokens_reserved_for_children": reserved_child_tokens,
+                    "tokens_transferred_in": transferred_in_tokens,
+                    "tokens_transferred_out": transferred_out_tokens,
+                    "transfer_events_received": transfer_events_received,
                     "spawned_child_slots": spawned_child_slots,
                 },
             )
@@ -1122,7 +1363,7 @@ def run_worker(
                 api_key=api_key,
                 model=model,
                 input_items=conversation,
-                tools=[bash_tool, budget_status_tool, spawn_child_tool],
+                tools=[bash_tool, budget_status_tool, transfer_tokens_tool, spawn_child_tool],
                 tool_choice="auto",
                 timeout=120,
                 max_output_tokens=(
@@ -1190,6 +1431,8 @@ def run_worker(
                 rollout_token_budget_tokens=rollout_token_budget_tokens,
                 tokens_spent=tokens_spent,
                 reserved_child_tokens=reserved_child_tokens,
+                transferred_in_tokens=transferred_in_tokens,
+                transferred_out_tokens=transferred_out_tokens,
             )
             progress_callback(
                 "worker_turn_completed",
@@ -1200,10 +1443,12 @@ def run_worker(
                 token_usage=usage,
                 tokens_spent=tokens_spent,
                 tokens_reserved_for_children=reserved_child_tokens,
+                tokens_transferred_in=transferred_in_tokens,
+                tokens_transferred_out=transferred_out_tokens,
                 budget_status=budget_status,
                 rollout_token_budget_tokens=rollout_token_budget_tokens,
             )
-        if rollout_token_budget_tokens is not None and tokens_spent + reserved_child_tokens > rollout_token_budget_tokens:
+        if rollout_token_budget_tokens is not None and int(budget_status["tokens_remaining"] or 0) <= 0:
             return WorkerResult(
                 final_text=_extract_text_from_response(response) or final_text,
                 status="budget_exhausted",
@@ -1211,11 +1456,15 @@ def run_worker(
                 error_code="token_budget_exceeded",
                 error_message=(
                     "Token budget exceeded: "
-                    f"{tokens_spent + reserved_child_tokens}/{rollout_token_budget_tokens}."
+                    f"{int(budget_status['effective_rollout_token_budget_tokens'] or 0) - int(budget_status['tokens_remaining'] or 0)}/"
+                    f"{budget_status['effective_rollout_token_budget_tokens']}."
                 ),
                 metadata={
                     "tokens_spent": tokens_spent,
                     "tokens_reserved_for_children": reserved_child_tokens,
+                    "tokens_transferred_in": transferred_in_tokens,
+                    "tokens_transferred_out": transferred_out_tokens,
+                    "transfer_events_received": transfer_events_received,
                     "spawned_child_slots": spawned_child_slots,
                 },
             )
@@ -1254,6 +1503,7 @@ def run_worker(
             else:
                 args = {}
 
+            _poll_incoming_budget_transfers()
             tool_name = str(call.get("name") or "")
             command = str(args.get("command", "")).strip()
             if tool_name == "budget_status":
@@ -1261,13 +1511,72 @@ def run_worker(
                     rollout_token_budget_tokens=rollout_token_budget_tokens,
                     tokens_spent=tokens_spent,
                     reserved_child_tokens=reserved_child_tokens,
+                    transferred_in_tokens=transferred_in_tokens,
+                    transferred_out_tokens=transferred_out_tokens,
                 )
+            elif tool_name == "transfer_tokens":
+                target_instance_uuid, amount_tokens, error = _parse_transfer_tokens_arguments(args)
+                budget_status = _budget_status_payload(
+                    rollout_token_budget_tokens=rollout_token_budget_tokens,
+                    tokens_spent=tokens_spent,
+                    reserved_child_tokens=reserved_child_tokens,
+                    transferred_in_tokens=transferred_in_tokens,
+                    transferred_out_tokens=transferred_out_tokens,
+                )
+                if error is not None or target_instance_uuid is None or amount_tokens is None:
+                    tool_result = {"success": False, "error": error or "invalid transfer_tokens arguments"}
+                elif rollout_token_budget_tokens is None:
+                    tool_result = {
+                        "success": False,
+                        "error": "transfer_tokens requires rollout_token_budget_tokens",
+                        "budget_status": budget_status,
+                    }
+                elif amount_tokens > int(budget_status["tokens_remaining"] or 0):
+                    tool_result = {
+                        "success": False,
+                        "error": "insufficient source token budget",
+                        "requested_amount_tokens": amount_tokens,
+                        "budget_status": budget_status,
+                    }
+                else:
+                    transferred_out_before = transferred_out_tokens
+                    transferred_out_tokens += amount_tokens
+                    source_budget = {
+                        "instance_uuid": instance_uuid,
+                        "rollout_token_budget_tokens": rollout_token_budget_tokens,
+                        "effective_rollout_token_budget_tokens": (
+                            rollout_token_budget_tokens + transferred_in_tokens
+                        ),
+                        "tokens_spent": tokens_spent,
+                        "tokens_reserved_for_children": reserved_child_tokens,
+                        "tokens_transferred_in": transferred_in_tokens,
+                        "tokens_transferred_out_before": transferred_out_before,
+                        "transferred_for_this_call": amount_tokens,
+                        "tokens_transferred_out_after": transferred_out_tokens,
+                        "tokens_remaining_after_transfer": max(
+                            0,
+                            rollout_token_budget_tokens
+                            + transferred_in_tokens
+                            - tokens_spent
+                            - reserved_child_tokens
+                            - transferred_out_tokens,
+                        ),
+                    }
+                    tool_result = _transfer_tokens(
+                        context=continuation_context,
+                        args=args,
+                        source_budget=source_budget,
+                    )
+                    if not tool_result.get("transfer_committed"):
+                        transferred_out_tokens = transferred_out_before
             elif tool_name == "spawn_child":
                 seed_dir_arg, initial_budget_tokens, error = _parse_spawn_child_arguments(args)
                 budget_status = _budget_status_payload(
                     rollout_token_budget_tokens=rollout_token_budget_tokens,
                     tokens_spent=tokens_spent,
                     reserved_child_tokens=reserved_child_tokens,
+                    transferred_in_tokens=transferred_in_tokens,
+                    transferred_out_tokens=transferred_out_tokens,
                 )
                 if error is not None or seed_dir_arg is None or initial_budget_tokens is None:
                     tool_result = {"success": False, "error": error or "invalid spawn_child arguments"}
@@ -1294,9 +1603,15 @@ def run_worker(
                         "tokens_reserved_for_children_before": reserved_before,
                         "reserved_for_this_child": initial_budget_tokens,
                         "tokens_reserved_for_children_after": reserved_child_tokens,
+                        "tokens_transferred_in": transferred_in_tokens,
+                        "tokens_transferred_out": transferred_out_tokens,
                         "tokens_remaining_after_reservation": max(
                             0,
-                            rollout_token_budget_tokens - tokens_spent - reserved_child_tokens,
+                            rollout_token_budget_tokens
+                            + transferred_in_tokens
+                            - tokens_spent
+                            - reserved_child_tokens
+                            - transferred_out_tokens,
                         ),
                     }
                     tool_result = _spawn_child_continuation(
@@ -1400,6 +1715,9 @@ def run_worker(
         metadata={
             "tokens_spent": tokens_spent,
             "tokens_reserved_for_children": reserved_child_tokens,
+            "tokens_transferred_in": transferred_in_tokens,
+            "tokens_transferred_out": transferred_out_tokens,
+            "transfer_events_received": transfer_events_received,
             "spawned_child_slots": spawned_child_slots,
         },
     )
@@ -1422,6 +1740,7 @@ def run_codex_worker(
     sandbox_mode: str,
     initial_user_text: str,
     base_instructions: str | None = None,
+    transfer_inbox_path: Path | None = None,
     continuation_context_path: Path | None = None,
     progress_callback: Any = None,
 ) -> WorkerResult:
@@ -1458,6 +1777,7 @@ def run_codex_worker(
         base_instructions=base_instructions,
         rollout_token_budget_tokens=rollout_token_budget_tokens,
         instance_uuid=instance_uuid,
+        transfer_inbox_path=transfer_inbox_path,
         spawn_child_handler_context_path=continuation_context_path,
         token_usage_callback=record_token_usage,
         progress_callback=progress_callback,
@@ -1469,7 +1789,10 @@ def run_codex_worker(
             "session_id",
             "tokens_spent",
             "tokens_reserved_for_children",
+            "tokens_transferred_in",
+            "tokens_transferred_out",
             "rollout_token_budget_tokens",
+            "effective_rollout_token_budget_tokens",
             "request_path",
             "stderr_path",
             "events_path",
@@ -1903,6 +2226,7 @@ def main() -> None:
     archive_worktree_root = rollout_root / "archive_worktrees"
 
     parent_pool_path = rollout_root / "latest_parent_pool.json"
+    transfer_inbox_dir = rollout_root / "budget_transfer_inbox"
     shared_workspace_dir = rollout_root / "shared_workspace"
     shared_workspace_dir.mkdir(parents=True, exist_ok=True)
     shared_workspace_write_log = rollout_root / "shared_workspace_writes.jsonl"
@@ -2040,6 +2364,23 @@ def main() -> None:
                 f"No spawned child slots available for task_index={task_index}; "
                 "lineage cannot advance without spawn_child."
             )
+        task_instance_uuids = {
+            rollout_index: (
+                str(existing_task_records[rollout_index].get("instance_uuid") or new_instance_uuid())
+                if rollout_index in existing_task_records
+                else new_instance_uuid()
+            )
+            for rollout_index in range(task_rollout_count)
+        }
+        live_peer_instances = [
+            {
+                "rollout_index": rollout_index,
+                "rollout_username": _rollout_username(rollout_index),
+                "instance_uuid": task_instance_uuids[rollout_index],
+            }
+            for rollout_index in range(task_rollout_count)
+            if rollout_index not in existing_task_records
+        ]
         problem_uid = compute_problem_uid(
             dataset_name=args.dataset_name,
             split=args.split,
@@ -2078,7 +2419,12 @@ def main() -> None:
             )
             if rollout_budget_tokens is None:
                 rollout_budget_tokens = args.rollout_token_budget_tokens
-            instance_uuid = new_instance_uuid()
+            instance_uuid = task_instance_uuids[rollout_index]
+            rollout_live_peer_instances = [
+                peer
+                for peer in live_peer_instances
+                if peer.get("instance_uuid") != instance_uuid
+            ]
             started_at = time.monotonic()
 
             def _progress(event: str, **fields: Any) -> None:
@@ -2162,6 +2508,7 @@ def main() -> None:
                 _format_runtime_markdown(
                     instance_uuid=instance_uuid,
                     rollout_token_budget_tokens=rollout_budget_tokens,
+                    live_peer_instances=rollout_live_peer_instances,
                 ),
                 encoding="utf-8",
             )
@@ -2179,8 +2526,11 @@ def main() -> None:
                 shared_workspace_dir=shared_workspace_dir,
                 shared_workspace_write_log=shared_workspace_write_log,
                 budget_ledger_events=budget_ledger_events,
+                transfer_inbox_dir=transfer_inbox_dir,
+                transfer_inbox_path=_transfer_inbox_path(transfer_inbox_dir, instance_uuid),
                 spawn_slots_path=spawn_slots_path,
                 spawn_slots_dir=spawn_slots_dir,
+                live_peer_instances=rollout_live_peer_instances,
                 progress_log_path=progress_log_path,
                 generation=args.generation,
                 seed=args.seed,
@@ -2239,6 +2589,7 @@ def main() -> None:
                             sandbox_mode=args.codex_sandbox_mode,
                             initial_user_text=args.codex_initial_prompt,
                             base_instructions=codex_base_instructions,
+                            transfer_inbox_path=_transfer_inbox_path(transfer_inbox_dir, instance_uuid),
                             continuation_context_path=continuation_context_path,
                             progress_callback=_progress,
                         )
@@ -2577,15 +2928,9 @@ def run_child_tool_handler(context_path: Path) -> None:
         if not isinstance(context, dict) or not isinstance(payload, dict):
             raise ValueError("handler context and payload must be JSON objects")
         tool = payload.get("tool")
-        if tool != "spawn_child":
-            result = {
-                "success": False,
-                "reservation_committed": False,
-                "error": f"unsupported dynamic tool: {tool}",
-            }
-        else:
-            raw_args = payload.get("arguments")
-            args = raw_args if isinstance(raw_args, dict) else {}
+        raw_args = payload.get("arguments")
+        args = raw_args if isinstance(raw_args, dict) else {}
+        if tool == "spawn_child":
             raw_parent_budget = payload.get("parent_budget")
             parent_budget = raw_parent_budget if isinstance(raw_parent_budget, dict) else {}
             result = _spawn_child_continuation(
@@ -2593,10 +2938,26 @@ def run_child_tool_handler(context_path: Path) -> None:
                 args=args,
                 parent_budget=parent_budget,
             )
+        elif tool == "transfer_tokens":
+            raw_source_budget = payload.get("source_budget")
+            source_budget = raw_source_budget if isinstance(raw_source_budget, dict) else {}
+            result = _transfer_tokens(
+                context=context,
+                args=args,
+                source_budget=source_budget,
+            )
+        else:
+            result = {
+                "success": False,
+                "reservation_committed": False,
+                "transfer_committed": False,
+                "error": f"unsupported dynamic tool: {tool}",
+            }
     except BaseException as exc:
         result = {
             "success": False,
             "reservation_committed": False,
+            "transfer_committed": False,
             "error": f"{type(exc).__name__}: {exc}",
         }
 
@@ -2604,6 +2965,7 @@ def run_child_tool_handler(context_path: Path) -> None:
         **result,
         "success": bool(result.get("success")),
         "reservation_committed": bool(result.get("reservation_committed")),
+        "transfer_committed": bool(result.get("transfer_committed")),
     }
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
 
