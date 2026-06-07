@@ -65,15 +65,17 @@ take precedence over values in `.env`.
   - Hugging Face caches, process temp files, and worker shell home/cache/temp defaults are also redirected under the runtime root.
 - Budget ledger:
   - append-only ledger events are written to `logs/budget_ledger.jsonl` under the runtime root;
+  - a rebuildable projection cache is written next to the ledger and is used for live `budget_status`, transfer, and spawn budget checks;
   - every rollout receives an internal `instance_uuid` recorded in progress logs, run logs, and the ledger;
   - provider-reported model usage is recorded as `token_usage` events after OpenRouter calls and Codex usage events;
+  - solution outcomes are recorded as `solution_scored` events after reward calculation;
   - `--rollout-token-budget-tokens` optionally stops a rollout when reported usage exhausts its per-rollout budget;
   - rollouts can call `budget_status()`, `transfer_tokens(target_instance_uuid, amount_tokens)`, and `spawn_child(seed_dir, initial_budget_tokens)` as main-loop tools;
   - `transfer_tokens` moves budget from one live same-task rollout to another by instance UUID; the sender's remaining budget decreases and the target's effective budget increases;
   - `spawn_child` copies a complete workspace-local seed directory into the next claimed next-iteration rollout slot;
   - the claimed slot receives exactly `initial_budget_tokens`; the call fails if the parent rollout does not have that much budget remaining;
   - tool responses are counted when they are sent back as model input on the next model call;
-  - solve rewards and direct inter-instance budget transfers are intentionally left for future parent tool-call mechanics.
+  - solve rewards are intentionally left for future parent tool-call mechanics.
 - Lineage behavior:
   - the first task can bootstrap without a parent seed;
   - after bootstrap, missing parent seeds are terminal and the loop will not silently continue as a fresh lineage.
