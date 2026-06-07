@@ -14,12 +14,13 @@ Flow:
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
-import random
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -31,7 +32,14 @@ from typing import Any
 from utils.budget_ledger import append_budget_event, new_instance_uuid
 from utils.codex_runner import resolve_codex_runner_bin, run_codex_rollout
 from utils.hf_datasets import HFDatasetDataLoader
-from utils.openrouter import OpenRouterAPIError, bash_tool, call_openrouter_with_tools, get_tool_calls
+from utils.openrouter import (
+    OpenRouterAPIError,
+    bash_tool,
+    budget_status_tool,
+    call_openrouter_with_tools,
+    get_tool_calls,
+    spawn_child_tool,
+)
 from utils.reward import compute_rollout_reward
 from utils.task_store import (
     compute_problem_uid,
@@ -75,6 +83,8 @@ class WorkerResult:
 
 
 SHARED_ATTRIBUTION_FILENAME = ".writers.jsonl"
+CONTINUATION_CONTEXT_FILENAME = ".continuation_context.json"
+SPAWN_CHILD_METADATA_FILENAME = ".spawn_child.json"
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_ENV_PATH = PROJECT_ROOT / ".env"
 DEFAULT_MODEL = "moonshotai/kimi-k2.6"
@@ -344,6 +354,286 @@ def _format_task_markdown(*, task: Task) -> str:
     return "\n".join(lines)
 
 
+def _format_runtime_markdown(
+    *,
+    instance_uuid: str,
+    rollout_token_budget_tokens: int | None,
+    parent_instance_uuid: str | None = None,
+) -> str:
+    lines = [
+        "# Runtime",
+        "",
+        "Use these workspace-relative paths:",
+        "",
+        "- task: task.md",
+        "- solution: solution.json",
+        "- seed_output: seed_output/",
+        "- archive: archive/",
+        "- shared_workspace: shared_workspace/",
+        f"- shared_workspace_attribution: shared_workspace/{SHARED_ATTRIBUTION_FILENAME}",
+        "",
+        "Main-loop tools available to this rollout:",
+        "",
+        "- budget_status(): returns token budget, spent tokens, reserved continuation budget, and remaining budget.",
+        "- spawn_child(seed_dir, initial_budget_tokens): copies a complete seed directory into one claimed next-iteration rollout slot with exactly that starting budget.",
+        "",
+        "Continuation budget facts:",
+        "",
+        f"- instance_uuid: {instance_uuid}",
+        f"- parent_instance_uuid: {parent_instance_uuid or ''}",
+        f"- rollout_token_budget_tokens: {rollout_token_budget_tokens if rollout_token_budget_tokens is not None else ''}",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _budget_status_payload(
+    *,
+    rollout_token_budget_tokens: int | None,
+    tokens_spent: int,
+    reserved_child_tokens: int,
+) -> dict[str, Any]:
+    tokens_remaining = (
+        max(0, rollout_token_budget_tokens - tokens_spent - reserved_child_tokens)
+        if rollout_token_budget_tokens is not None
+        else None
+    )
+    return {
+        "budget_configured": rollout_token_budget_tokens is not None,
+        "rollout_token_budget_tokens": rollout_token_budget_tokens,
+        "tokens_spent": tokens_spent,
+        "tokens_reserved_for_children": reserved_child_tokens,
+        "tokens_remaining": tokens_remaining,
+    }
+
+
+def _parse_spawn_child_arguments(args: dict[str, Any]) -> tuple[str | None, int | None, str | None]:
+    seed_dir = args.get("seed_dir", args.get("seedDir", args.get("seed")))
+    if not isinstance(seed_dir, str) or not seed_dir.strip():
+        return None, None, "spawn_child requires a non-empty string seed_dir"
+
+    raw_budget = args.get("initial_budget_tokens", args.get("initialBudgetTokens"))
+    try:
+        initial_budget_tokens = int(raw_budget)
+    except (TypeError, ValueError):
+        return None, None, "spawn_child requires integer initial_budget_tokens"
+    if initial_budget_tokens <= 0:
+        return None, None, "initial_budget_tokens must be > 0"
+
+    return seed_dir, initial_budget_tokens, None
+
+
+def _resolve_spawn_seed_dir(context: dict[str, Any], seed_dir: str) -> tuple[Path | None, str | None]:
+    workdir = Path(str(context["workdir"])).resolve()
+    raw_path = Path(seed_dir).expanduser()
+    candidate = raw_path.resolve() if raw_path.is_absolute() else (workdir / raw_path).resolve()
+    if candidate == workdir or not _is_within(candidate, workdir):
+        return None, "seed_dir must be a workspace-local directory, not the rollout workspace root"
+    if not candidate.is_dir():
+        return None, f"seed_dir is not a directory: {seed_dir}"
+    readme = candidate / "README.md"
+    if not readme.is_file() or not readme.read_text(encoding="utf-8").strip():
+        return None, "seed_dir must contain a non-empty README.md"
+    return candidate, None
+
+
+def _write_continuation_context(context: dict[str, Any]) -> Path:
+    context_path = Path(context["workdir"]) / CONTINUATION_CONTEXT_FILENAME
+    context_path.write_text(json.dumps(context, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    return context_path
+
+
+def _make_continuation_context(
+    *,
+    worker_backend: str,
+    model: str,
+    workdir: Path,
+    seed_output_dir: Path,
+    archive_repo_dir: Path,
+    shared_workspace_dir: Path,
+    shared_workspace_write_log: Path,
+    budget_ledger_events: Path,
+    spawn_slots_path: Path,
+    spawn_slots_dir: Path,
+    spawn_slots_capacity: int,
+    progress_log_path: Path,
+    generation: int,
+    seed: int,
+    task_index: int,
+    task_id: str,
+    rollout_index: int,
+    rollout_username: str,
+    instance_uuid: str,
+    problem_uid: str,
+    private_problem_path: Path,
+    task_markdown: str,
+    rollout_token_budget_tokens: int | None,
+    worker_timeout_seconds: int,
+    bash_timeout_seconds: int,
+    openrouter_max_retries: int,
+    codex_runner_bin: Path | None,
+    codex_home: Path,
+    codex_sandbox_mode: str,
+    codex_initial_prompt: str,
+    codex_base_instructions: str | None,
+    parent_instance_uuid: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "worker_backend": worker_backend,
+        "model": model,
+        "workdir": str(workdir),
+        "seed_output_dir": str(seed_output_dir),
+        "archive_repo_dir": str(archive_repo_dir),
+        "shared_workspace_dir": str(shared_workspace_dir),
+        "shared_workspace_write_log": str(shared_workspace_write_log),
+        "budget_ledger_events": str(budget_ledger_events),
+        "spawn_slots_path": str(spawn_slots_path),
+        "spawn_slots_dir": str(spawn_slots_dir),
+        "spawn_slots_capacity": spawn_slots_capacity,
+        "progress_log": str(progress_log_path),
+        "generation": generation,
+        "seed": seed,
+        "task_index": task_index,
+        "task_id": task_id,
+        "rollout_index": rollout_index,
+        "rollout_username": rollout_username,
+        "instance_uuid": instance_uuid,
+        "parent_instance_uuid": parent_instance_uuid,
+        "problem_uid": problem_uid,
+        "private_problem_path": str(private_problem_path),
+        "task_markdown": task_markdown,
+        "rollout_token_budget_tokens": rollout_token_budget_tokens,
+        "worker_timeout_seconds": worker_timeout_seconds,
+        "bash_timeout_seconds": bash_timeout_seconds,
+        "openrouter_max_retries": openrouter_max_retries,
+        "codex_runner_bin": str(codex_runner_bin) if codex_runner_bin is not None else None,
+        "codex_home": str(codex_home),
+        "codex_sandbox_mode": codex_sandbox_mode,
+        "codex_initial_prompt": codex_initial_prompt,
+        "codex_base_instructions": codex_base_instructions,
+    }
+
+
+def _read_json_file(path: Path, default: Any) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return default
+
+
+def _write_json_file_atomic(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+    temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(temp_path, path)
+
+
+def _claim_spawn_slot(
+    *,
+    context: dict[str, Any],
+    child_instance_uuid: str,
+    source_seed_dir: Path,
+    initial_budget_tokens: int,
+    parent_budget: dict[str, Any],
+) -> dict[str, Any]:
+    slots_path = Path(str(context["spawn_slots_path"]))
+    slots_dir = Path(str(context["spawn_slots_dir"]))
+    capacity = int(context["spawn_slots_capacity"])
+    lock_path = slots_path.with_suffix(slots_path.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    slots_dir.mkdir(parents=True, exist_ok=True)
+
+    with lock_path.open("w", encoding="utf-8") as lock_fh:
+        fcntl.flock(lock_fh, fcntl.LOCK_EX)
+        state = _read_json_file(slots_path, {})
+        slots = state.get("slots") if isinstance(state, dict) else None
+        if not isinstance(slots, list):
+            slots = []
+        if len(slots) >= capacity:
+            return {
+                "success": False,
+                "slot_claimed": False,
+                "reservation_committed": False,
+                "error": "next iteration rollout slots are full",
+                "spawn_slots_capacity": capacity,
+                "claimed_slots": len(slots),
+            }
+
+        slot_index = len(slots)
+        child_seed_dir = slots_dir / f"slot_{slot_index:03d}_{child_instance_uuid[:8]}"
+        child_seed_dir.mkdir(parents=True, exist_ok=False)
+        copy_seed_workspace(source_seed_dir, child_seed_dir)
+        metadata = {
+            "child_instance_uuid": child_instance_uuid,
+            "slot_index": slot_index,
+            "parent_instance_uuid": context["instance_uuid"],
+            "parent_rollout_username": context["rollout_username"],
+            "initial_budget_tokens": initial_budget_tokens,
+            "assigned_budget_tokens": initial_budget_tokens,
+            "source_seed_dir": str(source_seed_dir),
+            "source_task_index": context["task_index"],
+            "source_task_id": context["task_id"],
+            "source_rollout_index": context["rollout_index"],
+            "parent_budget": parent_budget,
+        }
+        (child_seed_dir / SPAWN_CHILD_METADATA_FILENAME).write_text(
+            json.dumps(metadata, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+        slot_record = {
+            **metadata,
+            "seed_dir": str(child_seed_dir),
+        }
+        slots.append(slot_record)
+        _write_json_file_atomic(
+            slots_path,
+            {
+                "capacity": capacity,
+                "source_task_index": context["task_index"],
+                "source_task_id": context["task_id"],
+                "slots": slots,
+            },
+        )
+        return {
+            "success": True,
+            "slot_claimed": True,
+            "reservation_committed": True,
+            "slot_index": slot_index,
+            "child_instance_uuid": child_instance_uuid,
+            "child_seed_dir": str(child_seed_dir),
+            "initial_budget_tokens": initial_budget_tokens,
+            "assigned_budget_tokens": initial_budget_tokens,
+            "claimed_slots": len(slots),
+            "spawn_slots_capacity": capacity,
+        }
+
+
+def _load_spawned_child_seed_dirs(spawn_slots_path: Path) -> list[Path]:
+    state = _read_json_file(spawn_slots_path, {})
+    slots = state.get("slots") if isinstance(state, dict) else None
+    if not isinstance(slots, list):
+        return []
+    seed_dirs: list[Path] = []
+    for slot in sorted(slots, key=lambda item: int(item.get("slot_index", 0)) if isinstance(item, dict) else 0):
+        if not isinstance(slot, dict):
+            continue
+        seed_dir = slot.get("seed_dir")
+        if isinstance(seed_dir, str) and seed_dir:
+            seed_dirs.append(Path(seed_dir))
+    return seed_dirs
+
+
+def _seed_budget_tokens(seed_dir: Path) -> int | None:
+    metadata = _read_json_file(seed_dir / SPAWN_CHILD_METADATA_FILENAME, {})
+    if not isinstance(metadata, dict):
+        return None
+    try:
+        budget = int(metadata.get("initial_budget_tokens"))
+    except (TypeError, ValueError):
+        return None
+    return budget if budget > 0 else None
+
+
 def _clear_rollout_answer_artifacts(workdir: Path) -> None:
     """Remove inherited answers before presenting a new task to a rollout."""
     for filename in ("solution.json", "solution.md"):
@@ -508,13 +798,19 @@ def _cleanup_rollout_shared_writes(root: Path, before: dict[Path, tuple[int, int
 
 
 def copy_seed_workspace(parent_dir: Path, workdir: Path) -> None:
-    """Copy the parent seed workspace into the child's current workspace."""
+    """Copy a seed workspace directory into a rollout workspace."""
     if not parent_dir.exists():
         return
+
+    def _ignore_symlinks(directory: str, names: list[str]) -> list[str]:
+        return [name for name in names if (Path(directory) / name).is_symlink()]
+
     for item in parent_dir.iterdir():
+        if item.is_symlink():
+            continue
         dest = workdir / item.name
         if item.is_dir():
-            shutil.copytree(item, dest, dirs_exist_ok=True)
+            shutil.copytree(item, dest, dirs_exist_ok=True, ignore=_ignore_symlinks)
         elif item.is_file():
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(item, dest)
@@ -607,6 +903,135 @@ def _extract_token_usage(response_json: dict[str, Any]) -> dict[str, int] | None
     return {"input_tokens": input_tokens, "output_tokens": output_tokens, "total_tokens": total_tokens}
 
 
+def _spawn_child_continuation(
+    *,
+    context: dict[str, Any],
+    args: dict[str, Any],
+    parent_budget: dict[str, Any],
+    progress_callback: Any = None,
+) -> dict[str, Any]:
+    seed_dir_arg, initial_budget_tokens, error = _parse_spawn_child_arguments(args)
+    if error is not None or seed_dir_arg is None or initial_budget_tokens is None:
+        return {
+            "success": False,
+            "reservation_committed": False,
+            "error": error or "invalid spawn_child arguments",
+        }
+    source_seed_dir, error = _resolve_spawn_seed_dir(context, seed_dir_arg)
+    if error is not None or source_seed_dir is None:
+        return {
+            "success": False,
+            "reservation_committed": False,
+            "error": error or "invalid seed_dir",
+        }
+
+    budget_ledger_events = Path(str(context["budget_ledger_events"]))
+    parent_instance_uuid = str(context["instance_uuid"])
+    task_id = str(context["task_id"])
+    problem_uid = str(context["problem_uid"])
+    child_instance_uuid = new_instance_uuid()
+    reservation_committed = False
+    slot_index: int | None = None
+    child_seed_dir: str | None = None
+
+    def _progress(event: str, **fields: Any) -> None:
+        payload = {
+            "parent_instance_uuid": parent_instance_uuid,
+            "child_instance_uuid": child_instance_uuid,
+            **fields,
+        }
+        if progress_callback is not None:
+            progress_callback(f"spawn_child_{event}", **payload)
+            return
+        append_progress_log(
+            Path(str(context["progress_log"])),
+            threading.Lock(),
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "event": f"spawn_child_{event}",
+                "generation": int(context["generation"]),
+                "seed": int(context["seed"]),
+                "task_index": int(context["task_index"]),
+                "rollout_index": int(context["rollout_index"]),
+                "rollout_username": str(context["rollout_username"]),
+                "task_id": task_id,
+                "problem_uid": problem_uid,
+                **payload,
+            },
+        )
+
+    try:
+        slot_result = _claim_spawn_slot(
+            context=context,
+            child_instance_uuid=child_instance_uuid,
+            source_seed_dir=source_seed_dir,
+            initial_budget_tokens=initial_budget_tokens,
+            parent_budget=parent_budget,
+        )
+        if not slot_result.get("slot_claimed"):
+            _progress("slot_rejected", **slot_result)
+            return slot_result
+        slot_index = int(slot_result["slot_index"])
+        child_seed_dir = str(slot_result["child_seed_dir"])
+        reservation_committed = True
+
+        append_budget_event(
+            budget_ledger_events,
+            event_type="budget_reserved",
+            instance_uuid=parent_instance_uuid,
+            amount_tokens=initial_budget_tokens,
+            metadata={
+                "child_instance_uuid": child_instance_uuid,
+                "slot_index": slot_index,
+                "child_seed_dir": child_seed_dir,
+                "parent_tokens_spent": parent_budget.get("tokens_spent"),
+                "parent_reserved_for_children_before": parent_budget.get(
+                    "tokens_reserved_for_children_before"
+                ),
+                "parent_reserved_for_children_after": parent_budget.get(
+                    "tokens_reserved_for_children_after"
+                ),
+            },
+        )
+        append_budget_event(
+            budget_ledger_events,
+            event_type="instance_created",
+            instance_uuid=child_instance_uuid,
+            metadata={
+                "parent_instance_uuid": parent_instance_uuid,
+                "generation": int(context["generation"]),
+                "seed": int(context["seed"]),
+                "task_index": int(context["task_index"]),
+                "rollout_index": int(context["rollout_index"]),
+                "rollout_username": f"{context['rollout_username']}_slot_{slot_index:03d}",
+                "task_id": task_id,
+                "problem_uid": problem_uid,
+                "slot_index": slot_index,
+                "child_seed_dir": child_seed_dir,
+                "initial_budget_tokens": initial_budget_tokens,
+            },
+        )
+        result = {
+            **slot_result,
+            "success": True,
+            "reservation_committed": reservation_committed,
+        }
+        _progress("slot_claimed", **result)
+        return result
+    except BaseException as exc:
+        result = {
+            "success": False,
+            "reservation_committed": reservation_committed,
+            "child_instance_uuid": child_instance_uuid,
+            "slot_index": slot_index,
+            "child_seed_dir": child_seed_dir,
+            "initial_budget_tokens": initial_budget_tokens,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+        _progress("failed", **result)
+        return result
+
+
 def run_worker(
     *,
     api_key: str,
@@ -615,7 +1040,7 @@ def run_worker(
     budget_ledger_events: Path,
     instance_uuid: str,
     rollout_token_budget_tokens: int | None,
-    next_seed_dir: Path,
+    seed_output_dir: Path,
     archive_repo_dir: Path,
     shared_workspace_dir: Path,
     shared_workspace_write_log: Path,
@@ -627,6 +1052,7 @@ def run_worker(
     timeout_seconds: int,
     bash_timeout_seconds: int,
     openrouter_max_retries: int,
+    continuation_context: dict[str, Any],
     progress_callback: Any = None,
 ) -> WorkerResult:
     """Run a multi-turn tool-calling worker loop and return final assistant text."""
@@ -646,17 +1072,32 @@ def run_worker(
     command_index = 0
     turn_count = 0
     tokens_spent = 0
+    reserved_child_tokens = 0
+    spawned_child_slots: list[dict[str, Any]] = []
     started_at = time.monotonic()
     while True:
         turn_count += 1
         elapsed_seconds = time.monotonic() - started_at
-        if rollout_token_budget_tokens is not None and tokens_spent >= rollout_token_budget_tokens:
+        budget_status = _budget_status_payload(
+            rollout_token_budget_tokens=rollout_token_budget_tokens,
+            tokens_spent=tokens_spent,
+            reserved_child_tokens=reserved_child_tokens,
+        )
+        if rollout_token_budget_tokens is not None and int(budget_status["tokens_remaining"] or 0) <= 0:
             return WorkerResult(
                 final_text=final_text,
                 status="budget_exhausted",
                 stop_reason="token_budget_exhausted",
                 error_code="token_budget_exhausted",
-                error_message=f"Token budget exhausted: {tokens_spent}/{rollout_token_budget_tokens}.",
+                error_message=(
+                    "Token budget exhausted: "
+                    f"{tokens_spent + reserved_child_tokens}/{rollout_token_budget_tokens}."
+                ),
+                metadata={
+                    "tokens_spent": tokens_spent,
+                    "tokens_reserved_for_children": reserved_child_tokens,
+                    "spawned_child_slots": spawned_child_slots,
+                },
             )
         if elapsed_seconds > timeout_seconds:
             if progress_callback is not None:
@@ -679,6 +1120,7 @@ def run_worker(
                 elapsed_seconds=round(elapsed_seconds, 3),
                 turn_count=turn_count,
                 conversation_items=len(conversation),
+                budget_status=budget_status,
             )
         def retry_callback(event: dict[str, Any]) -> None:
             if progress_callback is not None:
@@ -694,11 +1136,11 @@ def run_worker(
                 api_key=api_key,
                 model=model,
                 input_items=conversation,
-                tools=[bash_tool],
+                tools=[bash_tool, budget_status_tool, spawn_child_tool],
                 tool_choice="auto",
                 timeout=120,
                 max_output_tokens=(
-                    max(1, rollout_token_budget_tokens - tokens_spent)
+                    max(1, int(budget_status["tokens_remaining"] or 0))
                     if rollout_token_budget_tokens is not None
                     else None
                 ),
@@ -758,6 +1200,11 @@ def run_worker(
 
         tool_calls = get_tool_calls(response)
         if progress_callback is not None:
+            budget_status = _budget_status_payload(
+                rollout_token_budget_tokens=rollout_token_budget_tokens,
+                tokens_spent=tokens_spent,
+                reserved_child_tokens=reserved_child_tokens,
+            )
             progress_callback(
                 "worker_turn_completed",
                 elapsed_seconds=round(time.monotonic() - started_at, 3),
@@ -766,15 +1213,25 @@ def run_worker(
                 response_status=response.get("status"),
                 token_usage=usage,
                 tokens_spent=tokens_spent,
+                tokens_reserved_for_children=reserved_child_tokens,
+                budget_status=budget_status,
                 rollout_token_budget_tokens=rollout_token_budget_tokens,
             )
-        if rollout_token_budget_tokens is not None and tokens_spent > rollout_token_budget_tokens:
+        if rollout_token_budget_tokens is not None and tokens_spent + reserved_child_tokens > rollout_token_budget_tokens:
             return WorkerResult(
                 final_text=_extract_text_from_response(response) or final_text,
                 status="budget_exhausted",
                 stop_reason="token_budget_exceeded",
                 error_code="token_budget_exceeded",
-                error_message=f"Token budget exceeded: {tokens_spent}/{rollout_token_budget_tokens}.",
+                error_message=(
+                    "Token budget exceeded: "
+                    f"{tokens_spent + reserved_child_tokens}/{rollout_token_budget_tokens}."
+                ),
+                metadata={
+                    "tokens_spent": tokens_spent,
+                    "tokens_reserved_for_children": reserved_child_tokens,
+                    "spawned_child_slots": spawned_child_slots,
+                },
             )
         if not tool_calls:
             final_text = _extract_text_from_response(response)
@@ -791,7 +1248,7 @@ def run_worker(
                                 "type": "input_text",
                                 "text": (
                                     "Your previous tool call was malformed (missing call_id). "
-                                    "Please retry with a valid run_bash function call."
+                                    "Please retry with a valid function call."
                                 ),
                             }
                         ],
@@ -811,8 +1268,61 @@ def run_worker(
             else:
                 args = {}
 
+            tool_name = str(call.get("name") or "")
             command = str(args.get("command", "")).strip()
-            if call.get("name") != "run_bash":
+            if tool_name == "budget_status":
+                tool_result = _budget_status_payload(
+                    rollout_token_budget_tokens=rollout_token_budget_tokens,
+                    tokens_spent=tokens_spent,
+                    reserved_child_tokens=reserved_child_tokens,
+                )
+            elif tool_name == "spawn_child":
+                seed_dir_arg, initial_budget_tokens, error = _parse_spawn_child_arguments(args)
+                budget_status = _budget_status_payload(
+                    rollout_token_budget_tokens=rollout_token_budget_tokens,
+                    tokens_spent=tokens_spent,
+                    reserved_child_tokens=reserved_child_tokens,
+                )
+                if error is not None or seed_dir_arg is None or initial_budget_tokens is None:
+                    tool_result = {"success": False, "error": error or "invalid spawn_child arguments"}
+                elif rollout_token_budget_tokens is None:
+                    tool_result = {
+                        "success": False,
+                        "error": "spawn_child requires rollout_token_budget_tokens",
+                        "budget_status": budget_status,
+                    }
+                elif initial_budget_tokens > int(budget_status["tokens_remaining"] or 0):
+                    tool_result = {
+                        "success": False,
+                        "error": "insufficient parent token budget",
+                        "requested_initial_budget_tokens": initial_budget_tokens,
+                        "budget_status": budget_status,
+                    }
+                else:
+                    reserved_before = reserved_child_tokens
+                    reserved_child_tokens += initial_budget_tokens
+                    parent_budget = {
+                        "instance_uuid": instance_uuid,
+                        "rollout_token_budget_tokens": rollout_token_budget_tokens,
+                        "tokens_spent": tokens_spent,
+                        "tokens_reserved_for_children_before": reserved_before,
+                        "reserved_for_this_child": initial_budget_tokens,
+                        "tokens_reserved_for_children_after": reserved_child_tokens,
+                        "tokens_remaining_after_reservation": max(
+                            0,
+                            rollout_token_budget_tokens - tokens_spent - reserved_child_tokens,
+                        ),
+                    }
+                    tool_result = _spawn_child_continuation(
+                        context=continuation_context,
+                        args=args,
+                        parent_budget=parent_budget,
+                        progress_callback=progress_callback,
+                    )
+                    if not tool_result.get("reservation_committed"):
+                        reserved_child_tokens = reserved_before
+                    spawned_child_slots.append(tool_result)
+            elif tool_name != "run_bash":
                 tool_result = {"error": f"unsupported tool '{call.get('name')}'"}
             elif not command:
                 tool_result = {"error": "missing or malformed 'command' argument"}
@@ -831,7 +1341,7 @@ def run_worker(
                     resolved_wd = Path(wd).resolve()
                     allowed_roots = [
                         workdir.resolve(),
-                        next_seed_dir.resolve(),
+                        seed_output_dir.resolve(),
                         archive_repo_dir.resolve(),
                         shared_workspace_dir.resolve(),
                     ]
@@ -901,7 +1411,11 @@ def run_worker(
         final_text=final_text,
         status="completed",
         stop_reason="final_message",
-        metadata={"tokens_spent": tokens_spent},
+        metadata={
+            "tokens_spent": tokens_spent,
+            "tokens_reserved_for_children": reserved_child_tokens,
+            "spawned_child_slots": spawned_child_slots,
+        },
     )
 
 
@@ -914,7 +1428,7 @@ def run_codex_worker(
     instance_uuid: str,
     rollout_token_budget_tokens: int | None,
     codex_home: Path,
-    next_seed_dir: Path,
+    seed_output_dir: Path,
     archive_repo_dir: Path,
     shared_workspace_dir: Path,
     rollout_username: str,
@@ -922,6 +1436,7 @@ def run_codex_worker(
     sandbox_mode: str,
     initial_user_text: str,
     base_instructions: str | None = None,
+    continuation_context_path: Path | None = None,
     progress_callback: Any = None,
 ) -> WorkerResult:
     """Run one rollout through the Metalanguage-owned Codex runner."""
@@ -947,7 +1462,7 @@ def run_codex_worker(
         model=model,
         workdir=workdir,
         codex_home=codex_home,
-        next_seed_dir=next_seed_dir,
+        seed_output_dir=seed_output_dir,
         archive_repo_dir=archive_repo_dir,
         shared_workspace_dir=shared_workspace_dir,
         rollout_username=rollout_username,
@@ -956,6 +1471,8 @@ def run_codex_worker(
         initial_user_text=initial_user_text,
         base_instructions=base_instructions,
         rollout_token_budget_tokens=rollout_token_budget_tokens,
+        instance_uuid=instance_uuid,
+        spawn_child_handler_context_path=continuation_context_path,
         token_usage_callback=record_token_usage,
         progress_callback=progress_callback,
     )
@@ -965,6 +1482,7 @@ def run_codex_worker(
             "thread_id",
             "session_id",
             "tokens_spent",
+            "tokens_reserved_for_children",
             "rollout_token_budget_tokens",
             "request_path",
             "stderr_path",
@@ -1056,38 +1574,6 @@ def save_parent_pool(parent_pool_path: Path, parent_pool: list[Path]) -> None:
         json.dumps([str(path) for path in parent_pool], ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-
-
-def latest_successful_parent_pool_from_records(records: list[dict[str, Any]], num_rollouts: int) -> list[Path]:
-    """Reconstruct the latest completed task's successful parent pool from run records."""
-    by_task: dict[int, dict[int, dict[str, Any]]] = {}
-    for rec in records:
-        task_idx = rec.get("task_index")
-        rollout_idx = rec.get("rollout_index")
-        if not isinstance(task_idx, int) or not isinstance(rollout_idx, int):
-            continue
-        if rollout_idx < 0 or rollout_idx >= num_rollouts:
-            continue
-        by_task.setdefault(task_idx, {})[rollout_idx] = rec
-
-    for task_idx in sorted(by_task, reverse=True):
-        per_task = by_task[task_idx]
-        if len(per_task) < num_rollouts:
-            continue
-        successes: list[Path] = []
-        for rollout_idx in sorted(per_task):
-            rec = per_task[rollout_idx]
-            if not bool(rec.get("solved")):
-                continue
-            next_dir = rec.get("next_rollout_dir")
-            if not isinstance(next_dir, str) or not next_dir:
-                continue
-            path = Path(next_dir)
-            if path.exists():
-                successes.append(path)
-        if successes:
-            return successes
-    return []
 
 
 def create_archive_worktree(
@@ -1257,7 +1743,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=(
             "Exit nonzero when any rollout has a worker/runtime error, even if "
-            "successful parent seeds were produced."
+            "next-iteration child slots were produced."
         ),
     )
     parser.add_argument("--question-key", default=None)
@@ -1439,17 +1925,6 @@ def main() -> None:
     progress_log_lock = threading.Lock()
 
     parent_pool: list[Path] = []
-    rng = random.Random(args.seed)
-
-    def _build_parent_pool(successes: list[Path], target_size: int) -> list[Path]:
-        """Construct the next-task parent pool.
-
-        Sample with replacement so strong parent seeds can receive multiple
-        child attempts and every child rollout has an assigned parent.
-        """
-        if not successes or target_size <= 0:
-            return []
-        return [rng.choice(successes) for _ in range(target_size)]
 
     existing_records: list[dict[str, Any]] = []
     if not args.no_resume:
@@ -1468,7 +1943,11 @@ def main() -> None:
             and rec.get("num_rollouts") == args.num_rollouts
             and rec.get("config_name") == args.config_name
             and rec.get("worker_backend", "openrouter") == args.worker_backend
-            and rec.get("rollout_token_budget_tokens") == args.rollout_token_budget_tokens
+            and rec.get(
+                "configured_rollout_token_budget_tokens",
+                rec.get("rollout_token_budget_tokens"),
+            )
+            == args.rollout_token_budget_tokens
             and (
                 args.worker_backend != "codex"
                 or rec.get("codex_base_instructions_mode", "codex") == expected_codex_base_mode
@@ -1489,11 +1968,7 @@ def main() -> None:
             per_task[rollout_idx] = rec
 
     if not args.no_resume:
-        parent_pool = latest_successful_parent_pool_from_records(existing_records, args.num_rollouts)
-        if parent_pool:
-            save_parent_pool(parent_pool_path, parent_pool)
-        else:
-            parent_pool = load_parent_pool(parent_pool_path)
+        parent_pool = load_parent_pool(parent_pool_path)
 
     def _next_step_task_index() -> int:
         eligible_indices = [idx for idx in existing_by_task if idx >= args.start_task_index]
@@ -1550,7 +2025,6 @@ def main() -> None:
         ]
 
     for task_index, task in tasks:
-        successful_rollouts: list[Path] = []
         existing_task_records = existing_by_task.get(task_index, {})
         problem_uid = compute_problem_uid(
             dataset_name=args.dataset_name,
@@ -1564,6 +2038,12 @@ def main() -> None:
             problem_uid=problem_uid,
             row=task.raw,
         )
+        spawn_slots_path = rollout_root / (
+            f"{task_index:06d}_{_sanitize_for_path(task.task_id)}_spawn_slots.json"
+        )
+        spawn_slots_dir = rollout_root / (
+            f"{task_index:06d}_{_sanitize_for_path(task.task_id)}_next_iteration"
+        )
 
         if len(existing_task_records) >= args.num_rollouts:
             continue
@@ -1575,8 +2055,15 @@ def main() -> None:
 
             rollout_username = rollout_usernames[rollout_index]
             sampled_parent: Path | None = (
-                parent_pool[rollout_index % len(parent_pool)] if parent_pool else None
+                parent_pool[rollout_index] if rollout_index < len(parent_pool) else None
             )
+            rollout_budget_tokens = (
+                _seed_budget_tokens(sampled_parent)
+                if sampled_parent is not None
+                else args.rollout_token_budget_tokens
+            )
+            if rollout_budget_tokens is None:
+                rollout_budget_tokens = args.rollout_token_budget_tokens
             instance_uuid = new_instance_uuid()
             started_at = time.monotonic()
 
@@ -1598,7 +2085,7 @@ def main() -> None:
 
             if sampled_parent is None and task_index > 0:
                 raise RuntimeError(
-                    "No parent seed available for non-bootstrap rollout; "
+                    "No spawned child slot available for non-bootstrap rollout; "
                     f"task_index={task_index} rollout_index={rollout_index}"
                 )
             append_budget_event(
@@ -1613,6 +2100,7 @@ def main() -> None:
                     "rollout_username": rollout_username,
                     "task_id": task.task_id,
                     "problem_uid": problem_uid,
+                    "rollout_token_budget_tokens": rollout_budget_tokens,
                 },
             )
             _progress(
@@ -1645,31 +2133,22 @@ def main() -> None:
                 copy_seed_workspace(bootstrap_seed_dir, temp_dir)
             _clear_rollout_answer_artifacts(temp_dir)
 
-            next_seed_dir = temp_dir / "next_seed"
-            next_seed_dir.mkdir(parents=True, exist_ok=True)
+            seed_output_dir = temp_dir / "seed_output"
+            seed_output_dir.mkdir(parents=True, exist_ok=True)
             archive_link = temp_dir / "archive"
             shared_workspace_link = temp_dir / "shared_workspace"
             _replace_with_symlink(archive_link, archive_worktree.path)
             _replace_with_symlink(shared_workspace_link, shared_workspace_dir)
 
-            seed_rollout_dir = rollout_root / (
-                f"{task_index:06d}_{_sanitize_for_path(task.task_id)}_{_sanitize_for_path(rollout_username)}"
-            )
-            shutil.rmtree(seed_rollout_dir, ignore_errors=True)
-            seed_rollout_dir.mkdir(parents=True, exist_ok=True)
-
+            task_markdown = _format_task_markdown(task=task)
             task_file = temp_dir / "task.md"
-            task_file.write_text(_format_task_markdown(task=task), encoding="utf-8")
+            task_file.write_text(task_markdown, encoding="utf-8")
             runtime_file = temp_dir / "runtime.md"
             runtime_file.write_text(
-                "# Runtime\n\n"
-                "Use these workspace-relative paths:\n\n"
-                "- task: task.md\n"
-                "- solution: solution.json\n"
-                "- next_seed: next_seed/README.md\n"
-                "- archive: archive/\n"
-                "- shared_workspace: shared_workspace/\n"
-                f"- shared_workspace_attribution: shared_workspace/{SHARED_ATTRIBUTION_FILENAME}\n",
+                _format_runtime_markdown(
+                    instance_uuid=instance_uuid,
+                    rollout_token_budget_tokens=rollout_budget_tokens,
+                ),
                 encoding="utf-8",
             )
             codex_base_instructions = (
@@ -1677,12 +2156,47 @@ def main() -> None:
                 if args.worker_backend == "codex"
                 else None
             )
+            continuation_context = _make_continuation_context(
+                worker_backend=args.worker_backend,
+                model=args.model,
+                workdir=temp_dir,
+                seed_output_dir=seed_output_dir,
+                archive_repo_dir=archive_worktree.path,
+                shared_workspace_dir=shared_workspace_dir,
+                shared_workspace_write_log=shared_workspace_write_log,
+                budget_ledger_events=budget_ledger_events,
+                spawn_slots_path=spawn_slots_path,
+                spawn_slots_dir=spawn_slots_dir,
+                spawn_slots_capacity=args.num_rollouts,
+                progress_log_path=progress_log_path,
+                generation=args.generation,
+                seed=args.seed,
+                task_index=task_index,
+                task_id=task.task_id,
+                rollout_index=rollout_index,
+                rollout_username=rollout_username,
+                instance_uuid=instance_uuid,
+                problem_uid=problem_uid,
+                private_problem_path=private_problem_path,
+                task_markdown=task_markdown,
+                rollout_token_budget_tokens=rollout_budget_tokens,
+                worker_timeout_seconds=args.worker_timeout_seconds,
+                bash_timeout_seconds=args.bash_timeout_seconds,
+                openrouter_max_retries=args.openrouter_max_retries,
+                codex_runner_bin=codex_runner_bin,
+                codex_home=codex_home,
+                codex_sandbox_mode=args.codex_sandbox_mode,
+                codex_initial_prompt=args.codex_initial_prompt,
+                codex_base_instructions=codex_base_instructions,
+            )
+            continuation_context_path = _write_continuation_context(continuation_context)
             _progress(
                 "workspace_prepared",
                 working_directory=str(temp_dir),
                 task_file=str(task_file),
                 runtime_file=str(runtime_file),
-                next_seed_dir=str(next_seed_dir),
+                seed_output_dir=str(seed_output_dir),
+                continuation_context_path=str(continuation_context_path),
                 codex_base_instructions_mode=(
                     args.codex_base_instructions_mode if args.worker_backend == "codex" else None
                 ),
@@ -1702,9 +2216,9 @@ def main() -> None:
                             workdir=temp_dir,
                             budget_ledger_events=budget_ledger_events,
                             instance_uuid=instance_uuid,
-                            rollout_token_budget_tokens=args.rollout_token_budget_tokens,
+                            rollout_token_budget_tokens=rollout_budget_tokens,
                             codex_home=codex_home,
-                            next_seed_dir=next_seed_dir,
+                            seed_output_dir=seed_output_dir,
                             archive_repo_dir=archive_worktree.path,
                             shared_workspace_dir=shared_workspace_dir,
                             rollout_username=rollout_username,
@@ -1712,6 +2226,7 @@ def main() -> None:
                             sandbox_mode=args.codex_sandbox_mode,
                             initial_user_text=args.codex_initial_prompt,
                             base_instructions=codex_base_instructions,
+                            continuation_context_path=continuation_context_path,
                             progress_callback=_progress,
                         )
                     else:
@@ -1723,8 +2238,8 @@ def main() -> None:
                             workdir=temp_dir,
                             budget_ledger_events=budget_ledger_events,
                             instance_uuid=instance_uuid,
-                            rollout_token_budget_tokens=args.rollout_token_budget_tokens,
-                            next_seed_dir=next_seed_dir,
+                            rollout_token_budget_tokens=rollout_budget_tokens,
+                            seed_output_dir=seed_output_dir,
                             archive_repo_dir=archive_worktree.path,
                             shared_workspace_dir=shared_workspace_dir,
                             shared_workspace_write_log=shared_workspace_write_log,
@@ -1736,6 +2251,7 @@ def main() -> None:
                             timeout_seconds=args.worker_timeout_seconds,
                             bash_timeout_seconds=args.bash_timeout_seconds,
                             openrouter_max_retries=args.openrouter_max_retries,
+                            continuation_context=continuation_context,
                             progress_callback=_progress,
                         )
                 except BaseException as exc:
@@ -1772,7 +2288,10 @@ def main() -> None:
                 worker_error_code=worker_result.error_code,
                 worker_error_message=worker_result.error_message,
             )
-            if worker_result.status == "completed":
+            solution_artifact_exists = (temp_dir / "solution.json").exists() or (
+                temp_dir / "solution.md"
+            ).exists()
+            if worker_result.status == "completed" or solution_artifact_exists:
                 reported_problem_uid, reported_task_id, submitted_answer = load_rollout_answer(
                     temp_dir,
                     worker_result.final_text,
@@ -1806,13 +2325,8 @@ def main() -> None:
             )
             _progress("episode_persisted", output_path=str(output_dir))
 
-            next_seed_readme = next_seed_dir / "README.md"
-            seed_viable = bool(
-                solved
-                and next_seed_readme.is_file()
-                and next_seed_readme.read_text(encoding="utf-8").strip()
-            )
-            next_rollout_dir = seed_rollout_dir if seed_viable else None
+            seed_viable = False
+            next_rollout_dir = None
 
             record = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -1850,7 +2364,8 @@ def main() -> None:
                 "worker_timeout_seconds": args.worker_timeout_seconds,
                 "bash_timeout_seconds": args.bash_timeout_seconds,
                 "openrouter_max_retries": args.openrouter_max_retries,
-                "rollout_token_budget_tokens": args.rollout_token_budget_tokens,
+                "configured_rollout_token_budget_tokens": args.rollout_token_budget_tokens,
+                "rollout_token_budget_tokens": rollout_budget_tokens,
                 "codex_home": str(codex_home) if args.worker_backend == "codex" else None,
                 "codex_runner_bin": str(codex_runner_bin) if codex_runner_bin is not None else None,
                 "codex_sandbox_mode": args.codex_sandbox_mode if args.worker_backend == "codex" else None,
@@ -1875,15 +2390,6 @@ def main() -> None:
             )
             if worker_result.status == "error":
                 summary += f" error={worker_result.stop_reason}"
-            if seed_viable:
-                shutil.copytree(next_seed_dir, seed_rollout_dir, dirs_exist_ok=True)
-                _progress("next_seed_copied", next_rollout_dir=str(seed_rollout_dir))
-            elif solved:
-                _progress(
-                    "next_seed_rejected",
-                    next_seed_dir=str(next_seed_dir),
-                    reason="missing_or_empty_readme",
-                )
             return RolloutResult(
                 rollout_index=rollout_index,
                 record=record,
@@ -1896,10 +2402,6 @@ def main() -> None:
         for rollout_index in range(args.num_rollouts):
             existing = existing_task_records.get(rollout_index)
             if existing is not None:
-                if bool(existing.get("solved")):
-                    next_dir = existing.get("next_rollout_dir")
-                    if isinstance(next_dir, str) and next_dir:
-                        successful_rollouts.append(Path(next_dir))
                 continue
             missing_rollout_indices.append(rollout_index)
 
@@ -2003,18 +2505,17 @@ def main() -> None:
 
         for result in sorted(results, key=lambda item: item.rollout_index):
             append_run_log(runs_log_path, result.record)
-            if result.successful_dir is not None:
-                successful_rollouts.append(result.successful_dir)
             print(result.summary)
 
-        if successful_rollouts:
-            parent_pool = _build_parent_pool(successful_rollouts, args.num_rollouts)
+        spawned_child_dirs = _load_spawned_child_seed_dirs(spawn_slots_path)
+        if spawned_child_dirs:
+            parent_pool = spawned_child_dirs
             save_parent_pool(parent_pool_path, parent_pool)
         else:
             save_parent_pool(parent_pool_path, parent_pool)
             raise RuntimeError(
-                f"No successful parent seeds produced for task_index={task_index}; "
-                "lineage cannot advance without a parent seed."
+                f"No spawned child slots produced for task_index={task_index}; "
+                "lineage cannot advance without spawn_child."
             )
 
         failed_results = [result for result in results if result.error]
@@ -2049,5 +2550,49 @@ def main() -> None:
             print(f"warning: one or more rollouts failed after logging results: {details}")
 
 
+def run_child_tool_handler(context_path: Path) -> None:
+    """Entrypoint used by the Codex runner to execute main-loop dynamic tools."""
+    try:
+        load_dotenv()
+        context = json.loads(context_path.read_text(encoding="utf-8"))
+        raw_payload = sys.stdin.read()
+        payload = json.loads(raw_payload) if raw_payload.strip() else {}
+        if not isinstance(context, dict) or not isinstance(payload, dict):
+            raise ValueError("handler context and payload must be JSON objects")
+        tool = payload.get("tool")
+        if tool != "spawn_child":
+            result = {
+                "success": False,
+                "reservation_committed": False,
+                "error": f"unsupported dynamic tool: {tool}",
+            }
+        else:
+            raw_args = payload.get("arguments")
+            args = raw_args if isinstance(raw_args, dict) else {}
+            raw_parent_budget = payload.get("parent_budget")
+            parent_budget = raw_parent_budget if isinstance(raw_parent_budget, dict) else {}
+            result = _spawn_child_continuation(
+                context=context,
+                args=args,
+                parent_budget=parent_budget,
+            )
+    except BaseException as exc:
+        result = {
+            "success": False,
+            "reservation_committed": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+    result = {
+        **result,
+        "success": bool(result.get("success")),
+        "reservation_committed": bool(result.get("reservation_committed")),
+    }
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+
+
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) >= 3 and sys.argv[1] == "--child-tool-handler":
+        run_child_tool_handler(Path(sys.argv[2]).expanduser().resolve())
+    else:
+        main()

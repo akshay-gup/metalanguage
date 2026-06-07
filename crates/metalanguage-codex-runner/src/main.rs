@@ -3,6 +3,8 @@ use std::io::Read;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::Command;
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,6 +34,10 @@ use codex_core_api::resolve_installation_id;
 use codex_core_api::set_default_originator;
 use codex_core_api::thread_store_from_config;
 use codex_protocol::config_types::SandboxMode;
+use codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem;
+use codex_protocol::dynamic_tools::DynamicToolCallRequest;
+use codex_protocol::dynamic_tools::DynamicToolResponse;
+use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::PermissionProfile;
@@ -55,6 +61,37 @@ struct RunnerRequest {
     workspace_roots: Option<Vec<PathBuf>>,
     additional_writable_roots: Option<Vec<PathBuf>>,
     rollout_token_budget_tokens: Option<i64>,
+    instance_uuid: Option<String>,
+    spawn_child_handler_command: Option<Vec<String>>,
+}
+
+#[derive(Debug)]
+struct BudgetState {
+    rollout_token_budget_tokens: Option<i64>,
+    tokens_spent: i64,
+    reserved_child_tokens: i64,
+}
+
+impl BudgetState {
+    fn tokens_remaining(&self) -> Option<i64> {
+        self.rollout_token_budget_tokens
+            .map(|budget| (budget - self.tokens_spent - self.reserved_child_tokens).max(0))
+    }
+
+    fn exhausted(&self) -> bool {
+        self.rollout_token_budget_tokens
+            .is_some_and(|budget| self.tokens_spent + self.reserved_child_tokens >= budget)
+    }
+
+    fn snapshot(&self) -> Value {
+        json!({
+            "budget_configured": self.rollout_token_budget_tokens.is_some(),
+            "rollout_token_budget_tokens": self.rollout_token_budget_tokens,
+            "tokens_spent": self.tokens_spent,
+            "tokens_reserved_for_children": self.reserved_child_tokens,
+            "tokens_remaining": self.tokens_remaining(),
+        })
+    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -185,7 +222,7 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
         thread,
         session_configured,
     } = thread_manager
-        .start_thread(config)
+        .start_thread_with_tools(config, metalanguage_dynamic_tools())
         .await
         .context("start Codex thread")?;
 
@@ -202,6 +239,9 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
             .collect::<Vec<_>>(),
     }))?;
 
+    let rollout_token_budget_tokens = request.rollout_token_budget_tokens;
+    let instance_uuid = request.instance_uuid.clone();
+    let spawn_child_handler_command = request.spawn_child_handler_command.clone();
     let prompt = request
         .initial_user_text
         .unwrap_or_else(|| "Read README.md.".to_string());
@@ -209,7 +249,9 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
         &thread,
         &thread_id.to_string(),
         prompt,
-        request.rollout_token_budget_tokens,
+        rollout_token_budget_tokens,
+        instance_uuid,
+        spawn_child_handler_command,
     )
     .await;
     let shutdown_result = thread.shutdown_and_wait().await;
@@ -237,6 +279,8 @@ async fn run_turn(
     thread_id: &str,
     prompt: String,
     rollout_token_budget_tokens: Option<i64>,
+    instance_uuid: Option<String>,
+    spawn_child_handler_command: Option<Vec<String>>,
 ) -> anyhow::Result<()> {
     thread
         .submit(Op::UserInput {
@@ -255,7 +299,11 @@ async fn run_turn(
 
     let mut current_turn_id: Option<String> = None;
     let mut final_text = String::new();
-    let mut tokens_spent = 0_i64;
+    let mut budget_state = BudgetState {
+        rollout_token_budget_tokens,
+        tokens_spent: 0,
+        reserved_child_tokens: 0,
+    };
     loop {
         let event = thread.next_event().await.context("read Codex event")?;
         match &event.msg {
@@ -272,22 +320,21 @@ async fn run_turn(
                 if let Some(info) = info {
                     let total_tokens = info.total_token_usage.total_tokens.max(0);
                     if total_tokens > 0 {
-                        tokens_spent = tokens_spent.max(total_tokens);
+                        budget_state.tokens_spent = budget_state.tokens_spent.max(total_tokens);
                     } else {
-                        tokens_spent += info.last_token_usage.total_tokens.max(0);
+                        budget_state.tokens_spent += info.last_token_usage.total_tokens.max(0);
                     }
                 }
-                let tokens_remaining =
-                    rollout_token_budget_tokens.map(|budget| (budget - tokens_spent).max(0));
-                let budget_exhausted = rollout_token_budget_tokens
-                    .is_some_and(|budget| tokens_spent >= budget);
+                let tokens_remaining = budget_state.tokens_remaining();
+                let budget_exhausted = budget_state.exhausted();
                 emit(json!({
                     "event": "token_usage",
                     "turn_id": current_turn_id.as_deref(),
                     "last": info.map(|info| &info.last_token_usage),
                     "total": info.map(|info| &info.total_token_usage),
                     "model_context_window": info.and_then(|info| info.model_context_window),
-                    "tokens_spent": tokens_spent,
+                    "tokens_spent": budget_state.tokens_spent,
+                    "tokens_reserved_for_children": budget_state.reserved_child_tokens,
                     "tokens_remaining": tokens_remaining,
                     "rollout_token_budget_tokens": rollout_token_budget_tokens,
                     "budget_exhausted": budget_exhausted,
@@ -298,13 +345,20 @@ async fn run_turn(
                         "event": "error",
                         "error_code": "token_budget_exhausted",
                         "error_message": format!(
-                            "Token budget exhausted: {tokens_spent}/{budget}."
+                            "Token budget exhausted: {}/{}.",
+                            budget_state.tokens_spent + budget_state.reserved_child_tokens,
+                            budget
                         ),
-                        "tokens_spent": tokens_spent,
+                        "tokens_spent": budget_state.tokens_spent,
+                        "tokens_reserved_for_children": budget_state.reserved_child_tokens,
                         "rollout_token_budget_tokens": budget,
                     }))?;
                     let _ = thread.submit(Op::Interrupt).await;
-                    bail!("token budget exhausted: {tokens_spent}/{budget}");
+                    bail!(
+                        "token budget exhausted: {}/{}",
+                        budget_state.tokens_spent + budget_state.reserved_child_tokens,
+                        budget
+                    );
                 }
             }
             EventMsg::AgentMessageContentDelta(event) => {
@@ -464,7 +518,60 @@ async fn run_turn(
             EventMsg::ApplyPatchApprovalRequest(_) => bail_with_event("patch_approval_requested")?,
             EventMsg::RequestPermissions(_) => bail_with_event("permissions_requested")?,
             EventMsg::RequestUserInput(_) => bail_with_event("user_input_requested")?,
-            EventMsg::DynamicToolCallRequest(_) => bail_with_event("dynamic_tool_requested")?,
+            EventMsg::DynamicToolCallRequest(request) => {
+                emit(json!({
+                    "event": "tool_begin",
+                    "tool": request.tool,
+                    "namespace": request.namespace,
+                    "call_id": request.call_id,
+                    "turn_id": request.turn_id,
+                    "arguments": request.arguments,
+                }))?;
+                let response = handle_metalanguage_dynamic_tool(
+                    request,
+                    &mut budget_state,
+                    instance_uuid.as_deref(),
+                    spawn_child_handler_command.as_deref(),
+                );
+                emit(json!({
+                    "event": "tool_end",
+                    "tool": request.tool,
+                    "namespace": request.namespace,
+                    "call_id": request.call_id,
+                    "turn_id": request.turn_id,
+                    "success": response.success,
+                    "tokens_reserved_for_children": budget_state.reserved_child_tokens,
+                    "tokens_remaining": budget_state.tokens_remaining(),
+                }))?;
+                thread
+                    .submit(Op::DynamicToolResponse {
+                        id: request.call_id.clone(),
+                        response,
+                    })
+                    .await
+                    .context("submit dynamic tool response")?;
+                if budget_state.exhausted() {
+                    let budget = rollout_token_budget_tokens.unwrap_or_default();
+                    emit(json!({
+                        "event": "error",
+                        "error_code": "token_budget_exhausted",
+                        "error_message": format!(
+                            "Token budget exhausted: {}/{}.",
+                            budget_state.tokens_spent + budget_state.reserved_child_tokens,
+                            budget
+                        ),
+                        "tokens_spent": budget_state.tokens_spent,
+                        "tokens_reserved_for_children": budget_state.reserved_child_tokens,
+                        "rollout_token_budget_tokens": budget,
+                    }))?;
+                    let _ = thread.submit(Op::Interrupt).await;
+                    bail!(
+                        "token budget exhausted: {}/{}",
+                        budget_state.tokens_spent + budget_state.reserved_child_tokens,
+                        budget
+                    );
+                }
+            }
             _ => {}
         }
     }
@@ -477,6 +584,236 @@ fn bail_with_event(code: &str) -> anyhow::Result<()> {
         "error_message": code,
     }))?;
     Err(anyhow!(code.to_string()))
+}
+
+fn metalanguage_dynamic_tools() -> Vec<DynamicToolSpec> {
+    vec![
+        DynamicToolSpec {
+            namespace: None,
+            name: "budget_status".to_string(),
+            description: (
+                "Return this rollout's token budget, spent tokens, reserved continuation "
+                "budget, and remaining budget."
+            )
+            .to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false,
+            }),
+            defer_loading: false,
+        },
+        DynamicToolSpec {
+            namespace: None,
+            name: "spawn_child".to_string(),
+            description: (
+                "Continue this lineage by claiming a next-iteration rollout slot. "
+                "The complete directory at seed_dir is copied into that slot, and "
+                "exactly initial_budget_tokens is reserved from this rollout and assigned to it."
+            )
+            .to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "seed_dir": {
+                        "type": "string",
+                        "description": "Workspace-local directory containing the complete seed workspace to copy into the claimed slot."
+                    },
+                    "initial_budget_tokens": {
+                        "type": "integer",
+                        "description": "Positive token budget to reserve from this rollout and assign exactly to the claimed slot."
+                    }
+                },
+                "required": ["seed_dir", "initial_budget_tokens"],
+                "additionalProperties": false,
+            }),
+            defer_loading: false,
+        },
+    ]
+}
+
+fn handle_metalanguage_dynamic_tool(
+    request: &DynamicToolCallRequest,
+    budget_state: &mut BudgetState,
+    instance_uuid: Option<&str>,
+    spawn_child_handler_command: Option<&[String]>,
+) -> DynamicToolResponse {
+    if request.namespace.is_some() {
+        return dynamic_tool_json_response(
+            false,
+            json!({"error": "unsupported dynamic tool namespace", "namespace": request.namespace}),
+        );
+    }
+
+    match request.tool.as_str() {
+        "budget_status" => dynamic_tool_json_response(true, budget_state.snapshot()),
+        "spawn_child" => handle_spawn_child_tool(
+            request,
+            budget_state,
+            instance_uuid,
+            spawn_child_handler_command,
+        ),
+        other => dynamic_tool_json_response(
+            false,
+            json!({"error": "unsupported dynamic tool", "tool": other}),
+        ),
+    }
+}
+
+fn handle_spawn_child_tool(
+    request: &DynamicToolCallRequest,
+    budget_state: &mut BudgetState,
+    instance_uuid: Option<&str>,
+    spawn_child_handler_command: Option<&[String]>,
+) -> DynamicToolResponse {
+    let Some(command) = spawn_child_handler_command else {
+        return dynamic_tool_json_response(
+            false,
+            json!({"error": "spawn_child handler command is not configured"}),
+        );
+    };
+    if command.is_empty() {
+        return dynamic_tool_json_response(
+            false,
+            json!({"error": "spawn_child handler command is empty"}),
+        );
+    }
+    if budget_state.rollout_token_budget_tokens.is_none() {
+        return dynamic_tool_json_response(
+            false,
+            json!({"error": "spawn_child requires rollout_token_budget_tokens"}),
+        );
+    }
+
+    let (seed_dir, child_budget) = match parse_spawn_child_args(&request.arguments) {
+        Ok(parsed) => parsed,
+        Err(message) => return dynamic_tool_json_response(false, json!({"error": message})),
+    };
+    if seed_dir.trim().is_empty() {
+        return dynamic_tool_json_response(false, json!({"error": "seed_dir must be non-empty"}));
+    }
+    let remaining = budget_state.tokens_remaining().unwrap_or_default();
+    if child_budget > remaining {
+        return dynamic_tool_json_response(
+            false,
+            json!({
+                "error": "insufficient parent token budget",
+                "requested_initial_budget_tokens": child_budget,
+                "tokens_remaining": remaining,
+                "budget_status": budget_state.snapshot(),
+            }),
+        );
+    }
+
+    let reserved_before = budget_state.reserved_child_tokens;
+    budget_state.reserved_child_tokens += child_budget;
+    let handler_payload = json!({
+        "tool": request.tool,
+        "namespace": request.namespace,
+        "call_id": request.call_id,
+        "arguments": request.arguments,
+        "parent_budget": {
+            "instance_uuid": instance_uuid,
+            "rollout_token_budget_tokens": budget_state.rollout_token_budget_tokens,
+            "tokens_spent": budget_state.tokens_spent,
+            "tokens_reserved_for_children_before": reserved_before,
+            "reserved_for_this_child": child_budget,
+            "tokens_reserved_for_children_after": budget_state.reserved_child_tokens,
+            "tokens_remaining_after_reservation": budget_state.tokens_remaining(),
+        },
+    });
+
+    let output = match run_spawn_child_handler(command, &handler_payload) {
+        Ok(value) => value,
+        Err(message) => {
+            budget_state.reserved_child_tokens = reserved_before;
+            return dynamic_tool_json_response(false, json!({"error": message}));
+        }
+    };
+    let reservation_committed = output
+        .get("reservation_committed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !reservation_committed {
+        budget_state.reserved_child_tokens = reserved_before;
+    }
+    let success = output
+        .get("success")
+        .and_then(Value::as_bool)
+        .unwrap_or(reservation_committed);
+    dynamic_tool_json_response(success, output)
+}
+
+fn parse_spawn_child_args(arguments: &Value) -> Result<(String, i64), String> {
+    let Some(args) = arguments.as_object() else {
+        return Err("spawn_child arguments must be an object".to_string());
+    };
+    let seed_dir = args
+        .get("seed_dir")
+        .or_else(|| args.get("seedDir"))
+        .or_else(|| args.get("seed"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| "spawn_child requires string seed_dir".to_string())?
+        .to_string();
+    let budget_value = args
+        .get("initial_budget_tokens")
+        .or_else(|| args.get("initialBudgetTokens"));
+    let child_budget = budget_value
+        .and_then(Value::as_i64)
+        .ok_or_else(|| "spawn_child requires integer initial_budget_tokens".to_string())?;
+    if child_budget <= 0 {
+        return Err("initial_budget_tokens must be > 0".to_string());
+    }
+    Ok((seed_dir, child_budget))
+}
+
+fn run_spawn_child_handler(command: &[String], payload: &Value) -> Result<Value, String> {
+    let mut child = Command::new(&command[0])
+        .args(&command[1..])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("failed to start spawn_child handler: {err}"))?;
+
+    {
+        let Some(stdin) = child.stdin.as_mut() else {
+            return Err("spawn_child handler stdin is unavailable".to_string());
+        };
+        serde_json::to_writer(&mut *stdin, payload)
+            .map_err(|err| format!("failed to serialize spawn_child payload: {err}"))?;
+        stdin
+            .write_all(b"\n")
+            .map_err(|err| format!("failed to write spawn_child payload: {err}"))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|err| format!("failed to wait for spawn_child handler: {err}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !output.status.success() {
+        return Err(format!(
+            "spawn_child handler exited with status {}: {}",
+            output.status,
+            stderr
+        ));
+    }
+    if stdout.is_empty() {
+        return Err("spawn_child handler returned empty stdout".to_string());
+    }
+    serde_json::from_str(&stdout)
+        .map_err(|err| format!("failed to parse spawn_child handler response: {err}: {stdout}"))
+}
+
+fn dynamic_tool_json_response(success: bool, payload: Value) -> DynamicToolResponse {
+    DynamicToolResponse {
+        content_items: vec![DynamicToolCallOutputContentItem::InputText {
+            text: payload.to_string(),
+        }],
+        success,
+    }
 }
 
 fn mapped_item_notification(

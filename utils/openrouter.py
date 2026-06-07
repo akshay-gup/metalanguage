@@ -199,3 +199,42 @@ bash_tool: dict[str, Any] = {
         "required": ["command"],
     },
 }
+
+
+budget_status_tool: dict[str, Any] = {
+    "type": "function",
+    "name": "budget_status",
+    "description": "Return this rollout's token budget, spent tokens, reserved continuation budget, and remaining budget.",
+    "strict": None,
+    "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+    },
+}
+
+
+spawn_child_tool: dict[str, Any] = {
+    "type": "function",
+    "name": "spawn_child",
+    "description": (
+        "Continue this lineage by claiming a next-iteration rollout slot. The "
+        "complete directory at seed_dir is copied into that slot, and exactly "
+        "initial_budget_tokens is reserved from this rollout and assigned to it."
+    ),
+    "strict": None,
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "seed_dir": {
+                "type": "string",
+                "description": "Workspace-local directory containing the complete seed workspace to copy into the claimed slot.",
+            },
+            "initial_budget_tokens": {
+                "type": "integer",
+                "description": "Positive token budget to reserve from this rollout and assign exactly to the claimed slot.",
+            },
+        },
+        "required": ["seed_dir", "initial_budget_tokens"],
+    },
+}

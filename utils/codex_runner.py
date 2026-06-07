@@ -6,6 +6,7 @@ import json
 import os
 import select
 import subprocess
+import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -88,7 +89,7 @@ def run_codex_rollout(
     model: str,
     workdir: Path,
     codex_home: Path,
-    next_seed_dir: Path,
+    seed_output_dir: Path,
     archive_repo_dir: Path,
     shared_workspace_dir: Path,
     rollout_username: str | None,
@@ -97,6 +98,8 @@ def run_codex_rollout(
     initial_user_text: str = "Read README.md.",
     base_instructions: str | None = None,
     rollout_token_budget_tokens: int | None = None,
+    instance_uuid: str | None = None,
+    spawn_child_handler_context_path: Path | None = None,
     token_usage_callback: TokenUsageCallback | None = None,
     progress_callback: Callable[..., None] | None = None,
 ) -> dict[str, Any]:
@@ -113,18 +116,27 @@ def run_codex_rollout(
         "sandbox_mode": sandbox_mode,
         "workspace_roots": [
             str(workdir),
-            str(next_seed_dir),
+            str(seed_output_dir),
             str(archive_repo_dir),
             str(shared_workspace_dir),
         ],
         "additional_writable_roots": [
-            str(next_seed_dir),
+            str(seed_output_dir),
             str(archive_repo_dir),
             str(shared_workspace_dir),
         ],
     }
     if rollout_token_budget_tokens is not None:
         request["rollout_token_budget_tokens"] = rollout_token_budget_tokens
+    if instance_uuid is not None:
+        request["instance_uuid"] = instance_uuid
+    if spawn_child_handler_context_path is not None:
+        request["spawn_child_handler_command"] = [
+            sys.executable,
+            str(PROJECT_ROOT / "main_loop.py"),
+            "--child-tool-handler",
+            str(spawn_child_handler_context_path),
+        ]
     if base_instructions is not None and base_instructions.strip():
         request["base_instructions"] = base_instructions
     request_path = workdir / "codex_runner.request.json"
@@ -141,6 +153,7 @@ def run_codex_rollout(
         "error_code": "",
         "error_message": "",
         "tokens_spent": 0,
+        "tokens_reserved_for_children": 0,
         "codex_total_tokens_seen": 0,
         "budget_exhausted": False,
     }
@@ -250,6 +263,7 @@ def run_codex_rollout(
             "thread_id": thread_id,
             "session_id": session_id,
             "tokens_spent": tokens_spent,
+            "tokens_reserved_for_children": int(state.get("tokens_reserved_for_children") or 0),
             "rollout_token_budget_tokens": rollout_token_budget_tokens,
             "request_path": str(request_path),
             "stderr_path": str(stderr_path),
@@ -265,6 +279,7 @@ def run_codex_rollout(
             "thread_id": thread_id,
             "session_id": session_id,
             "tokens_spent": tokens_spent,
+            "tokens_reserved_for_children": int(state.get("tokens_reserved_for_children") or 0),
             "rollout_token_budget_tokens": rollout_token_budget_tokens,
             "request_path": str(request_path),
             "stderr_path": str(stderr_path),
@@ -280,6 +295,7 @@ def run_codex_rollout(
             "thread_id": thread_id,
             "session_id": session_id,
             "tokens_spent": tokens_spent,
+            "tokens_reserved_for_children": int(state.get("tokens_reserved_for_children") or 0),
             "rollout_token_budget_tokens": rollout_token_budget_tokens,
             "request_path": str(request_path),
             "stderr_path": str(stderr_path),
@@ -296,6 +312,7 @@ def run_codex_rollout(
             "thread_id": thread_id,
             "session_id": session_id,
             "tokens_spent": tokens_spent,
+            "tokens_reserved_for_children": int(state.get("tokens_reserved_for_children") or 0),
             "rollout_token_budget_tokens": rollout_token_budget_tokens,
             "request_path": str(request_path),
             "stderr_path": str(stderr_path),
@@ -310,6 +327,7 @@ def run_codex_rollout(
         "thread_id": thread_id,
         "session_id": session_id,
         "tokens_spent": tokens_spent,
+        "tokens_reserved_for_children": int(state.get("tokens_reserved_for_children") or 0),
         "rollout_token_budget_tokens": rollout_token_budget_tokens,
         "request_path": str(request_path),
         "stderr_path": str(stderr_path),
@@ -349,6 +367,10 @@ def _handle_runner_line(
     if name == "thread_started":
         state["thread_id"] = str(event.get("thread_id") or "")
         state["session_id"] = str(event.get("session_id") or "")
+    elif name in {"token_usage", "tool_end"}:
+        reserved = _token_int(event.get("tokens_reserved_for_children"))
+        if reserved > int(state.get("tokens_reserved_for_children") or 0):
+            state["tokens_reserved_for_children"] = reserved
     elif name in {"agent_message", "turn_complete"}:
         text = str(event.get("final_text") or event.get("text") or "")
         if text:
@@ -403,6 +425,7 @@ def _handle_runner_line(
                 "worker_token_usage",
                 token_usage=token_usage,
                 tokens_spent=state.get("tokens_spent"),
+                tokens_reserved_for_children=state.get("tokens_reserved_for_children"),
                 rollout_token_budget_tokens=rollout_token_budget_tokens,
             )
         elif name == "error":
