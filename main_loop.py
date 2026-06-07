@@ -454,7 +454,6 @@ def _make_continuation_context(
     budget_ledger_events: Path,
     spawn_slots_path: Path,
     spawn_slots_dir: Path,
-    spawn_slots_capacity: int,
     progress_log_path: Path,
     generation: int,
     seed: int,
@@ -488,7 +487,6 @@ def _make_continuation_context(
         "budget_ledger_events": str(budget_ledger_events),
         "spawn_slots_path": str(spawn_slots_path),
         "spawn_slots_dir": str(spawn_slots_dir),
-        "spawn_slots_capacity": spawn_slots_capacity,
         "progress_log": str(progress_log_path),
         "generation": generation,
         "seed": seed,
@@ -537,7 +535,6 @@ def _claim_spawn_slot(
 ) -> dict[str, Any]:
     slots_path = Path(str(context["spawn_slots_path"]))
     slots_dir = Path(str(context["spawn_slots_dir"]))
-    capacity = int(context["spawn_slots_capacity"])
     lock_path = slots_path.with_suffix(slots_path.suffix + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     slots_dir.mkdir(parents=True, exist_ok=True)
@@ -548,15 +545,6 @@ def _claim_spawn_slot(
         slots = state.get("slots") if isinstance(state, dict) else None
         if not isinstance(slots, list):
             slots = []
-        if len(slots) >= capacity:
-            return {
-                "success": False,
-                "slot_claimed": False,
-                "reservation_committed": False,
-                "error": "next iteration rollout slots are full",
-                "spawn_slots_capacity": capacity,
-                "claimed_slots": len(slots),
-            }
 
         slot_index = len(slots)
         child_seed_dir = slots_dir / f"slot_{slot_index:03d}_{child_instance_uuid[:8]}"
@@ -588,7 +576,6 @@ def _claim_spawn_slot(
         _write_json_file_atomic(
             slots_path,
             {
-                "capacity": capacity,
                 "source_task_index": context["task_index"],
                 "source_task_id": context["task_id"],
                 "slots": slots,
@@ -604,7 +591,6 @@ def _claim_spawn_slot(
             "initial_budget_tokens": initial_budget_tokens,
             "assigned_budget_tokens": initial_budget_tokens,
             "claimed_slots": len(slots),
-            "spawn_slots_capacity": capacity,
         }
 
 
@@ -1718,7 +1704,7 @@ def parse_args() -> argparse.Namespace:
         "--num-rollouts",
         type=int,
         default=DEFAULT_NUM_ROLLOUTS,
-        help="Number of rollouts to run per task.",
+        help="Number of bootstrap rollouts to run before spawn_child controls lineage width.",
     )
     parser.add_argument(
         "--worker-timeout-seconds",
@@ -1883,7 +1869,6 @@ def main() -> None:
         raise ValueError("--openrouter-max-retries must be >= 0")
     if args.rollout_token_budget_tokens is not None and args.rollout_token_budget_tokens <= 0:
         raise ValueError("--rollout-token-budget-tokens must be > 0 when set")
-    rollout_usernames = [f"rollout_user_{idx:03d}" for idx in range(args.num_rollouts)]
 
     load_dotenv()
     api_key: str | None = os.environ.get("OPENROUTER_API_KEY")
@@ -1940,7 +1925,7 @@ def main() -> None:
             and rec.get("model") == args.model
             and rec.get("seed") == args.seed
             and rec.get("generation") == args.generation
-            and rec.get("num_rollouts") == args.num_rollouts
+            and rec.get("bootstrap_rollout_count", rec.get("num_rollouts")) == args.num_rollouts
             and rec.get("config_name") == args.config_name
             and rec.get("worker_backend", "openrouter") == args.worker_backend
             and rec.get(
@@ -1960,7 +1945,7 @@ def main() -> None:
         rollout_idx = rec.get("rollout_index")
         if not isinstance(task_idx, int) or not isinstance(rollout_idx, int):
             continue
-        if rollout_idx < 0 or rollout_idx >= args.num_rollouts:
+        if rollout_idx < 0:
             continue
         per_task = existing_by_task.setdefault(task_idx, {})
         existing = per_task.get(rollout_idx)
@@ -1970,10 +1955,27 @@ def main() -> None:
     if not args.no_resume:
         parent_pool = load_parent_pool(parent_pool_path)
 
+    def _rollout_username(rollout_index: int) -> str:
+        return f"rollout_user_{rollout_index:03d}"
+
+    def _recorded_task_rollout_count(per_task: dict[int, dict[str, Any]]) -> int | None:
+        counts: list[int] = []
+        for rec in per_task.values():
+            raw_count = rec.get("task_rollout_count", rec.get("scheduled_rollout_count"))
+            try:
+                count = int(raw_count)
+            except (TypeError, ValueError):
+                continue
+            if count > 0:
+                counts.append(count)
+        return max(counts) if counts else None
+
     def _next_step_task_index() -> int:
         eligible_indices = [idx for idx in existing_by_task if idx >= args.start_task_index]
         for idx in sorted(eligible_indices):
-            if len(existing_by_task[idx]) < args.num_rollouts:
+            per_task = existing_by_task[idx]
+            expected_count = _recorded_task_rollout_count(per_task) or args.num_rollouts
+            if len(per_task) < expected_count:
                 return idx
         if eligible_indices:
             return max(eligible_indices) + 1
@@ -2026,6 +2028,18 @@ def main() -> None:
 
     for task_index, task in tasks:
         existing_task_records = existing_by_task.get(task_index, {})
+        recorded_task_rollout_count = _recorded_task_rollout_count(existing_task_records)
+        bootstrap_without_parent = task_index == 0 and not parent_pool
+        task_rollout_count = (
+            recorded_task_rollout_count
+            if recorded_task_rollout_count is not None
+            else (args.num_rollouts if bootstrap_without_parent else len(parent_pool))
+        )
+        if task_rollout_count <= 0:
+            raise RuntimeError(
+                f"No spawned child slots available for task_index={task_index}; "
+                "lineage cannot advance without spawn_child."
+            )
         problem_uid = compute_problem_uid(
             dataset_name=args.dataset_name,
             split=args.split,
@@ -2045,7 +2059,7 @@ def main() -> None:
             f"{task_index:06d}_{_sanitize_for_path(task.task_id)}_next_iteration"
         )
 
-        if len(existing_task_records) >= args.num_rollouts:
+        if len(existing_task_records) >= task_rollout_count:
             continue
 
         def _run_one_rollout(rollout_index: int) -> RolloutResult:
@@ -2053,7 +2067,7 @@ def main() -> None:
             if existing is not None:
                 raise RuntimeError(f"rollout {rollout_index} already exists and should not have been submitted")
 
-            rollout_username = rollout_usernames[rollout_index]
+            rollout_username = _rollout_username(rollout_index)
             sampled_parent: Path | None = (
                 parent_pool[rollout_index] if rollout_index < len(parent_pool) else None
             )
@@ -2167,7 +2181,6 @@ def main() -> None:
                 budget_ledger_events=budget_ledger_events,
                 spawn_slots_path=spawn_slots_path,
                 spawn_slots_dir=spawn_slots_dir,
-                spawn_slots_capacity=args.num_rollouts,
                 progress_log_path=progress_log_path,
                 generation=args.generation,
                 seed=args.seed,
@@ -2361,6 +2374,8 @@ def main() -> None:
                 "split": args.split,
                 "model": args.model,
                 "num_rollouts": args.num_rollouts,
+                "bootstrap_rollout_count": args.num_rollouts,
+                "task_rollout_count": task_rollout_count,
                 "worker_timeout_seconds": args.worker_timeout_seconds,
                 "bash_timeout_seconds": args.bash_timeout_seconds,
                 "openrouter_max_retries": args.openrouter_max_retries,
@@ -2399,7 +2414,7 @@ def main() -> None:
             )
 
         missing_rollout_indices: list[int] = []
-        for rollout_index in range(args.num_rollouts):
+        for rollout_index in range(task_rollout_count):
             existing = existing_task_records.get(rollout_index)
             if existing is not None:
                 continue
@@ -2431,7 +2446,7 @@ def main() -> None:
                                 "seed": args.seed,
                                 "task_index": task_index,
                                 "rollout_index": rollout_index,
-                                "rollout_username": rollout_usernames[rollout_index],
+                                "rollout_username": _rollout_username(rollout_index),
                                 "task_id": task.task_id,
                                 "problem_uid": problem_uid,
                                 "worker_status": "error",
@@ -2448,7 +2463,7 @@ def main() -> None:
                                     "seed": args.seed,
                                     "task_index": task_index,
                                     "rollout_index": rollout_index,
-                                    "rollout_username": rollout_usernames[rollout_index],
+                                    "rollout_username": _rollout_username(rollout_index),
                                     "task_id": task.task_id,
                                     "problem_uid": problem_uid,
                                     "reported_problem_uid": None,
@@ -2473,6 +2488,8 @@ def main() -> None:
                                     "split": args.split,
                                     "model": args.model,
                                     "num_rollouts": args.num_rollouts,
+                                    "bootstrap_rollout_count": args.num_rollouts,
+                                    "task_rollout_count": task_rollout_count,
                                     "worker_timeout_seconds": args.worker_timeout_seconds,
                                     "bash_timeout_seconds": args.bash_timeout_seconds,
                                     "openrouter_max_retries": args.openrouter_max_retries,
@@ -2494,7 +2511,7 @@ def main() -> None:
                                 successful_dir=None,
                                 summary=(
                                     f"gen={args.generation} seed={args.seed} task_index={task_index} "
-                                    f"rollout_index={rollout_index} rollout_username={rollout_usernames[rollout_index]} "
+                                    f"rollout_index={rollout_index} rollout_username={_rollout_username(rollout_index)} "
                                     f"task_id={task.task_id} solved=False output=None error={type(exc).__name__}"
                                 ),
                                 error=str(exc),
