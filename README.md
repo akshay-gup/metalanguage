@@ -45,7 +45,7 @@ take precedence over values in `.env`.
 - `main_loop.py`: runs RLVR-style episodes end-to-end:
   1. by default, sample one task from `m-a-p/SuperGPQA` (or process all tasks with `--all-tasks`; override with `--dataset-name`),
   1.5. use `moonshotai/kimi-k2.6` as the default OpenRouter model (override with `--model`),
-  2. run 8 `--num-rollouts` rollout slots per task by default, concurrently in isolated temp workspaces (each with an auto-assigned unique rollout username),
+  2. run 8 bootstrap rollout slots by default with `--num-rollouts`, then let later task width be set by spawned child slots,
   3. assign each rollout index to the matching `spawn_child` slot claimed by the prior task's rollouts,
   3.5. expose a shared cross-rollout workspace at `--rollout-temp-root/shared_workspace` where any rollout agent can leave files/messages for any other rollout agent (files written during the task batch are cleaned up after the batch; durable consequences must be copied into a seed, archive artifact, solution, or later behavior),
   3.6. assign every rollout instance a UUID and record an `instance_created` event in the token-budget ledger,
@@ -69,7 +69,7 @@ take precedence over values in `.env`.
   - provider-reported model usage is recorded as `token_usage` events after OpenRouter calls and Codex usage events;
   - `--rollout-token-budget-tokens` optionally stops a rollout when reported usage exhausts its per-rollout budget;
   - rollouts can call `budget_status()` and `spawn_child(seed_dir, initial_budget_tokens)` as main-loop tools;
-  - `spawn_child` copies a complete workspace-local seed directory into one claimed next-iteration rollout slot;
+  - `spawn_child` copies a complete workspace-local seed directory into the next claimed next-iteration rollout slot;
   - the claimed slot receives exactly `initial_budget_tokens`; the call fails if the parent rollout does not have that much budget remaining;
   - tool responses are counted when they are sent back as model input on the next model call;
   - solve rewards and direct inter-instance budget transfers are intentionally left for future parent tool-call mechanics.
@@ -78,7 +78,7 @@ take precedence over values in `.env`.
   - after bootstrap, missing parent seeds are terminal and the loop will not silently continue as a fresh lineage.
 - Resume behavior:
   - runs automatically resume from existing `--runs-log` entries that match dataset/split/model/seed/generation/config/rollout-count;
-  - completed rollouts are skipped, partial tasks continue from missing rollout indices;
+  - completed rollouts are skipped, partial tasks continue from missing rollout indices using each task's recorded rollout count;
   - parent lineage candidates are loaded from `--rollout-temp-root/latest_parent_pool.json`, which is written from claimed `spawn_child` slots;
   - disable this with `--no-resume`.
 - Manual iteration:
