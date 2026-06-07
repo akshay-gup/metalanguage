@@ -99,7 +99,6 @@ def run_codex_rollout(
     base_instructions: str | None = None,
     rollout_token_budget_tokens: int | None = None,
     instance_uuid: str | None = None,
-    transfer_inbox_path: Path | None = None,
     spawn_child_handler_context_path: Path | None = None,
     token_usage_callback: TokenUsageCallback | None = None,
     progress_callback: Callable[..., None] | None = None,
@@ -131,8 +130,6 @@ def run_codex_rollout(
         request["rollout_token_budget_tokens"] = rollout_token_budget_tokens
     if instance_uuid is not None:
         request["instance_uuid"] = instance_uuid
-    if transfer_inbox_path is not None:
-        request["transfer_inbox_path"] = str(transfer_inbox_path)
     if spawn_child_handler_context_path is not None:
         request["spawn_child_handler_command"] = [
             sys.executable,
@@ -406,13 +403,6 @@ def _handle_runner_line(
         effective_budget = _token_int(event.get("effective_rollout_token_budget_tokens"))
         if effective_budget > 0:
             state["effective_rollout_token_budget_tokens"] = effective_budget
-    elif name == "budget_transfer_received":
-        transferred_in = _token_int(event.get("tokens_transferred_in"))
-        if transferred_in > int(state.get("tokens_transferred_in") or 0):
-            state["tokens_transferred_in"] = transferred_in
-        effective_budget = _token_int(event.get("effective_rollout_token_budget_tokens"))
-        if effective_budget > 0:
-            state["effective_rollout_token_budget_tokens"] = effective_budget
     elif name in {"agent_message", "turn_complete"}:
         text = str(event.get("final_text") or event.get("text") or "")
         if text:
@@ -483,15 +473,6 @@ def _handle_runner_line(
                 tokens_transferred_in=state.get("tokens_transferred_in"),
                 tokens_transferred_out=state.get("tokens_transferred_out"),
                 rollout_token_budget_tokens=rollout_token_budget_tokens,
-            )
-        elif name == "budget_transfer_received":
-            progress_callback(
-                "budget_transfer_received",
-                amount_tokens=event.get("amount_tokens"),
-                tokens_transferred_in=event.get("tokens_transferred_in"),
-                rollout_token_budget_tokens=event.get("rollout_token_budget_tokens"),
-                effective_rollout_token_budget_tokens=event.get("effective_rollout_token_budget_tokens"),
-                tokens_remaining=event.get("tokens_remaining"),
             )
         elif name == "error":
             progress_callback(

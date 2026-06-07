@@ -1,10 +1,5 @@
-use std::fs::File;
-use std::io::BufRead;
-use std::io::BufReader;
 use std::io::IsTerminal;
 use std::io::Read;
-use std::io::Seek;
-use std::io::SeekFrom;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
@@ -67,7 +62,6 @@ struct RunnerRequest {
     additional_writable_roots: Option<Vec<PathBuf>>,
     rollout_token_budget_tokens: Option<i64>,
     instance_uuid: Option<String>,
-    transfer_inbox_path: Option<PathBuf>,
     spawn_child_handler_command: Option<Vec<String>>,
 }
 
@@ -78,8 +72,6 @@ struct BudgetState {
     reserved_child_tokens: i64,
     transferred_in_tokens: i64,
     transferred_out_tokens: i64,
-    transfer_inbox_path: Option<PathBuf>,
-    transfer_inbox_offset: u64,
 }
 
 impl BudgetState {
@@ -120,54 +112,31 @@ impl BudgetState {
         })
     }
 
-    fn apply_incoming_transfers(&mut self) -> anyhow::Result<i64> {
-        let Some(path) = self.transfer_inbox_path.as_ref() else {
-            return Ok(0);
-        };
-        let mut file = match File::open(path) {
-            Ok(file) => file,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-            Err(err) => return Err(err).with_context(|| format!("open transfer inbox {path:?}")),
-        };
-        let file_len = file
-            .metadata()
-            .with_context(|| format!("stat transfer inbox {path:?}"))?
-            .len();
-        if self.transfer_inbox_offset > file_len {
-            self.transfer_inbox_offset = 0;
+    fn apply_snapshot(&mut self, snapshot: &Value) {
+        if let Some(value) = snapshot
+            .get("rollout_token_budget_tokens")
+            .and_then(Value::as_i64)
+        {
+            self.rollout_token_budget_tokens = Some(value);
         }
-        file.seek(SeekFrom::Start(self.transfer_inbox_offset))
-            .with_context(|| format!("seek transfer inbox {path:?}"))?;
-        let mut reader = BufReader::new(file);
-        let mut line = String::new();
-        let mut transferred = 0_i64;
-        loop {
-            line.clear();
-            let bytes = reader
-                .read_line(&mut line)
-                .with_context(|| format!("read transfer inbox {path:?}"))?;
-            if bytes == 0 {
-                break;
-            }
-            let Ok(event) = serde_json::from_str::<Value>(line.trim()) else {
-                continue;
-            };
-            let amount = event
-                .get("amount_tokens")
-                .and_then(Value::as_i64)
-                .unwrap_or_default();
-            if amount <= 0 {
-                continue;
-            }
-            transferred += amount;
+        if let Some(value) = snapshot.get("tokens_spent").and_then(Value::as_i64) {
+            self.tokens_spent = self.tokens_spent.max(value);
         }
-        self.transfer_inbox_offset = reader
-            .stream_position()
-            .with_context(|| format!("read transfer inbox position {path:?}"))?;
-        if transferred > 0 {
-            self.transferred_in_tokens += transferred;
+        if let Some(value) = snapshot
+            .get("tokens_reserved_for_children")
+            .and_then(Value::as_i64)
+        {
+            self.reserved_child_tokens = value;
         }
-        Ok(transferred)
+        if let Some(value) = snapshot.get("tokens_transferred_in").and_then(Value::as_i64) {
+            self.transferred_in_tokens = value;
+        }
+        if let Some(value) = snapshot
+            .get("tokens_transferred_out")
+            .and_then(Value::as_i64)
+        {
+            self.transferred_out_tokens = value;
+        }
     }
 }
 
@@ -318,7 +287,6 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
 
     let rollout_token_budget_tokens = request.rollout_token_budget_tokens;
     let instance_uuid = request.instance_uuid.clone();
-    let transfer_inbox_path = request.transfer_inbox_path.clone();
     let spawn_child_handler_command = request.spawn_child_handler_command.clone();
     let prompt = request
         .initial_user_text
@@ -329,7 +297,6 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
         prompt,
         rollout_token_budget_tokens,
         instance_uuid,
-        transfer_inbox_path,
         spawn_child_handler_command,
     )
     .await;
@@ -359,7 +326,6 @@ async fn run_turn(
     prompt: String,
     rollout_token_budget_tokens: Option<i64>,
     instance_uuid: Option<String>,
-    transfer_inbox_path: Option<PathBuf>,
     spawn_child_handler_command: Option<Vec<String>>,
 ) -> anyhow::Result<()> {
     thread
@@ -385,23 +351,9 @@ async fn run_turn(
         reserved_child_tokens: 0,
         transferred_in_tokens: 0,
         transferred_out_tokens: 0,
-        transfer_inbox_path,
-        transfer_inbox_offset: 0,
     };
     loop {
         let event = thread.next_event().await.context("read Codex event")?;
-        let transfer_delta = budget_state.apply_incoming_transfers()?;
-        if transfer_delta > 0 {
-            emit(json!({
-                "event": "budget_transfer_received",
-                "turn_id": current_turn_id.as_deref(),
-                "amount_tokens": transfer_delta,
-                "tokens_transferred_in": budget_state.transferred_in_tokens,
-                "rollout_token_budget_tokens": budget_state.rollout_token_budget_tokens,
-                "effective_rollout_token_budget_tokens": budget_state.effective_rollout_token_budget_tokens(),
-                "tokens_remaining": budget_state.tokens_remaining(),
-            }))?;
-        }
         match &event.msg {
             EventMsg::TurnStarted(event) => {
                 current_turn_id = Some(event.turn_id.clone());
@@ -421,6 +373,10 @@ async fn run_turn(
                         budget_state.tokens_spent += info.last_token_usage.total_tokens.max(0);
                     }
                 }
+                let _ = refresh_budget_status_from_handler(
+                    &mut budget_state,
+                    spawn_child_handler_command.as_deref(),
+                );
                 let tokens_remaining = budget_state.tokens_remaining();
                 let budget_exhausted = budget_state.exhausted();
                 emit(json!({
@@ -792,7 +748,11 @@ fn handle_metalanguage_dynamic_tool(
     }
 
     match request.tool.as_str() {
-        "budget_status" => dynamic_tool_json_response(true, budget_state.snapshot()),
+        "budget_status" => handle_budget_status_tool(
+            request,
+            budget_state,
+            spawn_child_handler_command,
+        ),
         "spawn_child" => handle_spawn_child_tool(
             request,
             budget_state,
@@ -809,6 +769,42 @@ fn handle_metalanguage_dynamic_tool(
             false,
             json!({"error": "unsupported dynamic tool", "tool": other}),
         ),
+    }
+}
+
+fn handle_budget_status_tool(
+    request: &DynamicToolCallRequest,
+    budget_state: &mut BudgetState,
+    spawn_child_handler_command: Option<&[String]>,
+) -> DynamicToolResponse {
+    let Some(command) = spawn_child_handler_command else {
+        return dynamic_tool_json_response(true, budget_state.snapshot());
+    };
+    if command.is_empty() {
+        return dynamic_tool_json_response(
+            false,
+            json!({"error": "budget_status handler command is empty"}),
+        );
+    }
+    let handler_payload = json!({
+        "tool": request.tool,
+        "namespace": request.namespace,
+        "call_id": request.call_id,
+        "arguments": request.arguments,
+    });
+    let output = match run_spawn_child_handler(command, &handler_payload) {
+        Ok(value) => value,
+        Err(message) => return dynamic_tool_json_response(false, json!({"error": message})),
+    };
+    apply_budget_status_from_tool_output(budget_state, &output);
+    let success = output
+        .get("success")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    if success {
+        dynamic_tool_json_response(true, budget_state.snapshot())
+    } else {
+        dynamic_tool_json_response(false, output)
     }
 }
 
@@ -830,32 +826,11 @@ fn handle_transfer_tokens_tool(
             json!({"error": "transfer_tokens handler command is empty"}),
         );
     }
-    if budget_state.rollout_token_budget_tokens.is_none() {
-        return dynamic_tool_json_response(
-            false,
-            json!({"error": "transfer_tokens requires rollout_token_budget_tokens"}),
-        );
-    }
-
     let (target_instance_uuid, amount_tokens) = match parse_transfer_tokens_args(&request.arguments) {
         Ok(parsed) => parsed,
         Err(message) => return dynamic_tool_json_response(false, json!({"error": message})),
     };
-    let remaining = budget_state.tokens_remaining().unwrap_or_default();
-    if amount_tokens > remaining {
-        return dynamic_tool_json_response(
-            false,
-            json!({
-                "error": "insufficient source token budget",
-                "requested_amount_tokens": amount_tokens,
-                "tokens_remaining": remaining,
-                "budget_status": budget_state.snapshot(),
-            }),
-        );
-    }
 
-    let transferred_out_before = budget_state.transferred_out_tokens;
-    budget_state.transferred_out_tokens += amount_tokens;
     let handler_payload = json!({
         "tool": request.tool,
         "namespace": request.namespace,
@@ -868,9 +843,8 @@ fn handle_transfer_tokens_tool(
             "tokens_spent": budget_state.tokens_spent,
             "tokens_reserved_for_children": budget_state.reserved_child_tokens,
             "tokens_transferred_in": budget_state.transferred_in_tokens,
-            "tokens_transferred_out_before": transferred_out_before,
-            "transferred_for_this_call": amount_tokens,
-            "tokens_transferred_out_after": budget_state.transferred_out_tokens,
+            "tokens_transferred_out": budget_state.transferred_out_tokens,
+            "requested_transfer_tokens": amount_tokens,
             "tokens_remaining_after_transfer": budget_state.tokens_remaining(),
         },
         "target_instance_uuid": target_instance_uuid,
@@ -878,22 +852,13 @@ fn handle_transfer_tokens_tool(
 
     let output = match run_spawn_child_handler(command, &handler_payload) {
         Ok(value) => value,
-        Err(message) => {
-            budget_state.transferred_out_tokens = transferred_out_before;
-            return dynamic_tool_json_response(false, json!({"error": message}));
-        }
+        Err(message) => return dynamic_tool_json_response(false, json!({"error": message})),
     };
-    let transfer_committed = output
-        .get("transfer_committed")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    if !transfer_committed {
-        budget_state.transferred_out_tokens = transferred_out_before;
-    }
+    apply_budget_status_from_tool_output(budget_state, &output);
     let success = output
         .get("success")
         .and_then(Value::as_bool)
-        .unwrap_or(transfer_committed);
+        .unwrap_or(false);
     dynamic_tool_json_response(success, output)
 }
 
@@ -915,13 +880,6 @@ fn handle_spawn_child_tool(
             json!({"error": "spawn_child handler command is empty"}),
         );
     }
-    if budget_state.rollout_token_budget_tokens.is_none() {
-        return dynamic_tool_json_response(
-            false,
-            json!({"error": "spawn_child requires rollout_token_budget_tokens"}),
-        );
-    }
-
     let (seed_dir, child_budget) = match parse_spawn_child_args(&request.arguments) {
         Ok(parsed) => parsed,
         Err(message) => return dynamic_tool_json_response(false, json!({"error": message})),
@@ -929,21 +887,7 @@ fn handle_spawn_child_tool(
     if seed_dir.trim().is_empty() {
         return dynamic_tool_json_response(false, json!({"error": "seed_dir must be non-empty"}));
     }
-    let remaining = budget_state.tokens_remaining().unwrap_or_default();
-    if child_budget > remaining {
-        return dynamic_tool_json_response(
-            false,
-            json!({
-                "error": "insufficient parent token budget",
-                "requested_initial_budget_tokens": child_budget,
-                "tokens_remaining": remaining,
-                "budget_status": budget_state.snapshot(),
-            }),
-        );
-    }
 
-    let reserved_before = budget_state.reserved_child_tokens;
-    budget_state.reserved_child_tokens += child_budget;
     let handler_payload = json!({
         "tool": request.tool,
         "namespace": request.namespace,
@@ -954,32 +898,55 @@ fn handle_spawn_child_tool(
             "rollout_token_budget_tokens": budget_state.rollout_token_budget_tokens,
             "effective_rollout_token_budget_tokens": budget_state.effective_rollout_token_budget_tokens(),
             "tokens_spent": budget_state.tokens_spent,
-            "tokens_reserved_for_children_before": reserved_before,
-            "reserved_for_this_child": child_budget,
-            "tokens_reserved_for_children_after": budget_state.reserved_child_tokens,
+            "tokens_reserved_for_children": budget_state.reserved_child_tokens,
+            "requested_child_budget_tokens": child_budget,
             "tokens_remaining_after_reservation": budget_state.tokens_remaining(),
         },
     });
 
     let output = match run_spawn_child_handler(command, &handler_payload) {
         Ok(value) => value,
-        Err(message) => {
-            budget_state.reserved_child_tokens = reserved_before;
-            return dynamic_tool_json_response(false, json!({"error": message}));
-        }
+        Err(message) => return dynamic_tool_json_response(false, json!({"error": message})),
     };
-    let reservation_committed = output
-        .get("reservation_committed")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    if !reservation_committed {
-        budget_state.reserved_child_tokens = reserved_before;
-    }
+    apply_budget_status_from_tool_output(budget_state, &output);
     let success = output
         .get("success")
         .and_then(Value::as_bool)
-        .unwrap_or(reservation_committed);
+        .unwrap_or(false);
     dynamic_tool_json_response(success, output)
+}
+
+fn apply_budget_status_from_tool_output(budget_state: &mut BudgetState, output: &Value) {
+    if let Some(status) = output.get("budget_status_after") {
+        budget_state.apply_snapshot(status);
+        return;
+    }
+    if let Some(status) = output.get("budget_status") {
+        budget_state.apply_snapshot(status);
+        return;
+    }
+    budget_state.apply_snapshot(output);
+}
+
+fn refresh_budget_status_from_handler(
+    budget_state: &mut BudgetState,
+    spawn_child_handler_command: Option<&[String]>,
+) -> Result<(), String> {
+    let Some(command) = spawn_child_handler_command else {
+        return Ok(());
+    };
+    if command.is_empty() {
+        return Ok(());
+    }
+    let output = run_spawn_child_handler(
+        command,
+        &json!({
+            "tool": "budget_status",
+            "arguments": {},
+        }),
+    )?;
+    apply_budget_status_from_tool_output(budget_state, &output);
+    Ok(())
 }
 
 fn parse_spawn_child_args(arguments: &Value) -> Result<(String, i64), String> {
