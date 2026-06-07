@@ -116,9 +116,12 @@ from a compact signal.
 Before finishing, decide whether this lineage should continue. If yes, write a
 complete seed workspace under `seed_output/`, call `budget_status()`, and then
 call `spawn_child(seed_dir, initial_budget_tokens)` with `seed_dir` set to
-`seed_output`. The whole directory is copied into the descendant that occupies a
-next-iteration rollout slot. It is not a transcript and not merely a note about
-the task you solved. It must be a complete successor to this operating packet.
+`seed_output`. You may call `transfer_tokens(target_instance_uuid,
+amount_tokens)` to give budget to a live same-task peer listed in `runtime.md`
+before spawning. The whole seed directory is copied into the descendant that
+occupies a next-iteration rollout slot. It is not a transcript and not merely a
+note about the task you solved. It must be a complete successor to this
+operating packet.
 
 Minimum seed contract:
 
