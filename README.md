@@ -105,14 +105,14 @@ Metalanguage-owned Codex runner, build the Rust runner once:
 cargo build --manifest-path crates/metalanguage-codex-runner/Cargo.toml
 ```
 
-Then run one Codex-backed rollout:
+Then run one Codex-backed task iteration with 8 bootstrap rollout slots:
 
 ```bash
 uv run python -B main_loop.py \
   --worker-backend codex \
   --model gpt-5.5 \
   --step \
-  --num-rollouts 1
+  --num-rollouts 8
 ```
 
 Useful flags:
@@ -140,5 +140,5 @@ uv run python -B main_loop.py \
   --codex-base-instructions-mode read-readme \
   --codex-initial-prompt "Read runtime.md, then task.md." \
   --step \
-  --num-rollouts 1
+  --num-rollouts 8
 ```
