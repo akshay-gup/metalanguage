@@ -668,7 +668,7 @@ fn metalanguage_dynamic_tools() -> Vec<DynamicToolSpec> {
             namespace: None,
             name: "budget_status".to_string(),
             description: (
-                "Return this rollout's token budget, spent tokens, reserved continuation "
+                "Return this rollout's token budget, spent tokens, reserved child "
                 "budget, and remaining budget."
             )
             .to_string(),
@@ -714,9 +714,8 @@ fn metalanguage_dynamic_tools() -> Vec<DynamicToolSpec> {
             namespace: None,
             name: "spawn_child".to_string(),
             description: (
-                "Continue this lineage by claiming a next-iteration rollout slot. "
-                "The complete directory at seed_dir is copied into that slot, and "
-                "exactly initial_budget_tokens is reserved from this rollout and assigned to it."
+                "Claim a next-iteration rollout slot by copying seed_dir into that "
+                "slot and reserving exactly initial_budget_tokens from this rollout."
             )
             .to_string(),
             input_schema: json!({

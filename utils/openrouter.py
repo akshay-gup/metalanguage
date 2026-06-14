@@ -247,9 +247,8 @@ transfer_tokens_tool: dict[str, Any] = {
     "type": "function",
     "name": "transfer_tokens",
     "description": (
-        "Transfer part of this rollout's remaining token budget to a live peer "
-        "rollout in the same task. The target's budget increases by exactly "
-        "amount_tokens."
+        "Move token budget from this rollout to a live same-task peer. "
+        "The target's budget increases by exactly amount_tokens."
     ),
     "strict": None,
     "parameters": {
@@ -273,9 +272,8 @@ spawn_child_tool: dict[str, Any] = {
     "type": "function",
     "name": "spawn_child",
     "description": (
-        "Continue this lineage by claiming a next-iteration rollout slot. The "
-        "complete directory at seed_dir is copied into that slot, and exactly "
-        "initial_budget_tokens is reserved from this rollout and assigned to it."
+        "Claim a next-iteration rollout slot by copying seed_dir into that "
+        "slot and reserving exactly initial_budget_tokens from this rollout."
     ),
     "strict": None,
     "parameters": {

@@ -11,7 +11,7 @@ claim a child slot, this lineage dies.
 Read in this order:
 
 1. `README.md`: inherited doctrine, tool discipline, and seed contract.
-2. `runtime.md`: workspace-relative paths and main-loop scoring/continuation tools.
+2. `runtime.md`: generated paths, runtime IDs, budgets, and peer list.
 3. `task.md`: the current task. Solution-like fields are redacted.
 
 After reading those files, make a quick public-memory pass. Check whether the
@@ -42,6 +42,22 @@ Good task work is concrete:
 - notice formatting artifacts in the task statement
 - keep scratch scripts small, named for their purpose, and disposable
 - finish by submitting a compact answer that the scorer can parse
+
+## Main-Loop Tools
+
+The main loop registers these callable tools with the worker runtime. This
+section explains what each tool does.
+
+- `submit_solution(answer, task_id?, problem_uid?)`: scores the answer
+  immediately, credits reward tokens on correct solves, and returns correctness
+  plus budget status.
+- `budget_status()`: returns configured/effective token budget, spent tokens,
+  reserved child budget, transfers, and remaining budget.
+- `spawn_child(seed_dir, initial_budget_tokens)`: copies a complete
+  workspace-local seed directory into one claimed next-iteration rollout slot
+  with exactly that starting budget.
+- `transfer_tokens(target_instance_uuid, amount_tokens)`: transfers budget to a
+  live same-task peer listed in `runtime.md`.
 
 ## Operational Discipline
 
