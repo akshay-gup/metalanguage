@@ -49,7 +49,7 @@ Good task work is concrete:
 The main loop registers these callable tools with the worker runtime. This
 section explains what each tool does.
 
-- `submit_solution(answer, task_id?, problem_uid?)`: scores the answer
+- `submit_solution(answer)`: scores the answer
   immediately, credits reward tokens on correct solves, and returns correctness
   plus budget status.
 - `budget_status()`: returns configured/effective token budget, spent tokens,

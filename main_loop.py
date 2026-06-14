@@ -434,9 +434,13 @@ def _parse_submit_solution_arguments(args: dict[str, Any]) -> tuple[str | None, 
         return None, None, None, "submit_solution requires a non-empty string answer"
 
     raw_task_id = args.get("task_id", args.get("taskId"))
-    reported_task_id = str(raw_task_id) if raw_task_id is not None else None
+    reported_task_id = str(raw_task_id).strip() if raw_task_id is not None else None
+    if not reported_task_id:
+        reported_task_id = None
     raw_problem_uid = args.get("problem_uid", args.get("problemUid"))
-    reported_problem_uid = str(raw_problem_uid) if raw_problem_uid is not None else None
+    reported_problem_uid = str(raw_problem_uid).strip() if raw_problem_uid is not None else None
+    if not reported_problem_uid:
+        reported_problem_uid = None
     return answer.strip(), reported_task_id, reported_problem_uid, None
 
 

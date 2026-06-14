@@ -229,14 +229,6 @@ submit_solution_tool: dict[str, Any] = {
                 "type": "string",
                 "description": "Final answer to score against the current task.",
             },
-            "task_id": {
-                "type": "string",
-                "description": "Optional task_id copied from task.md for validation.",
-            },
-            "problem_uid": {
-                "type": "string",
-                "description": "Optional problem_uid copied from task.md for validation.",
-            },
         },
         "required": ["answer"],
     },

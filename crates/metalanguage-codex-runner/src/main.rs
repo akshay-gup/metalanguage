@@ -695,14 +695,6 @@ fn metalanguage_dynamic_tools() -> Vec<DynamicToolSpec> {
                     "answer": {
                         "type": "string",
                         "description": "Final answer to score against the current task."
-                    },
-                    "task_id": {
-                        "type": "string",
-                        "description": "Optional task_id copied from task.md for validation."
-                    },
-                    "problem_uid": {
-                        "type": "string",
-                        "description": "Optional problem_uid copied from task.md for validation."
                     }
                 },
                 "required": ["answer"],
