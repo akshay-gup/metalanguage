@@ -89,7 +89,6 @@ class WorkerResult:
 
 
 CONTINUATION_CONTEXT_FILENAME = "continuation_context.json"
-SPAWN_CHILD_METADATA_FILENAME = ".spawn_child.json"
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_ENV_PATH = PROJECT_ROOT / ".env"
 DEFAULT_MODEL = "moonshotai/kimi-k2.6"
@@ -819,11 +818,6 @@ def _claim_spawn_slot(
             "source_rollout_index": context["rollout_index"],
             "parent_budget": parent_budget,
         }
-        (child_seed_dir / SPAWN_CHILD_METADATA_FILENAME).write_text(
-            json.dumps(metadata, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-
         slot_record = {
             **metadata,
             "seed_dir": str(child_seed_dir),
@@ -865,10 +859,38 @@ def _load_spawned_child_seed_dirs(spawn_slots_path: Path) -> list[Path]:
     return seed_dirs
 
 
-def _seed_budget_tokens(seed_dir: Path) -> int | None:
-    metadata = _read_json_file(seed_dir / SPAWN_CHILD_METADATA_FILENAME, {})
-    if not isinstance(metadata, dict):
+def _spawn_slots_path_for_child_seed_dir(seed_dir: Path) -> Path | None:
+    slots_dir = seed_dir.parent
+    suffix = "_next_iteration"
+    if not slots_dir.name.endswith(suffix):
         return None
+    return slots_dir.with_name(f"{slots_dir.name.removesuffix(suffix)}_spawn_slots.json")
+
+
+def _spawn_slot_seed_dir_matches(slot: dict[str, Any], seed_dir: Path) -> bool:
+    raw_seed_dir = slot.get("seed_dir")
+    if not isinstance(raw_seed_dir, str) or not raw_seed_dir:
+        return False
+    try:
+        return Path(raw_seed_dir).resolve() == seed_dir.resolve()
+    except OSError:
+        return raw_seed_dir == str(seed_dir)
+
+
+def _spawn_child_metadata_for_seed_dir(seed_dir: Path) -> dict[str, Any]:
+    slots_path = _spawn_slots_path_for_child_seed_dir(seed_dir)
+    if slots_path is not None:
+        state = _read_json_file(slots_path, {})
+        slots = state.get("slots") if isinstance(state, dict) else None
+        if isinstance(slots, list):
+            for slot in slots:
+                if isinstance(slot, dict) and _spawn_slot_seed_dir_matches(slot, seed_dir):
+                    return slot
+    return {}
+
+
+def _seed_budget_tokens(seed_dir: Path) -> int | None:
+    metadata = _spawn_child_metadata_for_seed_dir(seed_dir)
     try:
         budget = int(metadata.get("initial_budget_tokens"))
     except (TypeError, ValueError):
@@ -877,9 +899,7 @@ def _seed_budget_tokens(seed_dir: Path) -> int | None:
 
 
 def _seed_child_instance_uuid(seed_dir: Path) -> str | None:
-    metadata = _read_json_file(seed_dir / SPAWN_CHILD_METADATA_FILENAME, {})
-    if not isinstance(metadata, dict):
-        return None
+    metadata = _spawn_child_metadata_for_seed_dir(seed_dir)
     child_instance_uuid = metadata.get("child_instance_uuid")
     if isinstance(child_instance_uuid, str) and child_instance_uuid:
         return child_instance_uuid
