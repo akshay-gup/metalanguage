@@ -73,7 +73,7 @@ take precedence over values in `.env`.
   - every rollout receives an internal `instance_uuid` recorded in progress logs, run logs, and the ledger;
   - provider-reported model usage is recorded as `token_usage` events after OpenRouter calls and Codex usage events;
   - solution outcomes are recorded as `solution_scored` events after reward calculation;
-  - `--rollout-token-budget-tokens` optionally stops a rollout when reported usage exhausts its per-rollout budget;
+  - `--rollout-token-budget-tokens` sets each initial rollout's starting budget, defaulting to 300000 tokens, and stops a rollout when reported usage exhausts it;
   - rollouts can call `budget_status()`, `transfer_tokens(target_instance_uuid, amount_tokens)`, and `spawn_child(seed_dir, initial_budget_tokens)` as main-loop tools;
   - `transfer_tokens` moves budget from one live same-task rollout to another by instance UUID; the sender's remaining budget decreases and the target's effective budget increases;
   - `spawn_child` copies a complete workspace-local seed directory into the next claimed next-iteration rollout slot;

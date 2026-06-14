@@ -97,6 +97,7 @@ DEFAULT_NUM_ROLLOUTS = 8
 DEFAULT_WORKER_TIMEOUT_SECONDS = 3600
 DEFAULT_BASH_TIMEOUT_SECONDS = 120
 DEFAULT_OPENROUTER_MAX_RETRIES = 5
+DEFAULT_ROLLOUT_TOKEN_BUDGET_TOKENS = 300_000
 DEFAULT_RUNTIME_ROOT = Path.home() / "Documents" / "metalanguage_runs"
 DEFAULT_CODEX_HOME = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
 BUNDLED_BOOTSTRAP_SEED_DIR = PROJECT_ROOT / "seeds" / "bootstrap"
@@ -1918,8 +1919,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--rollout-token-budget-tokens",
         type=int,
-        default=None,
-        help="Optional per-rollout model token budget. When set, no further model calls are made after reported usage exhausts it.",
+        default=DEFAULT_ROLLOUT_TOKEN_BUDGET_TOKENS,
+        help=(
+            "Per-rollout model token budget. No further model calls are made "
+            "after reported usage exhausts it."
+        ),
     )
     parser.add_argument(
         "--archive-repo-dir",
