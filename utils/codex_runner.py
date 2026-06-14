@@ -33,6 +33,52 @@ def ensure_codex_runner_built(*, release: bool = False) -> Path:
     return runner_binary_path(release=release)
 
 
+def _codex_runner_source_inputs() -> list[Path]:
+    inputs = [RUNNER_MANIFEST]
+    lockfile = RUNNER_CRATE_DIR / "Cargo.lock"
+    if lockfile.exists():
+        inputs.append(lockfile)
+    build_rs = RUNNER_CRATE_DIR / "build.rs"
+    if build_rs.exists():
+        inputs.append(build_rs)
+    src_dir = RUNNER_CRATE_DIR / "src"
+    if src_dir.exists():
+        inputs.extend(sorted(src_dir.rglob("*.rs")))
+    return inputs
+
+
+def _newest_codex_runner_source_input() -> tuple[Path, int] | None:
+    newest: tuple[Path, int] | None = None
+    for path in _codex_runner_source_inputs():
+        try:
+            mtime_ns = path.stat().st_mtime_ns
+        except FileNotFoundError:
+            continue
+        if newest is None or mtime_ns > newest[1]:
+            newest = (path, mtime_ns)
+    return newest
+
+
+def _assert_managed_codex_runner_fresh(path: Path, *, release: bool = False) -> None:
+    managed_path = runner_binary_path(release=release).expanduser().resolve()
+    if path != managed_path:
+        return
+
+    newest = _newest_codex_runner_source_input()
+    if newest is None:
+        return
+    newest_path, newest_mtime_ns = newest
+    if path.stat().st_mtime_ns >= newest_mtime_ns:
+        return
+
+    raise RuntimeError(
+        "Codex runner binary is older than its source inputs: "
+        f"{path} is older than {newest_path}. Rebuild it with "
+        f"`cargo build --manifest-path {RUNNER_MANIFEST}` "
+        "or pass --codex-build-runner."
+    )
+
+
 def resolve_codex_runner_bin(
     runner_bin: Path | None,
     *,
@@ -51,6 +97,7 @@ def resolve_codex_runner_bin(
             f"`cargo build --manifest-path {RUNNER_MANIFEST}` "
             "or pass --codex-build-runner."
         )
+    _assert_managed_codex_runner_fresh(path, release=release)
     return path
 
 
