@@ -844,15 +844,38 @@ def _claim_spawn_slot(
         }
 
 
-def _load_spawned_child_seed_dirs(spawn_slots_path: Path) -> list[Path]:
+def _load_spawned_child_slots(
+    spawn_slots_path: Path,
+    *,
+    source_rollout_index: int | None = None,
+) -> list[dict[str, Any]]:
     state = _read_json_file(spawn_slots_path, {})
     slots = state.get("slots") if isinstance(state, dict) else None
     if not isinstance(slots, list):
         return []
-    seed_dirs: list[Path] = []
-    for slot in sorted(slots, key=lambda item: int(item.get("slot_index", 0)) if isinstance(item, dict) else 0):
+    sorted_slots = sorted(
+        slots,
+        key=lambda item: int(item.get("slot_index", 0)) if isinstance(item, dict) else 0,
+    )
+    child_slots: list[dict[str, Any]] = []
+    for slot in sorted_slots:
         if not isinstance(slot, dict):
             continue
+        if source_rollout_index is not None:
+            try:
+                if int(slot.get("source_rollout_index")) != source_rollout_index:
+                    continue
+            except (TypeError, ValueError):
+                continue
+        seed_dir = slot.get("seed_dir")
+        if isinstance(seed_dir, str) and seed_dir:
+            child_slots.append(slot)
+    return child_slots
+
+
+def _load_spawned_child_seed_dirs(spawn_slots_path: Path) -> list[Path]:
+    seed_dirs: list[Path] = []
+    for slot in _load_spawned_child_slots(spawn_slots_path):
         seed_dir = slot.get("seed_dir")
         if isinstance(seed_dir, str) and seed_dir:
             seed_dirs.append(Path(seed_dir))
@@ -2686,8 +2709,16 @@ def main() -> None:
             )
             _progress("episode_persisted", output_path=str(output_dir))
 
-            seed_viable = False
-            next_rollout_dir = None
+            spawned_child_slots = _load_spawned_child_slots(
+                spawn_slots_path,
+                source_rollout_index=rollout_index,
+            )
+            next_rollout_dir = (
+                Path(str(spawned_child_slots[0]["seed_dir"]))
+                if spawned_child_slots
+                else None
+            )
+            seed_viable = next_rollout_dir is not None
 
             record = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
