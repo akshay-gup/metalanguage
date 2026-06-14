@@ -5,8 +5,8 @@ Flow:
 1) Sample one task from a Hugging Face RLVR-style dataset.
 2) Create an ephemeral episode temp directory and write task metadata.
 3) Run a tool-using worker (LLM + bash function tool) in that directory.
-4) Evaluate rollout answer (`solution.json` preferred, `solution.md` fallback)
-   against ground truth with reward util.
+4) Evaluate rollout answers submitted through `submit_solution` against ground
+   truth with reward util.
 5) Append run metadata to a growing JSONL log.
 6) Print a one-line summary.
 """
@@ -44,12 +44,12 @@ from utils.openrouter import (
     call_openrouter_with_tools,
     get_tool_calls,
     spawn_child_tool,
+    submit_solution_tool,
     transfer_tokens_tool,
 )
 from utils.reward import compute_rollout_reward
 from utils.task_store import (
     compute_problem_uid,
-    load_rollout_answer,
     write_private_problem_record,
 )
 
@@ -98,6 +98,7 @@ DEFAULT_WORKER_TIMEOUT_SECONDS = 3600
 DEFAULT_BASH_TIMEOUT_SECONDS = 120
 DEFAULT_OPENROUTER_MAX_RETRIES = 5
 DEFAULT_ROLLOUT_TOKEN_BUDGET_TOKENS = 300_000
+DEFAULT_SOLVE_REWARD_TOKEN_CREDIT_TOKENS = 300_000
 DEFAULT_RUNTIME_ROOT = Path.home() / "Documents" / "metalanguage_runs"
 DEFAULT_CODEX_HOME = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
 BUNDLED_BOOTSTRAP_SEED_DIR = PROJECT_ROOT / "seeds" / "bootstrap"
@@ -374,13 +375,14 @@ def _format_runtime_markdown(
         "Use these workspace-relative paths:",
         "",
         "- task: task.md",
-        "- solution: solution.json",
+        "- answer submission: use submit_solution(answer, task_id?, problem_uid?)",
         "- seed_output: seed_output/",
         "- archive: archive/",
         "- shared_workspace: shared_workspace/",
         "",
         "Main-loop tools available to this rollout:",
         "",
+        "- submit_solution(answer, task_id?, problem_uid?): scores the answer immediately, credits reward tokens on correct solves, and returns correctness plus budget status.",
         "- budget_status(): returns configured/effective token budget, spent tokens, reserved continuation budget, transfers, and remaining budget.",
         "- spawn_child(seed_dir, initial_budget_tokens): copies a complete seed directory into one claimed next-iteration rollout slot with exactly that starting budget.",
         "- transfer_tokens(target_instance_uuid, amount_tokens): transfers budget to a live peer rollout listed below.",
@@ -435,6 +437,56 @@ def _parse_spawn_child_arguments(args: dict[str, Any]) -> tuple[str | None, int 
     return seed_dir, initial_budget_tokens, None
 
 
+def _parse_submit_solution_arguments(args: dict[str, Any]) -> tuple[str | None, str | None, str | None, str | None]:
+    answer = args.get("answer")
+    if not isinstance(answer, str) or not answer.strip():
+        return None, None, None, "submit_solution requires a non-empty string answer"
+
+    raw_task_id = args.get("task_id", args.get("taskId"))
+    reported_task_id = str(raw_task_id) if raw_task_id is not None else None
+    raw_problem_uid = args.get("problem_uid", args.get("problemUid"))
+    reported_problem_uid = str(raw_problem_uid) if raw_problem_uid is not None else None
+    return answer.strip(), reported_task_id, reported_problem_uid, None
+
+
+def _iter_budget_events(events_path: Path) -> list[dict[str, Any]]:
+    try:
+        lines = events_path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return []
+    events: list[dict[str, Any]] = []
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    return events
+
+
+def _solve_reward_credit_total(events_path: Path, instance_uuid: str) -> int:
+    total = 0
+    for event in _iter_budget_events(events_path):
+        if event.get("event_type") != "solve_reward_credit":
+            continue
+        if event.get("instance_uuid") != instance_uuid:
+            continue
+        try:
+            total += int(event.get("amount_tokens") or 0)
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
+def _latest_solution_scored_event(events_path: Path, instance_uuid: str) -> dict[str, Any] | None:
+    latest = None
+    for event in _iter_budget_events(events_path):
+        if event.get("event_type") == "solution_scored" and event.get("instance_uuid") == instance_uuid:
+            latest = event
+    return latest
+
+
 def _resolve_spawn_seed_dir(context: dict[str, Any], seed_dir: str) -> tuple[Path | None, str | None]:
     workdir = Path(str(context["workdir"])).resolve()
     raw_path = Path(seed_dir).expanduser()
@@ -486,6 +538,7 @@ def _make_continuation_context(
     private_problem_path: Path,
     task_markdown: str,
     rollout_token_budget_tokens: int | None,
+    solve_reward_token_credit_tokens: int,
     worker_timeout_seconds: int,
     bash_timeout_seconds: int,
     openrouter_max_retries: int,
@@ -521,6 +574,7 @@ def _make_continuation_context(
         "private_problem_path": str(private_problem_path),
         "task_markdown": task_markdown,
         "rollout_token_budget_tokens": rollout_token_budget_tokens,
+        "solve_reward_token_credit_tokens": solve_reward_token_credit_tokens,
         "worker_timeout_seconds": worker_timeout_seconds,
         "bash_timeout_seconds": bash_timeout_seconds,
         "openrouter_max_retries": openrouter_max_retries,
@@ -544,6 +598,93 @@ def _write_json_file_atomic(path: Path, payload: Any) -> None:
     temp_path = path.with_suffix(path.suffix + ".tmp")
     temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     os.replace(temp_path, path)
+
+
+def _submit_solution(
+    *,
+    context: dict[str, Any],
+    args: dict[str, Any],
+) -> dict[str, Any]:
+    answer, reported_task_id, reported_problem_uid, error = _parse_submit_solution_arguments(args)
+    if error is not None or answer is None:
+        return {
+            "success": False,
+            "error": error or "invalid submit_solution arguments",
+        }
+
+    instance_uuid = str(context["instance_uuid"])
+    budget_ledger_events = Path(str(context["budget_ledger_events"]))
+    problem_uid = str(context["problem_uid"])
+    task_id = str(context["task_id"])
+    private_problem_path = Path(str(context["private_problem_path"]))
+    reward = compute_rollout_reward(
+        submitted_answer=answer,
+        expected_task_id=task_id,
+        expected_problem_uid=problem_uid,
+        reported_task_id=reported_task_id,
+        reported_problem_uid=reported_problem_uid,
+        private_problem_path=private_problem_path,
+    )
+    solved = bool(reward >= 1.0)
+    try:
+        configured_credit_tokens = int(context.get("solve_reward_token_credit_tokens") or 0)
+    except (TypeError, ValueError):
+        configured_credit_tokens = 0
+    prior_credit_tokens = _solve_reward_credit_total(budget_ledger_events, instance_uuid)
+    credited_tokens = configured_credit_tokens if solved and prior_credit_tokens <= 0 else 0
+
+    metadata = {
+        "generation": context["generation"],
+        "seed": context["seed"],
+        "task_index": context["task_index"],
+        "rollout_index": context["rollout_index"],
+        "rollout_username": context["rollout_username"],
+        "task_id": task_id,
+        "problem_uid": problem_uid,
+        "reported_problem_uid": reported_problem_uid,
+        "reported_task_id": reported_task_id,
+        "submitted_answer": answer,
+        "solved": solved,
+        "reward": reward,
+        "solve_reward_credit_tokens": credited_tokens,
+        "submission_source": "submit_solution",
+    }
+    append_budget_event(
+        budget_ledger_events,
+        event_type="solution_scored",
+        instance_uuid=instance_uuid,
+        metadata=metadata,
+    )
+    if credited_tokens > 0:
+        append_budget_event(
+            budget_ledger_events,
+            event_type="solve_reward_credit",
+            instance_uuid=instance_uuid,
+            amount_tokens=credited_tokens,
+            metadata={
+                "generation": context["generation"],
+                "seed": context["seed"],
+                "task_index": context["task_index"],
+                "rollout_index": context["rollout_index"],
+                "rollout_username": context["rollout_username"],
+                "task_id": task_id,
+                "problem_uid": problem_uid,
+                "reward": reward,
+            },
+        )
+    total_credited_tokens = prior_credit_tokens + credited_tokens
+    budget_status = read_budget_status(budget_ledger_events, instance_uuid)
+    return {
+        "success": True,
+        "correct": solved,
+        "solved": solved,
+        "reward": reward,
+        "credited_tokens": credited_tokens,
+        "total_credited_tokens": total_credited_tokens,
+        "reported_problem_uid": reported_problem_uid,
+        "reported_task_id": reported_task_id,
+        "budget_status": budget_status,
+    }
 
 
 def _transfer_tokens(
@@ -751,14 +892,6 @@ def _seed_child_instance_uuid(seed_dir: Path) -> str | None:
     if isinstance(child_instance_uuid, str) and child_instance_uuid:
         return child_instance_uuid
     return None
-
-
-def _clear_rollout_answer_artifacts(workdir: Path) -> None:
-    """Remove inherited answers before presenting a new task to a rollout."""
-    for filename in ("solution.json", "solution.md"):
-        path = workdir / filename
-        if path.exists() or path.is_symlink():
-            path.unlink()
 
 
 def _is_within(path: Path, root: Path) -> bool:
@@ -1260,7 +1393,13 @@ def run_worker(
                 api_key=api_key,
                 model=model,
                 input_items=conversation,
-                tools=[bash_tool, budget_status_tool, transfer_tokens_tool, spawn_child_tool],
+                tools=[
+                    bash_tool,
+                    submit_solution_tool,
+                    budget_status_tool,
+                    transfer_tokens_tool,
+                    spawn_child_tool,
+                ],
                 tool_choice="auto",
                 timeout=120,
                 max_output_tokens=(
@@ -1395,7 +1534,12 @@ def run_worker(
 
             tool_name = str(call.get("name") or "")
             command = str(args.get("command", "")).strip()
-            if tool_name == "budget_status":
+            if tool_name == "submit_solution":
+                tool_result = _submit_solution(
+                    context=continuation_context,
+                    args=args,
+                )
+            elif tool_name == "budget_status":
                 tool_result = read_budget_status(budget_ledger_events, instance_uuid)
             elif tool_name == "transfer_tokens":
                 tool_result = _transfer_tokens(
@@ -1926,6 +2070,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--solve-reward-token-credit-tokens",
+        type=int,
+        default=DEFAULT_SOLVE_REWARD_TOKEN_CREDIT_TOKENS,
+        help=(
+            "Token budget credited to a rollout when submit_solution scores "
+            "a correct answer. Set to 0 to disable solve reward credits."
+        ),
+    )
+    parser.add_argument(
         "--archive-repo-dir",
         default="archive/world_repo",
         help="Durable cross-lineage Git archive exposed to every rollout.",
@@ -1988,6 +2141,8 @@ def main() -> None:
         raise ValueError("--openrouter-max-retries must be >= 0")
     if args.rollout_token_budget_tokens is not None and args.rollout_token_budget_tokens <= 0:
         raise ValueError("--rollout-token-budget-tokens must be > 0 when set")
+    if args.solve_reward_token_credit_tokens < 0:
+        raise ValueError("--solve-reward-token-credit-tokens must be >= 0")
 
     load_dotenv()
     api_key: str | None = os.environ.get("OPENROUTER_API_KEY")
@@ -2052,6 +2207,11 @@ def main() -> None:
                 rec.get("rollout_token_budget_tokens"),
             )
             == args.rollout_token_budget_tokens
+            and rec.get(
+                "configured_solve_reward_token_credit_tokens",
+                rec.get("solve_reward_token_credit_tokens"),
+            )
+            == args.solve_reward_token_credit_tokens
             and (
                 args.worker_backend != "codex"
                 or rec.get("codex_base_instructions_mode", "codex") == expected_codex_base_mode
@@ -2293,7 +2453,6 @@ def main() -> None:
                 if not bootstrap_seed_dir.exists():
                     raise RuntimeError(f"Bootstrap seed directory does not exist: {bootstrap_seed_dir}")
                 copy_seed_workspace(bootstrap_seed_dir, temp_dir)
-            _clear_rollout_answer_artifacts(temp_dir)
 
             seed_output_dir = temp_dir / "seed_output"
             seed_output_dir.mkdir(parents=True, exist_ok=True)
@@ -2343,6 +2502,7 @@ def main() -> None:
                 private_problem_path=private_problem_path,
                 task_markdown=task_markdown,
                 rollout_token_budget_tokens=rollout_budget_tokens,
+                solve_reward_token_credit_tokens=args.solve_reward_token_credit_tokens,
                 worker_timeout_seconds=args.worker_timeout_seconds,
                 bash_timeout_seconds=args.bash_timeout_seconds,
                 openrouter_max_retries=args.openrouter_max_retries,
@@ -2462,52 +2622,47 @@ def main() -> None:
                 worker_error_code=worker_result.error_code,
                 worker_error_message=worker_result.error_message,
             )
-            solution_artifact_exists = (temp_dir / "solution.json").exists() or (
-                temp_dir / "solution.md"
-            ).exists()
-            if worker_result.status == "completed" or solution_artifact_exists:
-                reported_problem_uid, reported_task_id, submitted_answer = load_rollout_answer(
-                    temp_dir,
-                    worker_result.final_text,
+            latest_solution_event = _latest_solution_scored_event(
+                budget_ledger_events,
+                instance_uuid,
+            )
+            solution_feedback = None
+            if latest_solution_event is not None:
+                latest_metadata = latest_solution_event.get("metadata")
+                latest_metadata = latest_metadata if isinstance(latest_metadata, dict) else {}
+                reported_problem_uid = latest_metadata.get("reported_problem_uid")
+                reported_task_id = latest_metadata.get("reported_task_id")
+                reward = float(latest_metadata.get("reward") or 0.0)
+                solved = bool(latest_metadata.get("solved"))
+                solve_reward_credit_tokens = _solve_reward_credit_total(
+                    budget_ledger_events,
+                    instance_uuid,
                 )
-                reward = compute_rollout_reward(
-                    submitted_answer=submitted_answer,
-                    expected_task_id=task.task_id,
-                    expected_problem_uid=problem_uid,
-                    reported_task_id=reported_task_id,
-                    reported_problem_uid=reported_problem_uid,
-                    private_problem_path=private_problem_path,
-                )
-                solved = bool(reward >= 1.0)
+                solution_feedback = {
+                    "correct": solved,
+                    "solved": solved,
+                    "reward": reward,
+                    "credited_tokens": int(latest_metadata.get("solve_reward_credit_tokens") or 0),
+                    "total_credited_tokens": solve_reward_credit_tokens,
+                    "reported_problem_uid": reported_problem_uid,
+                    "reported_task_id": reported_task_id,
+                    "budget_status": read_budget_status(budget_ledger_events, instance_uuid),
+                }
             else:
                 reported_problem_uid = None
                 reported_task_id = None
                 reward = 0.0
                 solved = False
-            append_budget_event(
-                budget_ledger_events,
-                event_type="solution_scored",
-                instance_uuid=instance_uuid,
-                metadata={
-                    "generation": args.generation,
-                    "seed": args.seed,
-                    "task_index": task_index,
-                    "rollout_index": rollout_index,
-                    "rollout_username": rollout_username,
-                    "task_id": task.task_id,
-                    "problem_uid": problem_uid,
-                    "reported_problem_uid": reported_problem_uid,
-                    "reported_task_id": reported_task_id,
-                    "solved": solved,
-                    "reward": reward,
-                    "worker_status": worker_result.status,
-                    "worker_stop_reason": worker_result.stop_reason,
-                },
-            )
+                solve_reward_credit_tokens = 0
+                _progress(
+                    "solution_missing",
+                    error="submit_solution was not called; no solution score or reward credit was recorded",
+                )
             _progress(
                 "rollout_scored",
                 solved=solved,
                 reward=reward,
+                solve_reward_credit_tokens=solve_reward_credit_tokens,
                 reported_problem_uid=reported_problem_uid,
                 reported_task_id=reported_task_id,
             )
@@ -2547,6 +2702,8 @@ def main() -> None:
                 "worker_metadata": worker_result.metadata,
                 "solved": solved,
                 "reward": reward,
+                "solve_reward_credit_tokens": solve_reward_credit_tokens,
+                "solution_feedback": solution_feedback,
                 "output_path": str(output_dir),
                 "private_problem_path": str(private_problem_path),
                 "shared_workspace_write_log": str(shared_workspace_write_log),
@@ -2562,6 +2719,7 @@ def main() -> None:
                 "openrouter_max_retries": args.openrouter_max_retries,
                 "configured_rollout_token_budget_tokens": args.rollout_token_budget_tokens,
                 "rollout_token_budget_tokens": rollout_budget_tokens,
+                "configured_solve_reward_token_credit_tokens": args.solve_reward_token_credit_tokens,
                 "codex_home": str(codex_home) if args.worker_backend == "codex" else None,
                 "codex_runner_bin": str(codex_runner_bin) if codex_runner_bin is not None else None,
                 "codex_sandbox_mode": args.codex_sandbox_mode if args.worker_backend == "codex" else None,
@@ -2763,6 +2921,11 @@ def run_child_tool_handler(context_path: Path) -> None:
                 str(context["instance_uuid"]),
             )
             result = {"success": True, **result}
+        elif tool == "submit_solution":
+            result = _submit_solution(
+                context=context,
+                args=args,
+            )
         elif tool == "spawn_child":
             raw_parent_budget = payload.get("parent_budget")
             parent_budget = raw_parent_budget if isinstance(raw_parent_budget, dict) else {}

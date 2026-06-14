@@ -319,6 +319,10 @@ def _apply_event_to_projection(projection: dict[str, Any], event: dict[str, Any]
         account["tokens_transferred_in"] = (
             _int_token(account.get("tokens_transferred_in")) + amount_tokens
         )
+    elif event_type == "solve_reward_credit":
+        account["tokens_transferred_in"] = (
+            _int_token(account.get("tokens_transferred_in")) + amount_tokens
+        )
     elif event_type == "budget_transferred":
         account["tokens_transferred_out"] = (
             _int_token(account.get("tokens_transferred_out")) + amount_tokens

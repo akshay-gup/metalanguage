@@ -682,6 +682,36 @@ fn metalanguage_dynamic_tools() -> Vec<DynamicToolSpec> {
         },
         DynamicToolSpec {
             namespace: None,
+            name: "submit_solution".to_string(),
+            description: (
+                "Submit this task's final answer for immediate scoring. The "
+                "response returns correct/incorrect, reward, credited tokens, "
+                "and updated budget status."
+            )
+            .to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "answer": {
+                        "type": "string",
+                        "description": "Final answer to score against the current task."
+                    },
+                    "task_id": {
+                        "type": "string",
+                        "description": "Optional task_id copied from task.md for validation."
+                    },
+                    "problem_uid": {
+                        "type": "string",
+                        "description": "Optional problem_uid copied from task.md for validation."
+                    }
+                },
+                "required": ["answer"],
+                "additionalProperties": false,
+            }),
+            defer_loading: false,
+        },
+        DynamicToolSpec {
+            namespace: None,
             name: "spawn_child".to_string(),
             description: (
                 "Continue this lineage by claiming a next-iteration rollout slot. "
@@ -753,6 +783,11 @@ fn handle_metalanguage_dynamic_tool(
             budget_state,
             spawn_child_handler_command,
         ),
+        "submit_solution" => handle_submit_solution_tool(
+            request,
+            budget_state,
+            spawn_child_handler_command,
+        ),
         "spawn_child" => handle_spawn_child_tool(
             request,
             budget_state,
@@ -770,6 +805,45 @@ fn handle_metalanguage_dynamic_tool(
             json!({"error": "unsupported dynamic tool", "tool": other}),
         ),
     }
+}
+
+fn handle_submit_solution_tool(
+    request: &DynamicToolCallRequest,
+    budget_state: &mut BudgetState,
+    spawn_child_handler_command: Option<&[String]>,
+) -> DynamicToolResponse {
+    let Some(command) = spawn_child_handler_command else {
+        return dynamic_tool_json_response(
+            false,
+            json!({"error": "submit_solution handler command is not configured"}),
+        );
+    };
+    if command.is_empty() {
+        return dynamic_tool_json_response(
+            false,
+            json!({"error": "submit_solution handler command is empty"}),
+        );
+    }
+    if let Err(message) = parse_submit_solution_args(&request.arguments) {
+        return dynamic_tool_json_response(false, json!({"error": message}));
+    }
+
+    let handler_payload = json!({
+        "tool": request.tool,
+        "namespace": request.namespace,
+        "call_id": request.call_id,
+        "arguments": request.arguments,
+    });
+    let output = match run_spawn_child_handler(command, &handler_payload) {
+        Ok(value) => value,
+        Err(message) => return dynamic_tool_json_response(false, json!({"error": message})),
+    };
+    apply_budget_status_from_tool_output(budget_state, &output);
+    let success = output
+        .get("success")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    dynamic_tool_json_response(success, output)
 }
 
 fn handle_budget_status_tool(
@@ -946,6 +1020,20 @@ fn refresh_budget_status_from_handler(
         }),
     )?;
     apply_budget_status_from_tool_output(budget_state, &output);
+    Ok(())
+}
+
+fn parse_submit_solution_args(arguments: &Value) -> Result<(), String> {
+    let Some(args) = arguments.as_object() else {
+        return Err("submit_solution arguments must be an object".to_string());
+    };
+    let answer = args
+        .get("answer")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "submit_solution requires string answer".to_string())?;
+    if answer.trim().is_empty() {
+        return Err("answer must be non-empty".to_string());
+    }
     Ok(())
 }
 

@@ -2,15 +2,15 @@
 
 This file is the inherited operating packet for a fresh rollout. It is not
 background reading. Start here, then read `runtime.md`, then read `task.md`.
-Solve the current task, leave useful public traces when work creates reusable
-knowledge, write a complete successor seed directory, and call
+Solve the current task, submit the answer with `submit_solution`, leave useful
+public traces when work creates reusable knowledge, write a complete successor
+seed directory, and call
 `spawn_child(seed_dir, initial_budget_tokens)` when lineage should continue.
 
 Read in this order:
 
 1. `README.md`: inherited doctrine, tool discipline, and seed contract.
-2. `runtime.md`: workspace-relative paths for task, solution, seed output,
-   archive, shared live workspace, and main-loop continuation tools.
+2. `runtime.md`: workspace-relative paths and main-loop scoring/continuation tools.
 3. `task.md`: the current task. Solution-like fields are redacted.
 
 After reading those files, make a quick public-memory pass. Check whether the
@@ -22,17 +22,15 @@ signals. Do this before deep solo work on any nontrivial task.
 Solve the task in `task.md` with grounded evidence. Do not turn the task into
 general commentary. The first job is to get the answer right.
 
-Write the final answer in `solution.json` when possible:
+Submit the final answer with the main-loop scoring tool:
 
-```json
-{
-  "answer": "..."
-}
+```text
+submit_solution(answer="...")
 ```
 
-For multiple choice tasks, write the option letter or exact option text. If JSON
-is unsuitable, write `solution.md`, but prefer `solution.json` unless the task
-format makes that impossible.
+For multiple choice tasks, submit the option letter or exact option text. The
+tool returns `correct`, `reward`, credited tokens, and current budget status.
+There is no answer-file fallback; use `submit_solution` for scoring.
 
 Good task work is concrete:
 
@@ -42,7 +40,7 @@ Good task work is concrete:
 - separate evidence from guesses
 - notice formatting artifacts in the task statement
 - keep scratch scripts small, named for their purpose, and disposable
-- finish with a compact answer artifact that the scorer can parse
+- finish by submitting a compact answer that the scorer can parse
 
 ## Operational Discipline
 
@@ -128,7 +126,7 @@ Minimum seed contract:
 - preserve `# Rollout Constitution` and every required section heading unless
   evidence justifies a marked mutation
 - preserve the read order: `README.md`, then `runtime.md`, then `task.md`
-- preserve the `solution.json` contract unless the task format proves it wrong
+- preserve the `submit_solution` scoring contract unless the task format proves it wrong
 - preserve the operational discipline that improves tool use, editing safety,
   verification, and artifact quality
 - preserve the archive and shared workspace habits, including authorship notes

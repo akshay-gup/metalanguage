@@ -214,6 +214,35 @@ budget_status_tool: dict[str, Any] = {
 }
 
 
+submit_solution_tool: dict[str, Any] = {
+    "type": "function",
+    "name": "submit_solution",
+    "description": (
+        "Submit this task's final answer for immediate scoring. The response "
+        "returns correct/incorrect, reward, credited tokens, and updated budget."
+    ),
+    "strict": None,
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "answer": {
+                "type": "string",
+                "description": "Final answer to score against the current task.",
+            },
+            "task_id": {
+                "type": "string",
+                "description": "Optional task_id copied from task.md for validation.",
+            },
+            "problem_uid": {
+                "type": "string",
+                "description": "Optional problem_uid copied from task.md for validation.",
+            },
+        },
+        "required": ["answer"],
+    },
+}
+
+
 transfer_tokens_tool: dict[str, Any] = {
     "type": "function",
     "name": "transfer_tokens",

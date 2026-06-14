@@ -54,7 +54,7 @@ take precedence over values in `.env`.
   5. copy the selected parent seed workspace into the rollout workspace, then write the current task as `task.md` with solution-like fields redacted,
   6. run OpenRouter worker with `run_bash` tool access and the minimal fixed prompt `Read README.md.`; operating doctrine is expected to come from the inherited parent seed,
      or run Codex with a fixed base-instructions pointer to the same inherited seed,
-  7. score solution via `utils/reward.py`, grounding correctness against the private stored row and validating reported ids,
+  7. score answers submitted through `submit_solution(answer, task_id?, problem_uid?)`, grounding correctness against the private stored row and validating reported ids,
   8. after all rollouts for the task finish, advance lineage through the `spawn_child(seed_dir, initial_budget_tokens)` slots claimed by those rollouts,
   9. append run metadata to a growing JSONL log and print one-line summary per rollout.
 - Runtime containment:
@@ -72,14 +72,15 @@ take precedence over values in `.env`.
   - a rebuildable projection cache is written next to the ledger and is used for live `budget_status`, transfer, and spawn budget checks;
   - every rollout receives an internal `instance_uuid` recorded in progress logs, run logs, and the ledger;
   - provider-reported model usage is recorded as `token_usage` events after OpenRouter calls and Codex usage events;
-  - solution outcomes are recorded as `solution_scored` events after reward calculation;
+  - `submit_solution(answer, task_id?, problem_uid?)` scores immediately, returns `correct`, `reward`, credited tokens, and updated budget status, and records `solution_scored` events;
+  - correct `submit_solution` calls append one `solve_reward_credit` budget event per rollout, defaulting to 300000 tokens via `--solve-reward-token-credit-tokens`;
+  - there is no answer-file scoring fallback; a rollout that does not call `submit_solution` receives no solution score or solve reward credit;
   - `--rollout-token-budget-tokens` sets each initial rollout's starting budget, defaulting to 300000 tokens, and stops a rollout when reported usage exhausts it;
-  - rollouts can call `budget_status()`, `transfer_tokens(target_instance_uuid, amount_tokens)`, and `spawn_child(seed_dir, initial_budget_tokens)` as main-loop tools;
+  - rollouts can call `submit_solution(answer, task_id?, problem_uid?)`, `budget_status()`, `transfer_tokens(target_instance_uuid, amount_tokens)`, and `spawn_child(seed_dir, initial_budget_tokens)` as main-loop tools;
   - `transfer_tokens` moves budget from one live same-task rollout to another by instance UUID; the sender's remaining budget decreases and the target's effective budget increases;
   - `spawn_child` copies a complete workspace-local seed directory into the next claimed next-iteration rollout slot;
   - the claimed slot receives exactly `initial_budget_tokens`; the call fails if the parent rollout does not have that much budget remaining;
-  - tool responses are counted when they are sent back as model input on the next model call;
-  - solve rewards are intentionally left for future parent tool-call mechanics.
+  - tool responses are counted when they are sent back as model input on the next model call.
 - Lineage behavior:
   - the first task can bootstrap without a parent seed;
   - after bootstrap, missing parent seeds are terminal and the loop will not silently continue as a fresh lineage.
