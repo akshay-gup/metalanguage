@@ -667,8 +667,8 @@ fn metalanguage_dynamic_tools() -> Vec<DynamicToolSpec> {
         DynamicToolSpec {
             namespace: None,
             name: "budget_status".to_string(),
-            description: (
-                "Return this rollout's token budget, spent tokens, reserved child "
+            description: concat!(
+                "Return this rollout's token budget, spent tokens, reserved child ",
                 "budget, and remaining budget."
             )
             .to_string(),
@@ -683,9 +683,9 @@ fn metalanguage_dynamic_tools() -> Vec<DynamicToolSpec> {
         DynamicToolSpec {
             namespace: None,
             name: "submit_solution".to_string(),
-            description: (
-                "Submit this task's final answer for immediate scoring. The "
-                "response returns correct/incorrect, reward, credited tokens, "
+            description: concat!(
+                "Submit this task's final answer for immediate scoring. The ",
+                "response returns correct/incorrect, reward, credited tokens, ",
                 "and updated budget status."
             )
             .to_string(),
@@ -713,8 +713,8 @@ fn metalanguage_dynamic_tools() -> Vec<DynamicToolSpec> {
         DynamicToolSpec {
             namespace: None,
             name: "spawn_child".to_string(),
-            description: (
-                "Claim a next-iteration rollout slot by copying seed_dir into that "
+            description: concat!(
+                "Claim a next-iteration rollout slot by copying seed_dir into that ",
                 "slot and reserving exactly initial_budget_tokens from this rollout."
             )
             .to_string(),
@@ -738,8 +738,8 @@ fn metalanguage_dynamic_tools() -> Vec<DynamicToolSpec> {
         DynamicToolSpec {
             namespace: None,
             name: "transfer_tokens".to_string(),
-            description: (
-                "Transfer part of this rollout's remaining token budget to a live "
+            description: concat!(
+                "Transfer part of this rollout's remaining token budget to a live ",
                 "peer rollout in the same task. The target receives exactly amount_tokens."
             )
             .to_string(),
