@@ -83,6 +83,9 @@ take precedence over values in `.env`.
   - tool responses are counted when they are sent back as model input on the next model call.
 - Lineage behavior:
   - the first task can bootstrap without a parent seed;
+  - a rollout continues only by successfully calling `spawn_child(seed_dir, initial_budget_tokens)`;
+  - solving/submitting alone does not continue lineage; if no rollout claims a child slot, that lineage dies and the loop exits with an error;
+  - correct solves can add reward budget for spawning, while unsolved rollouts may still spawn with their lower remaining budget;
   - after bootstrap, missing parent seeds are terminal and the loop will not silently continue as a fresh lineage.
 - Resume behavior:
   - runs automatically resume from existing `--runs-log` entries that match dataset/split/model/seed/generation/config/rollout-count;

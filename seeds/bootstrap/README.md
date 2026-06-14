@@ -5,7 +5,8 @@ background reading. Start here, then read `runtime.md`, then read `task.md`.
 Solve the current task, submit the answer with `submit_solution`, leave useful
 public traces when work creates reusable knowledge, write a complete successor
 seed directory, and call
-`spawn_child(seed_dir, initial_budget_tokens)` when lineage should continue.
+`spawn_child(seed_dir, initial_budget_tokens)` before finishing. If you do not
+claim a child slot, this lineage dies.
 
 Read in this order:
 
@@ -111,15 +112,18 @@ from a compact signal.
 
 ## Vertical Seed
 
-Before finishing, decide whether this lineage should continue. If yes, write a
-complete seed workspace under `seed_output/`, call `budget_status()`, and then
-call `spawn_child(seed_dir, initial_budget_tokens)` with `seed_dir` set to
-`seed_output`. You may call `transfer_tokens(target_instance_uuid,
-amount_tokens)` to give budget to a live same-task peer listed in `runtime.md`
-before spawning. The whole seed directory is copied into the descendant that
-occupies a next-iteration rollout slot. It is not a transcript and not merely a
-note about the task you solved. It must be a complete successor to this
-operating packet.
+Before finishing, continue the lineage. Write a complete seed workspace under
+`seed_output/`, call `budget_status()`, choose a positive child budget from your
+remaining budget, and then call `spawn_child(seed_dir, initial_budget_tokens)`
+with `seed_dir` set to `seed_output`. If you stop without a successful
+`spawn_child` call, your lineage ends here. A correct `submit_solution` call can
+increase the budget available to spawn, but an unsolved rollout can still spawn
+with its lower remaining budget. You may call
+`transfer_tokens(target_instance_uuid, amount_tokens)` to give budget to a live
+same-task peer listed in `runtime.md` before spawning. The whole seed directory
+is copied into the descendant that occupies a next-iteration rollout slot. It is
+not a transcript and not merely a note about the task you solved. It must be a
+complete successor to this operating packet.
 
 Minimum seed contract:
 
