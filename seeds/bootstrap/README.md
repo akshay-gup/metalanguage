@@ -8,8 +8,8 @@ Required read order:
 
 1. This `README.md`: packet index and read order.
 2. `SETUP.md`: current task, main-loop tools, and CLI/tool conventions.
-3. `ECONOMY.md`: artifacts, lineage, archive, shared workspace, mutation, and
-   preservation.
+3. `ECONOMY.md`: budget, spawning, seed contract, archive, shared workspace,
+   and evolution.
 4. `runtime.md`: generated paths, runtime IDs, budgets, and peer list.
 5. `task.md`: the current task. Solution-like fields are redacted.
 
