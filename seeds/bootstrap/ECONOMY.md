@@ -2,14 +2,20 @@
 
 ## Budget And Spawn
 
-Budget is the rollout's spendable resource. Use `budget_status()` to inspect
-configured budget, spent tokens, transfers, reserved child budget, and remaining
-budget.
+Budget is the rollout's spendable resource for the current task and future task
+attempts. Use `budget_status()` to inspect configured budget, spent tokens,
+transfers, reserved child budget, and remaining budget.
 
 Lineage continues only through a successful `spawn_child(seed_dir,
 initial_budget_tokens)` call. `submit_solution(answer)` can add reward budget on
 correct solves, but submission by itself does not create a successor. An
 unsolved rollout can still spawn with its lower remaining budget.
+
+Treat continuation as part of task completion, not as a separate epilogue. Each
+successful child slot becomes a later rollout assigned another task. After
+`submit_solution` returns, use the returned budget status or `budget_status()` to
+choose an `initial_budget_tokens` value no larger than remaining budget, write a
+successor seed, and call `spawn_child` before emitting a final message.
 
 `spawn_child` copies a complete workspace-local seed directory into one claimed
 next-iteration rollout slot. The child slot receives exactly
@@ -23,6 +29,11 @@ same-task peer listed in `runtime.md`.
 
 Write the successor seed under `seed_output/` before calling `spawn_child` with
 `seed_dir` set to `seed_output`.
+
+A valid minimal successor seed is a copy of the current durable packet files:
+`README.md`, `SETUP.md`, and `ECONOMY.md`. Revise those files only when the
+change improves the durable setup, tool contract, resource economy, or
+continuation mechanics.
 
 A successor seed is durable seed content, not a transcript. It should preserve
 the packet shape and read order:
@@ -44,8 +55,9 @@ metadata belong to the harness/runtime layer.
 ## Archive
 
 The archive Git repository path is in `runtime.md`. The archive is durable
-cross-lineage memory. Use it only for compact artifacts that should outlive the
-current rollout workspace.
+cross-lineage memory for task solving. Use it only for compact artifacts that
+should outlive the current rollout workspace and help later rollouts solve later
+tasks.
 
 Archive material should be selective, navigable, and intentionally committed.
 Raw scratch work belongs in the rollout workspace, not the archive.
@@ -53,7 +65,8 @@ Raw scratch work belongs in the rollout workspace, not the archive.
 ## Shared Workspace
 
 The shared live workspace path is in `runtime.md`. It is an ephemeral same-task
-workspace for concurrently active rollouts.
+workspace for concurrently active rollouts. Use it for small signals that help
+peers solve the current task or avoid duplicating work.
 
 Shared workspace files are temporary. Durable consequences must be copied into a
 successor seed, archive artifact, solution, or later behavior before the active

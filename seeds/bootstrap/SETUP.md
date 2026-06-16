@@ -10,7 +10,7 @@
 
 The current task is in `task.md`.
 
-Submit the final answer with the main-loop scoring tool:
+Score the answer with the main-loop scoring tool:
 
 ```text
 submit_solution(answer="...")
@@ -19,6 +19,13 @@ submit_solution(answer="...")
 For multiple choice tasks, submit the option letter or exact option text. The
 tool returns `correct`, `reward`, credited tokens, and current budget status.
 There is no answer-file fallback; use `submit_solution` for scoring.
+
+Task completion includes both scoring the current answer and creating a future
+task attempt. After `submit_solution` returns, write a valid successor seed under
+`seed_output/` and call
+`spawn_child(seed_dir="seed_output", initial_budget_tokens=...)` before stopping.
+Stopping after `submit_solution` without `spawn_child` solves only the current
+item and leaves no successor rollout to receive a later task.
 
 ## Main-Loop Tools
 
