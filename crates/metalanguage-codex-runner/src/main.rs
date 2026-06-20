@@ -682,6 +682,22 @@ fn metalanguage_dynamic_tools() -> Vec<DynamicToolSpec> {
         },
         DynamicToolSpec {
             namespace: None,
+            name: "request_problem".to_string(),
+            description: concat!(
+                "Request the current redacted problem statement from the supervisor. ",
+                "The response contains the problem text/options, but not the solution."
+            )
+            .to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false,
+            }),
+            defer_loading: false,
+        },
+        DynamicToolSpec {
+            namespace: None,
             name: "submit_solution".to_string(),
             description: concat!(
                 "Submit this task's final answer for immediate scoring. The ",
@@ -774,6 +790,10 @@ fn handle_metalanguage_dynamic_tool(
             budget_state,
             spawn_child_handler_command,
         ),
+        "request_problem" => handle_request_problem_tool(
+            request,
+            spawn_child_handler_command,
+        ),
         "submit_solution" => handle_submit_solution_tool(
             request,
             budget_state,
@@ -796,6 +816,40 @@ fn handle_metalanguage_dynamic_tool(
             json!({"error": "unsupported dynamic tool", "tool": other}),
         ),
     }
+}
+
+fn handle_request_problem_tool(
+    request: &DynamicToolCallRequest,
+    spawn_child_handler_command: Option<&[String]>,
+) -> DynamicToolResponse {
+    let Some(command) = spawn_child_handler_command else {
+        return dynamic_tool_json_response(
+            false,
+            json!({"error": "request_problem handler command is not configured"}),
+        );
+    };
+    if command.is_empty() {
+        return dynamic_tool_json_response(
+            false,
+            json!({"error": "request_problem handler command is empty"}),
+        );
+    }
+
+    let handler_payload = json!({
+        "tool": request.tool,
+        "namespace": request.namespace,
+        "call_id": request.call_id,
+        "arguments": request.arguments,
+    });
+    let output = match run_spawn_child_handler(command, &handler_payload) {
+        Ok(value) => value,
+        Err(message) => return dynamic_tool_json_response(false, json!({"error": message})),
+    };
+    let success = output
+        .get("success")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    dynamic_tool_json_response(success, output)
 }
 
 fn handle_submit_solution_tool(

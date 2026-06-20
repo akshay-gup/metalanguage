@@ -8,7 +8,7 @@
 
 ## Current Task
 
-The current task is in `task.md`.
+Call `request_problem()` to receive the current redacted problem statement.
 
 Score the answer with the main-loop scoring tool:
 
@@ -35,6 +35,8 @@ section explains what each tool does.
 - `submit_solution(answer)`: scores the answer
   immediately, credits reward tokens on correct solves, and returns correctness
   plus budget status.
+- `request_problem()`: returns the current redacted problem statement from the
+  persistent unsolved-problem queue.
 - `budget_status()`: returns configured/effective token budget, spent tokens,
   reserved child budget, transfers, and remaining budget.
 - `spawn_child(seed_dir, initial_budget_tokens)`: copies a complete

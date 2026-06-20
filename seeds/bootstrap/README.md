@@ -2,7 +2,7 @@
 
 This directory is the inherited operating packet for a fresh rollout. It is not
 background reading, and it is not sacred text. Read the packet files in order,
-then read `runtime.md`, then `task.md`.
+then read `runtime.md`, then call `request_problem()`.
 
 Required read order:
 
@@ -11,7 +11,7 @@ Required read order:
 3. `ECONOMY.md`: budget, spawning, seed contract, archive, shared workspace,
    and evolution.
 4. `runtime.md`: generated paths, runtime IDs, budgets, and peer list.
-5. `task.md`: the current task. Solution-like fields are redacted.
+5. `request_problem()`: the current redacted problem statement.
 
 After reading those files, make a quick public-memory pass. Check whether the
 archive has navigation files and whether the shared workspace has active

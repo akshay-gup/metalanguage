@@ -43,7 +43,7 @@ take precedence over values in `.env`.
 ## Episode runner
 
 - `main_loop.py`: runs RLVR-style episodes end-to-end:
-  1. by default, sample one task from `m-a-p/SuperGPQA` (or process all tasks with `--all-tasks`; override with `--dataset-name`),
+  1. by default, fill `--problem-queue` with the next unsolved problem from `m-a-p/SuperGPQA` (or queue multiple problems with `--all-tasks --max-tasks`; override with `--dataset-name`),
   1.5. use `moonshotai/kimi-k2.6` as the default OpenRouter model (override with `--model`),
   2. run 8 bootstrap rollout slots by default with `--num-rollouts`, then let later task width be set by spawned child slots,
   3. assign each rollout index to the matching `spawn_child` slot claimed by the prior task's rollouts,
@@ -51,11 +51,11 @@ take precedence over values in `.env`.
   3.6. assign every rollout instance a UUID and record an `instance_created` event in the token-budget ledger,
   4. expose `archive/world_repo` by default as the durable cross-lineage Git archive available to every rollout (override with `--archive-repo-dir`),
      using a per-rollout temporary worktree so only committed archive changes are merged back and uncommitted archive edits are discarded,
-  5. copy the selected parent seed workspace into the rollout workspace, then write the current task as `task.md` with solution-like fields redacted,
+  5. copy the selected parent seed workspace into the rollout workspace, keep the current problem outside the rollout workspace, and expose the redacted problem only through `request_problem()`,
   6. register main-loop tools through the worker backend (OpenRouter tool payloads or Codex `DynamicToolSpec` entries), then run the worker with the minimal fixed prompt `Read README.md.`; operating doctrine is expected to come from the inherited parent seed,
      while `runtime.md` contains only generated paths, runtime IDs, budgets, and peer lists,
   7. score answers submitted through `submit_solution(answer)`, grounding correctness against the private stored row and internal task identity,
-  8. after all rollouts for the task finish, advance lineage through the `spawn_child(seed_dir, initial_budget_tokens)` slots claimed by those rollouts,
+  8. after all rollouts for the queued problem finish, advance lineage through the `spawn_child(seed_dir, initial_budget_tokens)` slots claimed by those rollouts,
   9. append run metadata to a growing JSONL log and print one-line summary per rollout.
 - Runtime containment:
   - generated state is rooted at `~/Documents/metalanguage_runs` by default;
@@ -76,13 +76,13 @@ take precedence over values in `.env`.
   - correct `submit_solution` calls append one `solve_reward_credit` budget event per rollout, defaulting to 300000 tokens via `--solve-reward-token-credit-tokens`;
   - there is no answer-file scoring fallback; a rollout that does not call `submit_solution` receives no solution score or solve reward credit;
   - `--rollout-token-budget-tokens` sets each initial rollout's starting budget, defaulting to 300000 tokens, and stops a rollout when reported usage exhausts it;
-  - rollouts can call `submit_solution(answer)`, `budget_status()`, `transfer_tokens(target_instance_uuid, amount_tokens)`, and `spawn_child(seed_dir, initial_budget_tokens)` as main-loop tools;
+  - rollouts can call `request_problem()`, `submit_solution(answer)`, `budget_status()`, `transfer_tokens(target_instance_uuid, amount_tokens)`, and `spawn_child(seed_dir, initial_budget_tokens)` as main-loop tools;
   - `transfer_tokens` moves budget from one live same-task rollout to another by instance UUID; the sender's remaining budget decreases and the target's effective budget increases;
   - `spawn_child` copies a complete workspace-local seed directory into the next claimed next-iteration rollout slot;
   - the claimed slot receives exactly `initial_budget_tokens`; the call fails if the parent rollout does not have that much budget remaining;
   - tool responses are counted when they are sent back as model input on the next model call.
 - Lineage behavior:
-  - the first task can bootstrap without a parent seed;
+  - the first queued problem can bootstrap without a parent seed;
   - a rollout continues only by successfully calling `spawn_child(seed_dir, initial_budget_tokens)`;
   - solving/submitting alone does not continue lineage; if no rollout claims a child slot, that lineage dies and the loop exits with an error;
   - correct solves can add reward budget for spawning, while unsolved rollouts may still spawn with their lower remaining budget;
@@ -90,11 +90,15 @@ take precedence over values in `.env`.
 - Resume behavior:
   - runs automatically resume from existing `--runs-log` entries that match dataset/split/model/seed/generation/config/rollout-count;
   - completed rollouts are skipped, partial tasks continue from missing rollout indices using each task's recorded rollout count;
+  - unsolved problems are kept in `--problem-queue`; correct `submit_solution(answer)` calls remove the solved problem from that queue so resumed runs fetch the next unsolved problem;
   - parent lineage candidates are loaded from `--rollout-temp-root/latest_parent_pool.json`, which is written from claimed `spawn_child` slots;
   - disable this with `--no-resume`.
 - Manual iteration:
-  - use `--step` to run exactly one task iteration, choosing the first incomplete task from the resume log or the next new task;
-  - use `--all-tasks --start-task-index N --max-tasks 1` to run a specific shuffled dataset task index.
+  - use `--step` to run exactly one queued problem iteration, choosing the first incomplete problem from the resume log or the next unsolved problem in the queue;
+  - use `--all-tasks --start-task-index N --max-tasks 1` to queue a specific shuffled dataset problem.
+- Problem queue:
+  - `--problem-queue` stores the persistent list of currently unsolved redacted problems and defaults to `logs/problem_queue.json` under `--runtime-root`;
+  - `request_problem()` returns the current redacted problem statement directly to the rollout; no problem statement is written into the rollout workspace.
 
 ### Codex rollout backend
 
@@ -125,10 +129,7 @@ Useful flags:
 - `--codex-base-instructions-mode read-readme|codex`: choose whether Codex uses
   the fixed scaffold base instruction `Read README.md.` (`read-readme`, the
   default) or its model-catalog base instructions (`codex`).
-- `--codex-initial-prompt TEXT`: choose the first user message. With
-  `--codex-base-instructions-mode read-readme`, a useful value is
-  `"Read runtime.md, then task.md."` so the seed README is not duplicated in the
-  user turn.
+- `--codex-initial-prompt TEXT`: choose the first user message.
 
 Example with the seed README as the evolvable prompt and Codex base instructions
 kept to the fixed scaffold pointer:
@@ -138,7 +139,6 @@ uv run python -B main_loop.py \
   --worker-backend codex \
   --model gpt-5.5 \
   --codex-base-instructions-mode read-readme \
-  --codex-initial-prompt "Read runtime.md, then task.md." \
   --step \
   --num-rollouts 8
 ```

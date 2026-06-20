@@ -43,6 +43,7 @@ from utils.openrouter import (
     budget_status_tool,
     call_openrouter_with_tools,
     get_tool_calls,
+    request_problem_tool,
     spawn_child_tool,
     submit_solution_tool,
     transfer_tokens_tool,
@@ -60,6 +61,15 @@ class Task:
     question: str
     answer: str
     raw: dict[str, Any]
+
+
+@dataclass
+class ProblemRecord:
+    task_index: int
+    task_id: str
+    problem_uid: str
+    task_markdown: str
+    private_problem_path: Path
 
 
 @dataclass
@@ -373,7 +383,6 @@ def _format_runtime_markdown(
         "",
         "## Paths",
         "",
-        "- task: task.md",
         "- seed_output: seed_output/",
         "- archive: archive/",
         "- shared_workspace: shared_workspace/",
@@ -532,6 +541,7 @@ def _make_continuation_context(
     problem_uid: str,
     private_problem_path: Path,
     task_markdown: str,
+    problem_queue_path: Path,
     rollout_token_budget_tokens: int | None,
     solve_reward_token_credit_tokens: int,
     worker_timeout_seconds: int,
@@ -568,6 +578,7 @@ def _make_continuation_context(
         "problem_uid": problem_uid,
         "private_problem_path": str(private_problem_path),
         "task_markdown": task_markdown,
+        "problem_queue_path": str(problem_queue_path),
         "rollout_token_budget_tokens": rollout_token_budget_tokens,
         "solve_reward_token_credit_tokens": solve_reward_token_credit_tokens,
         "worker_timeout_seconds": worker_timeout_seconds,
@@ -593,6 +604,266 @@ def _write_json_file_atomic(path: Path, payload: Any) -> None:
     temp_path = path.with_suffix(path.suffix + ".tmp")
     temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     os.replace(temp_path, path)
+
+
+def _problem_queue_config(
+    *,
+    dataset_name: str,
+    split: str,
+    config_name: str | None,
+    seed: int,
+    question_key: str | None,
+    answer_key: str | None,
+    id_key: str | None,
+) -> dict[str, Any]:
+    return {
+        "dataset_name": dataset_name,
+        "split": split,
+        "config_name": config_name,
+        "seed": seed,
+        "question_key": question_key,
+        "answer_key": answer_key,
+        "id_key": id_key,
+    }
+
+
+def _empty_problem_queue_state(config: dict[str, Any], start_task_index: int) -> dict[str, Any]:
+    return {
+        "config": config,
+        "next_task_index": start_task_index,
+        "problems": [],
+        "solved_problem_uids": [],
+    }
+
+
+def _load_problem_queue_state(
+    path: Path,
+    *,
+    config: dict[str, Any],
+    start_task_index: int,
+) -> dict[str, Any]:
+    state = _read_json_file(path, {})
+    if not isinstance(state, dict) or state.get("config") != config:
+        return _empty_problem_queue_state(config, start_task_index)
+
+    problems = state.get("problems")
+    solved = state.get("solved_problem_uids")
+    if not isinstance(problems, list):
+        problems = []
+    if not isinstance(solved, list):
+        solved = []
+    try:
+        next_task_index = int(state.get("next_task_index"))
+    except (TypeError, ValueError):
+        next_task_index = start_task_index
+    return {
+        "config": config,
+        "next_task_index": max(next_task_index, start_task_index),
+        "problems": [problem for problem in problems if isinstance(problem, dict)],
+        "solved_problem_uids": [str(problem_uid) for problem_uid in solved if problem_uid],
+    }
+
+
+def _problem_record_from_task(
+    *,
+    dataset_name: str,
+    split: str,
+    config_name: str | None,
+    task_index: int,
+    task: Task,
+    task_store_dir: Path,
+) -> dict[str, Any]:
+    problem_uid = compute_problem_uid(
+        dataset_name=dataset_name,
+        split=split,
+        config_name=config_name,
+        task_id=task.task_id,
+        question=task.question,
+    )
+    private_problem_path = write_private_problem_record(
+        task_store_dir=task_store_dir,
+        problem_uid=problem_uid,
+        row=task.raw,
+    )
+    return {
+        "task_index": task_index,
+        "task_id": task.task_id,
+        "problem_uid": problem_uid,
+        "task_markdown": _format_task_markdown(task=task),
+        "private_problem_path": str(private_problem_path),
+    }
+
+
+def _problem_record_from_payload(payload: dict[str, Any]) -> ProblemRecord | None:
+    try:
+        task_index = int(payload["task_index"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    task_id = payload.get("task_id")
+    problem_uid = payload.get("problem_uid")
+    task_markdown = payload.get("task_markdown")
+    private_problem_path = payload.get("private_problem_path")
+    if not all(isinstance(value, str) and value for value in [task_id, problem_uid, task_markdown, private_problem_path]):
+        return None
+    return ProblemRecord(
+        task_index=task_index,
+        task_id=task_id,
+        problem_uid=problem_uid,
+        task_markdown=task_markdown,
+        private_problem_path=Path(private_problem_path),
+    )
+
+
+def _problem_records_from_state(state: dict[str, Any]) -> list[ProblemRecord]:
+    records: list[ProblemRecord] = []
+    for payload in state.get("problems", []):
+        if not isinstance(payload, dict):
+            continue
+        record = _problem_record_from_payload(payload)
+        if record is not None:
+            records.append(record)
+    return records
+
+
+def _ensure_problem_queue(
+    *,
+    queue_path: Path,
+    target_count: int,
+    dataset_name: str,
+    split: str,
+    config_name: str | None,
+    seed: int,
+    question_key: str | None,
+    answer_key: str | None,
+    id_key: str | None,
+    start_task_index: int,
+    task_store_dir: Path,
+    dataset_cache_dir: Path,
+    solved_problem_uids: set[str],
+) -> list[ProblemRecord]:
+    config = _problem_queue_config(
+        dataset_name=dataset_name,
+        split=split,
+        config_name=config_name,
+        seed=seed,
+        question_key=question_key,
+        answer_key=answer_key,
+        id_key=id_key,
+    )
+    queue_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = queue_path.with_suffix(queue_path.suffix + ".lock")
+    with lock_path.open("w", encoding="utf-8") as lock_fh:
+        fcntl.flock(lock_fh, fcntl.LOCK_EX)
+        state = _load_problem_queue_state(
+            queue_path,
+            config=config,
+            start_task_index=start_task_index,
+        )
+        solved = set(state.get("solved_problem_uids", [])) | set(solved_problem_uids)
+        problems = [
+            problem
+            for problem in state.get("problems", [])
+            if isinstance(problem, dict) and str(problem.get("problem_uid") or "") not in solved
+        ]
+        queued_uids = {str(problem.get("problem_uid")) for problem in problems if problem.get("problem_uid")}
+        try:
+            next_task_index = int(state.get("next_task_index"))
+        except (TypeError, ValueError):
+            next_task_index = start_task_index
+
+        if len(problems) < target_count:
+            for task_index, task in iter_tasks(
+                dataset_name=dataset_name,
+                split=split,
+                config_name=config_name,
+                seed=seed,
+                question_key=question_key,
+                answer_key=answer_key,
+                id_key=id_key,
+                start_task_index=next_task_index,
+                max_tasks=None,
+                dataset_cache_dir=dataset_cache_dir,
+            ):
+                next_task_index = task_index + 1
+                problem = _problem_record_from_task(
+                    dataset_name=dataset_name,
+                    split=split,
+                    config_name=config_name,
+                    task_index=task_index,
+                    task=task,
+                    task_store_dir=task_store_dir,
+                )
+                problem_uid = str(problem["problem_uid"])
+                if problem_uid in solved or problem_uid in queued_uids:
+                    continue
+                problems.append(problem)
+                queued_uids.add(problem_uid)
+                if len(problems) >= target_count:
+                    break
+
+        next_state = {
+            "config": config,
+            "next_task_index": next_task_index,
+            "problems": problems,
+            "solved_problem_uids": sorted(solved),
+        }
+        _write_json_file_atomic(queue_path, next_state)
+        return _problem_records_from_state(next_state)
+
+
+def _mark_problem_solved(queue_path: Path, problem_uid: str) -> dict[str, Any]:
+    queue_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = queue_path.with_suffix(queue_path.suffix + ".lock")
+    with lock_path.open("w", encoding="utf-8") as lock_fh:
+        fcntl.flock(lock_fh, fcntl.LOCK_EX)
+        state = _read_json_file(queue_path, {})
+        if not isinstance(state, dict):
+            state = {}
+        problems = state.get("problems")
+        if not isinstance(problems, list):
+            problems = []
+        before_count = len(problems)
+        remaining = [
+            problem
+            for problem in problems
+            if not (isinstance(problem, dict) and str(problem.get("problem_uid") or "") == problem_uid)
+        ]
+        solved = state.get("solved_problem_uids")
+        if not isinstance(solved, list):
+            solved = []
+        solved_set = {str(value) for value in solved if value}
+        solved_set.add(problem_uid)
+        state["problems"] = remaining
+        state["solved_problem_uids"] = sorted(solved_set)
+        _write_json_file_atomic(queue_path, state)
+        return {
+            "problem_removed": len(remaining) < before_count,
+            "remaining_problem_count": len(remaining),
+        }
+
+
+def _request_problem(
+    *,
+    context: dict[str, Any],
+    args: dict[str, Any],
+) -> dict[str, Any]:
+    if args:
+        unexpected = ", ".join(sorted(str(key) for key in args))
+        return {
+            "success": False,
+            "error": f"request_problem does not accept arguments: {unexpected}",
+        }
+    task_markdown = str(context.get("task_markdown") or "").strip()
+    if not task_markdown:
+        return {
+            "success": False,
+            "error": "current problem statement is unavailable",
+        }
+    return {
+        "success": True,
+        "problem_markdown": task_markdown,
+        "submission": "When ready, call submit_solution(answer=...) with only the answer.",
+    }
 
 
 def _submit_solution(
@@ -667,9 +938,13 @@ def _submit_solution(
                 "reward": reward,
             },
         )
+    queue_update = None
+    raw_problem_queue_path = context.get("problem_queue_path")
+    if solved and raw_problem_queue_path:
+        queue_update = _mark_problem_solved(Path(str(raw_problem_queue_path)), problem_uid)
     total_credited_tokens = prior_credit_tokens + credited_tokens
     budget_status = read_budget_status(budget_ledger_events, instance_uuid)
-    return {
+    result = {
         "success": True,
         "correct": solved,
         "solved": solved,
@@ -680,6 +955,9 @@ def _submit_solution(
         "reported_task_id": reported_task_id,
         "budget_status": budget_status,
     }
+    if queue_update is not None:
+        result["problem_queue"] = queue_update
+    return result
 
 
 def _transfer_tokens(
@@ -1434,6 +1712,7 @@ def run_worker(
                 input_items=conversation,
                 tools=[
                     bash_tool,
+                    request_problem_tool,
                     submit_solution_tool,
                     budget_status_tool,
                     transfer_tokens_tool,
@@ -1573,7 +1852,12 @@ def run_worker(
 
             tool_name = str(call.get("name") or "")
             command = str(args.get("command", "")).strip()
-            if tool_name == "submit_solution":
+            if tool_name == "request_problem":
+                tool_result = _request_problem(
+                    context=continuation_context,
+                    args=args,
+                )
+            elif tool_name == "submit_solution":
                 tool_result = _submit_solution(
                     context=continuation_context,
                     args=args,
@@ -2100,6 +2384,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--problem-queue",
+        default="logs/problem_queue.json",
+        help=(
+            "Persistent queue of unsolved redacted problems. Resolved under "
+            "--runtime-root unless absolute."
+        ),
+    )
+    parser.add_argument(
         "--rollout-token-budget-tokens",
         type=int,
         default=DEFAULT_ROLLOUT_TOKEN_BUDGET_TOKENS,
@@ -2203,6 +2495,7 @@ def main() -> None:
     fixed_temp_dir = _resolve_runtime_path(args.fixed_temp_dir, runtime_root, "--fixed-temp-dir")
     rollout_root = _resolve_runtime_path(args.rollout_temp_root, runtime_root, "--rollout-temp-root")
     task_store_dir = _resolve_runtime_path(args.task_store_dir, runtime_root, "--task-store-dir")
+    problem_queue_path = _resolve_runtime_path(args.problem_queue, runtime_root, "--problem-queue")
     archive_repo_dir = _resolve_runtime_path(args.archive_repo_dir, runtime_root, "--archive-repo-dir")
     bootstrap_seed_dir = _resolve_runtime_path(args.bootstrap_seed_dir, runtime_root, "--bootstrap-seed-dir")
     budget_ledger_events = runtime_root / "logs" / "budget_ledger.jsonl"
@@ -2299,55 +2592,40 @@ def main() -> None:
             return max(eligible_indices) + 1
         return args.start_task_index
 
-    if args.step:
-        task_start_index = _next_step_task_index()
-        task_limit = 1
-        tasks = iter_tasks(
-            dataset_name=args.dataset_name,
-            split=args.split,
-            config_name=args.config_name,
-            seed=args.seed,
-            question_key=args.question_key,
-            answer_key=args.answer_key,
-            id_key=args.id_key,
-            start_task_index=task_start_index,
-            max_tasks=task_limit,
-            dataset_cache_dir=dataset_cache_dir,
-        )
-    elif args.all_tasks:
-        tasks = iter_tasks(
-            dataset_name=args.dataset_name,
-            split=args.split,
-            config_name=args.config_name,
-            seed=args.seed,
-            question_key=args.question_key,
-            answer_key=args.answer_key,
-            id_key=args.id_key,
-            start_task_index=args.start_task_index,
-            max_tasks=args.max_tasks,
-            dataset_cache_dir=dataset_cache_dir,
-        )
-    else:
-        tasks = [
-            (
-                0,
-                sample_task(
-                    dataset_name=args.dataset_name,
-                    split=args.split,
-                    config_name=args.config_name,
-                    seed=args.seed,
-                    question_key=args.question_key,
-                    answer_key=args.answer_key,
-                    id_key=args.id_key,
-                    dataset_cache_dir=dataset_cache_dir,
-                ),
-            )
-        ]
+    solved_problem_uids = {
+        str(rec.get("problem_uid"))
+        for rec in existing_records
+        if rec.get("solved") and rec.get("problem_uid")
+    }
+    problem_start_index = _next_step_task_index() if args.step else args.start_task_index
+    problem_target_count = args.max_tasks if args.all_tasks and args.max_tasks is not None else 1
+    problem_records = _ensure_problem_queue(
+        queue_path=problem_queue_path,
+        target_count=problem_target_count,
+        dataset_name=args.dataset_name,
+        split=args.split,
+        config_name=args.config_name,
+        seed=args.seed,
+        question_key=args.question_key,
+        answer_key=args.answer_key,
+        id_key=args.id_key,
+        start_task_index=problem_start_index,
+        task_store_dir=task_store_dir,
+        dataset_cache_dir=dataset_cache_dir,
+        solved_problem_uids=solved_problem_uids,
+    )
+    if not problem_records:
+        raise RuntimeError("No unsolved problems are available in the problem queue.")
 
-    for task_index, task in tasks:
+    for problem in problem_records:
+        task_index = problem.task_index
+        task_id = problem.task_id
+        problem_uid = problem.problem_uid
+        private_problem_path = problem.private_problem_path
+        task_markdown = problem.task_markdown
         existing_task_records = existing_by_task.get(task_index, {})
         recorded_task_rollout_count = _recorded_task_rollout_count(existing_task_records)
-        bootstrap_without_parent = task_index == 0 and not parent_pool
+        bootstrap_without_parent = not parent_pool
         task_rollout_count = (
             recorded_task_rollout_count
             if recorded_task_rollout_count is not None
@@ -2380,23 +2658,11 @@ def main() -> None:
             for rollout_index in range(task_rollout_count)
             if rollout_index not in existing_task_records
         ]
-        problem_uid = compute_problem_uid(
-            dataset_name=args.dataset_name,
-            split=args.split,
-            config_name=args.config_name,
-            task_id=task.task_id,
-            question=task.question,
-        )
-        private_problem_path = write_private_problem_record(
-            task_store_dir=task_store_dir,
-            problem_uid=problem_uid,
-            row=task.raw,
-        )
         spawn_slots_path = rollout_root / (
-            f"{task_index:06d}_{_sanitize_for_path(task.task_id)}_spawn_slots.json"
+            f"{task_index:06d}_{_sanitize_for_path(task_id)}_spawn_slots.json"
         )
         spawn_slots_dir = rollout_root / (
-            f"{task_index:06d}_{_sanitize_for_path(task.task_id)}_next_iteration"
+            f"{task_index:06d}_{_sanitize_for_path(task_id)}_next_iteration"
         )
 
         if len(existing_task_records) >= task_rollout_count:
@@ -2437,14 +2703,14 @@ def main() -> None:
                     "task_index": task_index,
                     "rollout_index": rollout_index,
                     "rollout_username": rollout_username,
-                    "task_id": task.task_id,
+                    "task_id": task_id,
                     "problem_uid": problem_uid,
                     "elapsed_seconds": round(time.monotonic() - started_at, 3),
                     **fields,
                 }
                 append_progress_log(progress_log_path, progress_log_lock, record)
 
-            if sampled_parent is None and task_index > 0:
+            if sampled_parent is None and not bootstrap_without_parent:
                 raise RuntimeError(
                     "No spawned child slot available for non-bootstrap rollout; "
                     f"task_index={task_index} rollout_index={rollout_index}"
@@ -2459,7 +2725,7 @@ def main() -> None:
                     "task_index": task_index,
                     "rollout_index": rollout_index,
                     "rollout_username": rollout_username,
-                    "task_id": task.task_id,
+                    "task_id": task_id,
                     "problem_uid": problem_uid,
                     "rollout_token_budget_tokens": rollout_budget_tokens,
                 },
@@ -2473,7 +2739,7 @@ def main() -> None:
             archive_worktree = create_archive_worktree(
                 archive_repo_dir=archive_repo_dir,
                 worktree_root=archive_worktree_root,
-                branch=f"rollout/{task_index:06d}-{rollout_index:03d}-{_sanitize_for_path(task.task_id)}",
+                branch=f"rollout/{task_index:06d}-{rollout_index:03d}-{_sanitize_for_path(task_id)}",
                 git_lock=archive_git_lock,
             )
             archive_result: dict[str, Any] = {}
@@ -2500,9 +2766,6 @@ def main() -> None:
             _replace_with_symlink(archive_link, archive_worktree.path)
             _replace_with_symlink(shared_workspace_link, shared_workspace_dir)
 
-            task_markdown = _format_task_markdown(task=task)
-            task_file = temp_dir / "task.md"
-            task_file.write_text(task_markdown, encoding="utf-8")
             runtime_file = temp_dir / "runtime.md"
             runtime_file.write_text(
                 _format_runtime_markdown(
@@ -2533,13 +2796,14 @@ def main() -> None:
                 generation=args.generation,
                 seed=args.seed,
                 task_index=task_index,
-                task_id=task.task_id,
+                task_id=task_id,
                 rollout_index=rollout_index,
                 rollout_username=rollout_username,
                 instance_uuid=instance_uuid,
                 problem_uid=problem_uid,
                 private_problem_path=private_problem_path,
                 task_markdown=task_markdown,
+                problem_queue_path=problem_queue_path,
                 rollout_token_budget_tokens=rollout_budget_tokens,
                 solve_reward_token_credit_tokens=args.solve_reward_token_credit_tokens,
                 worker_timeout_seconds=args.worker_timeout_seconds,
@@ -2559,8 +2823,8 @@ def main() -> None:
             _progress(
                 "workspace_prepared",
                 working_directory=str(temp_dir),
-                task_file=str(task_file),
                 runtime_file=str(runtime_file),
+                problem_queue_path=str(problem_queue_path),
                 seed_output_dir=str(seed_output_dir),
                 rollout_control_dir=str(rollout_control_dir) if args.worker_backend == "codex" else None,
                 rollout_state_dir=str(rollout_state_dir),
@@ -2618,7 +2882,7 @@ def main() -> None:
                             shared_workspace_write_log=shared_workspace_write_log,
                             shared_workspace_lock=shared_workspace_lock,
                             task_index=task_index,
-                            task_id=task.task_id,
+                            task_id=task_id,
                             rollout_index=rollout_index,
                             rollout_username=rollout_username,
                             timeout_seconds=args.worker_timeout_seconds,
@@ -2709,7 +2973,7 @@ def main() -> None:
             output_dir = persist_episode_outputs(
                 temp_dir,
                 outputs_dir,
-                f"{task.task_id}_rollout_{rollout_index:03d}",
+                f"{task_id}_rollout_{rollout_index:03d}",
             )
             _progress("episode_persisted", output_path=str(output_dir))
 
@@ -2732,7 +2996,7 @@ def main() -> None:
                 "rollout_index": rollout_index,
                 "rollout_username": rollout_username,
                 "instance_uuid": instance_uuid,
-                "task_id": task.task_id,
+                "task_id": task_id,
                 "problem_uid": problem_uid,
                 "reported_problem_uid": reported_problem_uid,
                 "reported_task_id": reported_task_id,
@@ -2753,6 +3017,7 @@ def main() -> None:
                 "solution_feedback": solution_feedback,
                 "output_path": str(output_dir),
                 "private_problem_path": str(private_problem_path),
+                "problem_queue_path": str(problem_queue_path),
                 "shared_workspace_write_log": str(shared_workspace_write_log),
                 "progress_log": str(progress_log_path),
                 "dataset_name": args.dataset_name,
@@ -2787,7 +3052,7 @@ def main() -> None:
 
             summary = (
                 f"gen={args.generation} seed={args.seed} task_index={task_index} rollout_index={rollout_index} "
-                f"rollout_username={rollout_username} task_id={task.task_id} solved={solved} output={output_dir}"
+                f"rollout_username={rollout_username} task_id={task_id} solved={solved} output={output_dir}"
             )
             if worker_result.status == "error":
                 summary += f" error={worker_result.stop_reason}"
@@ -2830,7 +3095,7 @@ def main() -> None:
                                 "task_index": task_index,
                                 "rollout_index": rollout_index,
                                 "rollout_username": _rollout_username(rollout_index),
-                                "task_id": task.task_id,
+                                "task_id": task_id,
                                 "problem_uid": problem_uid,
                                 "worker_status": "error",
                                 "worker_stop_reason": type(exc).__name__,
@@ -2847,7 +3112,7 @@ def main() -> None:
                                     "task_index": task_index,
                                     "rollout_index": rollout_index,
                                     "rollout_username": _rollout_username(rollout_index),
-                                    "task_id": task.task_id,
+                                    "task_id": task_id,
                                     "problem_uid": problem_uid,
                                     "reported_problem_uid": None,
                                     "reported_task_id": None,
@@ -2865,6 +3130,7 @@ def main() -> None:
                                     "reward": 0.0,
                                     "output_path": None,
                                     "private_problem_path": str(private_problem_path),
+                                    "problem_queue_path": str(problem_queue_path),
                                     "shared_workspace_write_log": str(shared_workspace_write_log),
                                     "progress_log": str(progress_log_path),
                                     "dataset_name": args.dataset_name,
@@ -2895,7 +3161,7 @@ def main() -> None:
                                 summary=(
                                     f"gen={args.generation} seed={args.seed} task_index={task_index} "
                                     f"rollout_index={rollout_index} rollout_username={_rollout_username(rollout_index)} "
-                                    f"task_id={task.task_id} solved=False output=None error={type(exc).__name__}"
+                                    f"task_id={task_id} solved=False output=None error={type(exc).__name__}"
                                 ),
                                 error=str(exc),
                             )
@@ -2933,7 +3199,7 @@ def main() -> None:
                     "generation": args.generation,
                     "seed": args.seed,
                     "task_index": task_index,
-                    "task_id": task.task_id,
+                    "task_id": task_id,
                     "problem_uid": problem_uid,
                     "failed_rollout_count": len(failed_results),
                     "fatal": args.fail_on_rollout_error,
@@ -2968,6 +3234,11 @@ def run_child_tool_handler(context_path: Path) -> None:
                 str(context["instance_uuid"]),
             )
             result = {"success": True, **result}
+        elif tool == "request_problem":
+            result = _request_problem(
+                context=context,
+                args=args,
+            )
         elif tool == "submit_solution":
             result = _submit_solution(
                 context=context,

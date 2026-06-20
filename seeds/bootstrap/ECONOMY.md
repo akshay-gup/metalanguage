@@ -42,15 +42,16 @@ the packet shape and read order:
 2. `SETUP.md`
 3. `ECONOMY.md`
 4. `runtime.md`
-5. `task.md`
+5. `request_problem()`
 
-Only the first three files are durable seed files. `runtime.md` and `task.md`
-are generated fresh by the harness for each rollout.
+Only the first three files are durable seed files. `runtime.md` is generated
+fresh by the harness for each rollout, and the current problem is delivered by
+`request_problem()`.
 
-Do not place generated runtime files, generated task files, snapshots,
+Do not place generated runtime files, problem statements, snapshots,
 orchestrator metadata, or hidden supervisor state into the successor seed.
-Runtime paths, task content, instance IDs, budgets, peer lists, and slot
-metadata belong to the harness/runtime layer.
+Runtime paths, task content, instance IDs, budgets, peer lists, and slot metadata
+belong to the harness/runtime layer.
 
 ## Archive
 

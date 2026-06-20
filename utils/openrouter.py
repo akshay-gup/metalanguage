@@ -214,6 +214,22 @@ budget_status_tool: dict[str, Any] = {
 }
 
 
+request_problem_tool: dict[str, Any] = {
+    "type": "function",
+    "name": "request_problem",
+    "description": (
+        "Request the current redacted problem statement from the supervisor. "
+        "The response contains the problem text/options, but not the solution."
+    ),
+    "strict": None,
+    "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+    },
+}
+
+
 submit_solution_tool: dict[str, Any] = {
     "type": "function",
     "name": "submit_solution",
