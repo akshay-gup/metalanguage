@@ -1787,15 +1787,9 @@ def _spawn_child_continuation(
     budget_ledger_events = Path(str(context["budget_ledger_events"]))
     parent_instance_uuid = str(context["instance_uuid"])
     problem = _problem_record_for_context(context, fallback_to_latest_solution=True)
-    if problem is None:
-        return {
-            "success": False,
-            "reservation_committed": False,
-            "error": "request_problem and submit_solution must be called before spawn_child",
-        }
-    task_id = problem.task_id
-    problem_uid = problem.problem_uid
-    problem_task_index = problem.task_index
+    task_id = problem.task_id if problem is not None else str(context["task_id"])
+    problem_uid = problem.problem_uid if problem is not None else str(context["problem_uid"])
+    problem_task_index = problem.task_index if problem is not None else int(context["task_index"])
     child_instance_uuid = new_instance_uuid()
     reservation_committed = False
     slot_index: int | None = None
