@@ -483,12 +483,32 @@ def _solve_reward_credit_total(events_path: Path, instance_uuid: str) -> int:
     return total
 
 
-def _latest_solution_scored_event(events_path: Path, instance_uuid: str) -> dict[str, Any] | None:
-    latest = None
+def _solve_reward_credited_problem_uids(events_path: Path, instance_uuid: str) -> set[str]:
+    credited: set[str] = set()
     for event in _iter_budget_events(events_path):
-        if event.get("event_type") == "solution_scored" and event.get("instance_uuid") == instance_uuid:
-            latest = event
-    return latest
+        if event.get("event_type") != "solve_reward_credit":
+            continue
+        if event.get("instance_uuid") != instance_uuid:
+            continue
+        metadata = event.get("metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        problem_uid = metadata.get("problem_uid")
+        if isinstance(problem_uid, str) and problem_uid:
+            credited.add(problem_uid)
+    return credited
+
+
+def _solution_scored_events(events_path: Path, instance_uuid: str) -> list[dict[str, Any]]:
+    return [
+        event
+        for event in _iter_budget_events(events_path)
+        if event.get("event_type") == "solution_scored" and event.get("instance_uuid") == instance_uuid
+    ]
+
+
+def _latest_solution_scored_event(events_path: Path, instance_uuid: str) -> dict[str, Any] | None:
+    events = _solution_scored_events(events_path, instance_uuid)
+    return events[-1] if events else None
 
 
 def _resolve_spawn_seed_dir(context: dict[str, Any], seed_dir: str) -> tuple[Path | None, str | None]:
@@ -734,6 +754,28 @@ def _problem_record_from_payload(payload: dict[str, Any]) -> ProblemRecord | Non
     )
 
 
+def _problem_record_from_solution_event(event: dict[str, Any]) -> ProblemRecord | None:
+    metadata = event.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    try:
+        task_index = int(metadata["problem_task_index"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    task_id = metadata.get("task_id")
+    problem_uid = metadata.get("problem_uid")
+    private_problem_path = metadata.get("private_problem_path")
+    task_markdown = metadata.get("task_markdown", "")
+    if not all(isinstance(value, str) and value for value in [task_id, problem_uid, private_problem_path]):
+        return None
+    return ProblemRecord(
+        task_index=task_index,
+        task_id=task_id,
+        problem_uid=problem_uid,
+        task_markdown=task_markdown if isinstance(task_markdown, str) else "",
+        private_problem_path=Path(private_problem_path),
+    )
+
+
 def _problem_records_from_state(state: dict[str, Any]) -> list[ProblemRecord]:
     records: list[ProblemRecord] = []
     for payload in state.get("problems", []):
@@ -873,13 +915,27 @@ def _assigned_problem_from_queue(queue_path: Path, assignment_key: str) -> Probl
         return _problem_record_from_payload(problem)
 
 
-def _problem_record_for_context(context: dict[str, Any]) -> ProblemRecord | None:
+def _problem_record_for_context(
+    context: dict[str, Any],
+    *,
+    fallback_to_latest_solution: bool = False,
+) -> ProblemRecord | None:
     raw_problem_queue_path = context.get("problem_queue_path")
     if raw_problem_queue_path:
-        return _assigned_problem_from_queue(
+        assigned = _assigned_problem_from_queue(
             Path(str(raw_problem_queue_path)),
             _problem_assignment_key(context),
         )
+        if assigned is not None:
+            return assigned
+        if fallback_to_latest_solution:
+            latest_event = _latest_solution_scored_event(
+                Path(str(context["budget_ledger_events"])),
+                str(context["instance_uuid"]),
+            )
+            if latest_event is not None:
+                return _problem_record_from_solution_event(latest_event)
+        return None
 
     try:
         task_index = int(context["task_index"])
@@ -1091,7 +1147,7 @@ def _submit_solution(
 
     instance_uuid = str(context["instance_uuid"])
     budget_ledger_events = Path(str(context["budget_ledger_events"]))
-    problem = _problem_record_for_context(context)
+    problem = _problem_record_for_context(context, fallback_to_latest_solution=True)
     if problem is None:
         return {
             "success": False,
@@ -1113,8 +1169,12 @@ def _submit_solution(
         configured_credit_tokens = int(context.get("solve_reward_token_credit_tokens") or 0)
     except (TypeError, ValueError):
         configured_credit_tokens = 0
-    prior_credit_tokens = _solve_reward_credit_total(budget_ledger_events, instance_uuid)
-    credited_tokens = configured_credit_tokens if solved and prior_credit_tokens <= 0 else 0
+    credited_problem_uids = _solve_reward_credited_problem_uids(budget_ledger_events, instance_uuid)
+    credited_tokens = (
+        configured_credit_tokens
+        if solved and problem_uid not in credited_problem_uids
+        else 0
+    )
 
     metadata = {
         "generation": context["generation"],
@@ -1126,6 +1186,7 @@ def _submit_solution(
         "task_id": task_id,
         "problem_uid": problem_uid,
         "private_problem_path": str(private_problem_path),
+        "task_markdown": problem.task_markdown,
         "reported_problem_uid": reported_problem_uid,
         "reported_task_id": reported_task_id,
         "submitted_answer": answer,
@@ -1166,7 +1227,12 @@ def _submit_solution(
             problem_uid,
             assignment_key=_problem_assignment_key(context),
         )
-    total_credited_tokens = prior_credit_tokens + credited_tokens
+        queue_update["assignment_release"] = _release_problem_assignment(
+            Path(str(raw_problem_queue_path)),
+            _problem_assignment_key(context),
+            problem_uid=problem_uid,
+        )
+    total_credited_tokens = _solve_reward_credit_total(budget_ledger_events, instance_uuid)
     budget_status = read_budget_status(budget_ledger_events, instance_uuid)
     result = {
         "success": True,
@@ -1720,15 +1786,16 @@ def _spawn_child_continuation(
 
     budget_ledger_events = Path(str(context["budget_ledger_events"]))
     parent_instance_uuid = str(context["instance_uuid"])
-    problem = _problem_record_for_context(context)
+    problem = _problem_record_for_context(context, fallback_to_latest_solution=True)
     if problem is None:
         return {
             "success": False,
             "reservation_committed": False,
-            "error": "request_problem must be called before spawn_child",
+            "error": "request_problem and submit_solution must be called before spawn_child",
         }
     task_id = problem.task_id
     problem_uid = problem.problem_uid
+    problem_task_index = problem.task_index
     child_instance_uuid = new_instance_uuid()
     reservation_committed = False
     slot_index: int | None = None
@@ -1753,7 +1820,7 @@ def _spawn_child_continuation(
                 "generation": int(context["generation"]),
                 "seed": int(context["seed"]),
                 "task_index": int(context["task_index"]),
-                "problem_task_index": problem.task_index,
+                "problem_task_index": problem_task_index,
                 "rollout_index": int(context["rollout_index"]),
                 "rollout_username": str(context["rollout_username"]),
                 "task_id": task_id,
@@ -1794,7 +1861,7 @@ def _spawn_child_continuation(
                         "generation": int(context["generation"]),
                         "seed": int(context["seed"]),
                         "task_index": int(context["task_index"]),
-                        "problem_task_index": problem.task_index,
+                        "problem_task_index": problem_task_index,
                         "rollout_index": int(context["rollout_index"]),
                         "rollout_username": f"{context['rollout_username']}_slot_{slot_index:03d}",
                         "task_id": task_id,
@@ -3168,10 +3235,8 @@ def main() -> None:
                 worker_error_code=worker_result.error_code,
                 worker_error_message=worker_result.error_message,
             )
-            latest_solution_event = _latest_solution_scored_event(
-                budget_ledger_events,
-                instance_uuid,
-            )
+            solution_events = _solution_scored_events(budget_ledger_events, instance_uuid)
+            latest_solution_event = solution_events[-1] if solution_events else None
             assigned_problem = _problem_record_for_context(continuation_context)
             record_task_id = assigned_problem.task_id if assigned_problem is not None else None
             record_problem_uid = assigned_problem.problem_uid if assigned_problem is not None else None
@@ -3179,6 +3244,27 @@ def main() -> None:
             record_private_problem_path = (
                 assigned_problem.private_problem_path if assigned_problem is not None else None
             )
+            active_assignment_problem_uid = assigned_problem.problem_uid if assigned_problem is not None else None
+            solved_problem_uids: list[str] = []
+            solved_task_ids: list[str] = []
+            total_reward = 0.0
+            for event in solution_events:
+                metadata = event.get("metadata")
+                metadata = metadata if isinstance(metadata, dict) else {}
+                try:
+                    total_reward += float(metadata.get("reward") or 0.0)
+                except (TypeError, ValueError):
+                    pass
+                problem_uid_value = metadata.get("problem_uid")
+                task_id_value = metadata.get("task_id")
+                if not metadata.get("solved"):
+                    continue
+                if isinstance(problem_uid_value, str) and problem_uid_value and problem_uid_value not in solved_problem_uids:
+                    solved_problem_uids.append(problem_uid_value)
+                if isinstance(task_id_value, str) and task_id_value and task_id_value not in solved_task_ids:
+                    solved_task_ids.append(task_id_value)
+            solution_count = len(solution_events)
+            solved_problem_count = len(solved_problem_uids)
             solution_feedback = None
             if latest_solution_event is not None:
                 latest_metadata = latest_solution_event.get("metadata")
@@ -3200,16 +3286,27 @@ def main() -> None:
                     record_private_problem_path = Path(raw_private_problem_path)
                 reported_problem_uid = latest_metadata.get("reported_problem_uid")
                 reported_task_id = latest_metadata.get("reported_task_id")
-                reward = float(latest_metadata.get("reward") or 0.0)
-                solved = bool(latest_metadata.get("solved"))
+                try:
+                    latest_reward = float(latest_metadata.get("reward") or 0.0)
+                except (TypeError, ValueError):
+                    latest_reward = 0.0
+                latest_solved = bool(latest_metadata.get("solved"))
+                reward = total_reward
+                solved = solved_problem_count > 0
                 solve_reward_credit_tokens = _solve_reward_credit_total(
                     budget_ledger_events,
                     instance_uuid,
                 )
                 solution_feedback = {
-                    "correct": solved,
+                    "correct": latest_solved,
                     "solved": solved,
+                    "latest_correct": latest_solved,
+                    "solution_count": solution_count,
+                    "solved_problem_count": solved_problem_count,
+                    "solved_problem_uids": solved_problem_uids,
+                    "solved_task_ids": solved_task_ids,
                     "reward": reward,
+                    "latest_reward": latest_reward,
                     "credited_tokens": int(latest_metadata.get("solve_reward_credit_tokens") or 0),
                     "total_credited_tokens": solve_reward_credit_tokens,
                     "reported_problem_uid": reported_problem_uid,
@@ -3221,6 +3318,7 @@ def main() -> None:
                 reported_task_id = None
                 reward = 0.0
                 solved = False
+                latest_solved = False
                 solve_reward_credit_tokens = 0
                 _progress(
                     "solution_missing",
@@ -3230,6 +3328,9 @@ def main() -> None:
                 "rollout_scored",
                 solved=solved,
                 reward=reward,
+                solution_count=solution_count,
+                solved_problem_count=solved_problem_count,
+                solved_problem_uids=solved_problem_uids,
                 solve_reward_credit_tokens=solve_reward_credit_tokens,
                 reported_problem_uid=reported_problem_uid,
                 reported_task_id=reported_task_id,
@@ -3268,6 +3369,7 @@ def main() -> None:
                 "problem_uid": record_problem_uid,
                 "problem_task_index": record_problem_task_index,
                 "problem_assignment_key": _problem_assignment_key(continuation_context),
+                "active_assignment_problem_uid": active_assignment_problem_uid,
                 "scheduler_task_id": task_id,
                 "scheduler_problem_uid": problem_uid,
                 "reported_problem_uid": reported_problem_uid,
@@ -3285,6 +3387,10 @@ def main() -> None:
                 "worker_metadata": worker_result.metadata,
                 "solved": solved,
                 "reward": reward,
+                "solution_count": solution_count,
+                "solved_problem_count": solved_problem_count,
+                "solved_problem_uids": solved_problem_uids,
+                "solved_task_ids": solved_task_ids,
                 "solve_reward_credit_tokens": solve_reward_credit_tokens,
                 "solution_feedback": solution_feedback,
                 "output_path": str(output_dir),
@@ -3323,13 +3429,6 @@ def main() -> None:
                 "dataset_cache_dir": str(dataset_cache_dir),
                 **archive_result,
             }
-            if solved:
-                record["problem_assignment_release"] = _release_problem_assignment(
-                    problem_queue_path,
-                    _problem_assignment_key(continuation_context),
-                    problem_uid=record_problem_uid,
-                )
-
             summary = (
                 f"gen={args.generation} seed={args.seed} task_index={task_index} rollout_index={rollout_index} "
                 f"rollout_username={rollout_username} task_id={record_task_id or 'unassigned'} "
@@ -3452,18 +3551,16 @@ def main() -> None:
 
         for result in results:
             record = result.record
-            if record.get("solved"):
-                continue
             assignment_key = record.get("problem_assignment_key")
-            record_problem_uid = record.get("problem_uid")
+            active_problem_uid = record.get("active_assignment_problem_uid")
             if not isinstance(assignment_key, str) or not assignment_key:
                 continue
-            if not isinstance(record_problem_uid, str) or not record_problem_uid:
+            if not isinstance(active_problem_uid, str) or not active_problem_uid:
                 continue
             record["problem_assignment_release"] = _release_problem_assignment(
                 problem_queue_path,
                 assignment_key,
-                problem_uid=record_problem_uid,
+                problem_uid=active_problem_uid,
             )
 
         for result in sorted(results, key=lambda item: item.rollout_index):

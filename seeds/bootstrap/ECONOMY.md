@@ -45,7 +45,7 @@ the packet shape and read order:
 5. `request_problem()`
 
 Only the first three files are durable seed files. `runtime.md` is generated
-fresh by the harness for each rollout, and the leased problem is delivered by
+fresh by the harness for each rollout, and leased problems are delivered by
 `request_problem()`.
 
 Do not place generated runtime files, problem statements, snapshots,

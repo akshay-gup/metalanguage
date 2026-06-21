@@ -51,7 +51,7 @@ take precedence over values in `.env`.
   3.6. assign every rollout instance a UUID and record an `instance_created` event in the token-budget ledger,
   4. expose `archive/world_repo` by default as the durable cross-lineage Git archive available to every rollout (override with `--archive-repo-dir`),
      using a per-rollout temporary worktree so only committed archive changes are merged back and uncommitted archive edits are discarded,
-  5. copy the selected parent seed workspace into the rollout workspace, keep problems outside the rollout workspace, and expose a redacted problem only through an exclusive `request_problem()` lease,
+  5. copy the selected parent seed workspace into the rollout workspace, keep problems outside the rollout workspace, and expose redacted problems through exclusive `request_problem()` leases,
   6. register main-loop tools through the worker backend (OpenRouter tool payloads or Codex `DynamicToolSpec` entries), then run the worker with the minimal fixed prompt `Read README.md.`; operating doctrine is expected to come from the inherited parent seed,
      while `runtime.md` contains only generated paths, runtime IDs, budgets, and peer lists,
   7. score answers submitted through `submit_solution(answer)`, grounding correctness against the private stored row and internal task identity,
@@ -73,7 +73,7 @@ take precedence over values in `.env`.
   - every rollout receives an internal `instance_uuid` recorded in progress logs, run logs, and the ledger;
   - provider-reported model usage is recorded as `token_usage` events after OpenRouter calls and Codex usage events;
   - `submit_solution(answer)` scores immediately, returns `correct`, `reward`, credited tokens, and updated budget status, and records `solution_scored` events;
-  - correct `submit_solution` calls append one `solve_reward_credit` budget event per rollout, defaulting to 300000 tokens via `--solve-reward-token-credit-tokens`;
+  - correct `submit_solution` calls append one `solve_reward_credit` budget event per distinct solved problem for that rollout, defaulting to 300000 tokens via `--solve-reward-token-credit-tokens`;
   - there is no answer-file scoring fallback; a rollout that does not call `submit_solution` receives no solution score or solve reward credit;
   - `--rollout-token-budget-tokens` sets each initial rollout's starting budget, defaulting to 300000 tokens, and stops a rollout when reported usage exhausts it;
   - rollouts can call `request_problem()`, `submit_solution(answer)`, `budget_status()`, `transfer_tokens(target_instance_uuid, amount_tokens)`, and `spawn_child(seed_dir, initial_budget_tokens)` as main-loop tools;
@@ -90,7 +90,7 @@ take precedence over values in `.env`.
 - Resume behavior:
   - runs automatically resume from existing `--runs-log` entries that match dataset/split/model/seed/generation/config/rollout-count;
   - completed rollouts are skipped, partial tasks continue from missing rollout indices using each task's recorded rollout count;
-  - unsolved problems are kept in `--problem-queue`; `request_problem()` leases one problem per rollout under a file lock, and correct `submit_solution(answer)` calls mark the solved UID so resumed runs fetch the next unsolved problem;
+  - unsolved problems are kept in `--problem-queue`; `request_problem()` leases one active problem per rollout under a file lock, and correct `submit_solution(answer)` calls mark the solved UID and release the lease so the same rollout can request another unsolved problem;
   - parent lineage candidates are loaded from `--rollout-temp-root/latest_parent_pool.json`, which is written from claimed `spawn_child` slots;
   - disable this with `--no-resume`.
 - Manual iteration:
@@ -99,7 +99,8 @@ take precedence over values in `.env`.
 - Problem queue:
   - `--problem-queue` stores the persistent list of currently unsolved redacted problems and defaults to `logs/problem_queue.json` under `--runtime-root`;
   - active leases are tracked in `assigned_problems` by rollout assignment key so concurrent rollouts cannot receive the same problem;
-  - `request_problem()` returns the leased redacted problem statement directly to the rollout; no problem statement is written into the rollout workspace.
+  - `request_problem()` returns the leased redacted problem statement directly to the rollout, and may be called again after a correct `submit_solution(answer)` to lease another problem;
+  - no problem statement is written into the rollout workspace.
 
 ### Codex rollout backend
 

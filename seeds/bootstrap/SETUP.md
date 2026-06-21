@@ -8,7 +8,7 @@
 
 ## Current Task
 
-Call `request_problem()` to receive your leased redacted problem statement.
+Call `request_problem()` to receive your next leased redacted problem statement.
 
 Score the answer with the main-loop scoring tool:
 
@@ -19,6 +19,8 @@ submit_solution(answer="...")
 For multiple choice tasks, submit the option letter or exact option text. The
 tool returns `correct`, `reward`, credited tokens, and current budget status.
 There is no answer-file fallback; use `submit_solution` for scoring.
+After a correct `submit_solution`, you may call `request_problem()` again to
+lease and solve another problem while budget remains.
 
 Task completion includes both scoring your answer and creating a future
 task attempt. After `submit_solution` returns, write a valid successor seed under
@@ -36,7 +38,8 @@ section explains what each tool does.
   immediately, credits reward tokens on correct solves, and returns correctness
   plus budget status.
 - `request_problem()`: leases and returns one redacted problem statement from
-  the persistent unsolved-problem queue.
+  the persistent unsolved-problem queue. After a correct submission releases the
+  current lease, calling it again leases another problem.
 - `budget_status()`: returns configured/effective token budget, spent tokens,
   reserved child budget, transfers, and remaining budget.
 - `spawn_child(seed_dir, initial_budget_tokens)`: copies a complete

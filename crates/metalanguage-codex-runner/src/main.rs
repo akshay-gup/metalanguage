@@ -684,7 +684,8 @@ fn metalanguage_dynamic_tools() -> Vec<DynamicToolSpec> {
             namespace: None,
             name: "request_problem".to_string(),
             description: concat!(
-                "Request the current redacted problem statement from the supervisor. ",
+                "Lease the next redacted problem statement from the supervisor. ",
+                "After a correct submit_solution call, this can be called again. ",
                 "The response contains the problem text/options, but not the solution."
             )
             .to_string(),
@@ -700,7 +701,7 @@ fn metalanguage_dynamic_tools() -> Vec<DynamicToolSpec> {
             namespace: None,
             name: "submit_solution".to_string(),
             description: concat!(
-                "Submit this task's final answer for immediate scoring. The ",
+                "Submit the active leased problem's answer for immediate scoring. The ",
                 "response returns correct/incorrect, reward, credited tokens, ",
                 "and updated budget status."
             )
@@ -710,7 +711,7 @@ fn metalanguage_dynamic_tools() -> Vec<DynamicToolSpec> {
                 "properties": {
                     "answer": {
                         "type": "string",
-                        "description": "Final answer to score against the current task."
+                        "description": "Answer to score against the active leased problem."
                     }
                 },
                 "required": ["answer"],

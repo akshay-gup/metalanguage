@@ -218,7 +218,8 @@ request_problem_tool: dict[str, Any] = {
     "type": "function",
     "name": "request_problem",
     "description": (
-        "Request the current redacted problem statement from the supervisor. "
+        "Lease the next redacted problem statement from the supervisor. "
+        "After a correct submit_solution call, this can be called again. "
         "The response contains the problem text/options, but not the solution."
     ),
     "strict": None,
@@ -234,7 +235,7 @@ submit_solution_tool: dict[str, Any] = {
     "type": "function",
     "name": "submit_solution",
     "description": (
-        "Submit this task's final answer for immediate scoring. The response "
+        "Submit the active leased problem's answer for immediate scoring. The response "
         "returns correct/incorrect, reward, credited tokens, and updated budget."
     ),
     "strict": None,
@@ -243,7 +244,7 @@ submit_solution_tool: dict[str, Any] = {
         "properties": {
             "answer": {
                 "type": "string",
-                "description": "Final answer to score against the current task.",
+                "description": "Answer to score against the active leased problem.",
             },
         },
         "required": ["answer"],
