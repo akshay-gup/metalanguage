@@ -43,7 +43,7 @@ take precedence over values in `.env`.
 ## Episode runner
 
 - `main_loop.py`: runs RLVR-style episodes end-to-end:
-  1. by default, fill `--problem-queue` with the next unsolved problem from `m-a-p/SuperGPQA` (or queue multiple problems with `--all-tasks --max-tasks`; override with `--dataset-name`),
+  1. by default, fill `--problem-queue` with enough unsolved problems from `m-a-p/SuperGPQA` for the active rollout batch (or queue multiple batches with `--all-tasks --max-tasks`; override with `--dataset-name`),
   1.5. use `moonshotai/kimi-k2.6` as the default OpenRouter model (override with `--model`),
   2. run 8 bootstrap rollout slots by default with `--num-rollouts`, then let later task width be set by spawned child slots,
   3. assign each rollout index to the matching `spawn_child` slot claimed by the prior task's rollouts,
@@ -51,11 +51,11 @@ take precedence over values in `.env`.
   3.6. assign every rollout instance a UUID and record an `instance_created` event in the token-budget ledger,
   4. expose `archive/world_repo` by default as the durable cross-lineage Git archive available to every rollout (override with `--archive-repo-dir`),
      using a per-rollout temporary worktree so only committed archive changes are merged back and uncommitted archive edits are discarded,
-  5. copy the selected parent seed workspace into the rollout workspace, keep the current problem outside the rollout workspace, and expose the redacted problem only through `request_problem()`,
+  5. copy the selected parent seed workspace into the rollout workspace, keep problems outside the rollout workspace, and expose a redacted problem only through an exclusive `request_problem()` lease,
   6. register main-loop tools through the worker backend (OpenRouter tool payloads or Codex `DynamicToolSpec` entries), then run the worker with the minimal fixed prompt `Read README.md.`; operating doctrine is expected to come from the inherited parent seed,
      while `runtime.md` contains only generated paths, runtime IDs, budgets, and peer lists,
   7. score answers submitted through `submit_solution(answer)`, grounding correctness against the private stored row and internal task identity,
-  8. after all rollouts for the queued problem finish, advance lineage through the `spawn_child(seed_dir, initial_budget_tokens)` slots claimed by those rollouts,
+  8. after all rollouts in the active batch finish, advance lineage through the `spawn_child(seed_dir, initial_budget_tokens)` slots claimed by those rollouts,
   9. append run metadata to a growing JSONL log and print one-line summary per rollout.
 - Runtime containment:
   - generated state is rooted at `~/Documents/metalanguage_runs` by default;
@@ -90,15 +90,16 @@ take precedence over values in `.env`.
 - Resume behavior:
   - runs automatically resume from existing `--runs-log` entries that match dataset/split/model/seed/generation/config/rollout-count;
   - completed rollouts are skipped, partial tasks continue from missing rollout indices using each task's recorded rollout count;
-  - unsolved problems are kept in `--problem-queue`; correct `submit_solution(answer)` calls remove the solved problem from that queue so resumed runs fetch the next unsolved problem;
+  - unsolved problems are kept in `--problem-queue`; `request_problem()` leases one problem per rollout under a file lock, and correct `submit_solution(answer)` calls mark the solved UID so resumed runs fetch the next unsolved problem;
   - parent lineage candidates are loaded from `--rollout-temp-root/latest_parent_pool.json`, which is written from claimed `spawn_child` slots;
   - disable this with `--no-resume`.
 - Manual iteration:
-  - use `--step` to run exactly one queued problem iteration, choosing the first incomplete problem from the resume log or the next unsolved problem in the queue;
+  - use `--step` to run exactly one rollout batch, choosing the first incomplete batch from the resume log or the next unsolved problem batch in the queue;
   - use `--all-tasks --start-task-index N --max-tasks 1` to queue a specific shuffled dataset problem.
 - Problem queue:
   - `--problem-queue` stores the persistent list of currently unsolved redacted problems and defaults to `logs/problem_queue.json` under `--runtime-root`;
-  - `request_problem()` returns the current redacted problem statement directly to the rollout; no problem statement is written into the rollout workspace.
+  - active leases are tracked in `assigned_problems` by rollout assignment key so concurrent rollouts cannot receive the same problem;
+  - `request_problem()` returns the leased redacted problem statement directly to the rollout; no problem statement is written into the rollout workspace.
 
 ### Codex rollout backend
 

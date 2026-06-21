@@ -11,7 +11,7 @@ Required read order:
 3. `ECONOMY.md`: budget, spawning, seed contract, archive, shared workspace,
    and evolution.
 4. `runtime.md`: generated paths, runtime IDs, budgets, and peer list.
-5. `request_problem()`: the current redacted problem statement.
+5. `request_problem()`: your leased redacted problem statement.
 
 After reading those files, make a quick public-memory pass. Check whether the
 archive has navigation files and whether the shared workspace has active
