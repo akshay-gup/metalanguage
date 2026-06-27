@@ -43,7 +43,7 @@ take precedence over values in `.env`.
 ## Episode runner
 
 - `main_loop.py`: runs RLVR-style episodes end-to-end:
-  1. by default, fill `--problem-queue` with enough unsolved problems from `m-a-p/SuperGPQA` for the active rollout batch (or queue multiple batches with `--all-tasks --max-tasks`; override with `--dataset-name`),
+  1. by default, treat the shuffled `m-a-p/SuperGPQA` split as the problem pool (override with `--dataset-name`) and keep only lease/solved/cursor state in `--problem-queue`,
   1.5. use `moonshotai/kimi-k2.6` as the default OpenRouter model (override with `--model`),
   2. run 8 bootstrap rollout slots by default with `--num-rollouts`, then let later task width be set by spawned child slots,
   3. assign each rollout index to the matching `spawn_child` slot claimed by the prior task's rollouts,
@@ -82,7 +82,7 @@ take precedence over values in `.env`.
   - the claimed slot receives exactly `initial_budget_tokens`; the call fails if the parent rollout does not have that much budget remaining;
   - tool responses are counted when they are sent back as model input on the next model call.
 - Lineage behavior:
-  - the first queued problem can bootstrap without a parent seed;
+  - the first rollout batch can bootstrap without a parent seed;
   - a rollout continues only by successfully calling `spawn_child(seed_dir, initial_budget_tokens)`;
   - solving/submitting alone does not continue lineage; if no rollout claims a child slot, that lineage dies and the loop exits with an error;
   - correct solves can add reward budget for spawning, while unsolved rollouts may still spawn with their lower remaining budget;
@@ -90,16 +90,16 @@ take precedence over values in `.env`.
 - Resume behavior:
   - runs automatically resume from existing `--runs-log` entries that match dataset/split/model/seed/generation/config/rollout-count;
   - completed rollouts are skipped, partial tasks continue from missing rollout indices using each task's recorded rollout count;
-  - unsolved problems are kept in `--problem-queue`; `request_problem()` leases one active problem per rollout under a file lock, and correct `submit_solution(answer)` calls mark the solved UID and release the lease so the same rollout can request another unsolved problem;
+  - `--problem-queue` is pool state, not a materialized backlog: `request_problem()` draws directly from the dataset pool under a file lock, active leases live in `assigned_problems`, and correct `submit_solution(answer)` calls mark the solved UID and release the lease so the same rollout can request another unsolved problem;
   - parent lineage candidates are loaded from `--rollout-temp-root/latest_parent_pool.json`, which is written from claimed `spawn_child` slots;
   - disable this with `--no-resume`.
 - Manual iteration:
-  - use `--step` to run exactly one rollout batch, choosing the first incomplete batch from the resume log or the next unsolved problem batch in the queue;
-  - use `--all-tasks --start-task-index N --max-tasks 1` to queue a specific shuffled dataset problem.
-- Problem queue:
-  - `--problem-queue` stores the persistent list of currently unsolved redacted problems and defaults to `logs/problem_queue.json` under `--runtime-root`;
+  - use `--step` to run exactly one rollout batch, choosing the first incomplete batch from the resume log or the next pool batch index;
+  - use `--all-tasks --start-task-index N --max-tasks 1` to run one rollout batch with pool scanning starting at shuffled dataset index `N`.
+- Problem pool state:
+  - `--problem-queue` stores persistent pool metadata, cursor, active leases, and solved problem IDs, and defaults to `logs/problem_queue.json` under `--runtime-root`;
   - active leases are tracked in `assigned_problems` by rollout assignment key so concurrent rollouts cannot receive the same problem;
-  - `request_problem()` returns the leased redacted problem statement directly to the rollout, and may be called again after a correct `submit_solution(answer)` to lease another problem;
+  - `request_problem()` leases the next available unsolved/unassigned problem from the dataset pool, returns the redacted problem statement directly to the rollout, and may be called again after a correct `submit_solution(answer)` to lease another problem;
   - no problem statement is written into the rollout workspace.
 
 ### Codex rollout backend

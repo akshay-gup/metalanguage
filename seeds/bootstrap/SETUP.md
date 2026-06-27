@@ -38,7 +38,7 @@ section explains what each tool does.
   immediately, credits reward tokens on correct solves, and returns correctness
   plus budget status.
 - `request_problem()`: leases and returns one redacted problem statement from
-  the persistent unsolved-problem queue. After a correct submission releases the
+  the dataset problem pool. After a correct submission releases the
   current lease, calling it again leases another problem.
 - `budget_status()`: returns configured/effective token budget, spent tokens,
   reserved child budget, transfers, and remaining budget.

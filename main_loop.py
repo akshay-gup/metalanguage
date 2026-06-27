@@ -562,6 +562,10 @@ def _make_continuation_context(
     private_problem_path: Path,
     task_markdown: str,
     problem_queue_path: Path,
+    problem_pool_config: dict[str, Any],
+    problem_pool_start_task_index: int,
+    task_store_dir: Path,
+    dataset_cache_dir: Path,
     rollout_token_budget_tokens: int | None,
     solve_reward_token_credit_tokens: int,
     worker_timeout_seconds: int,
@@ -599,6 +603,10 @@ def _make_continuation_context(
         "private_problem_path": str(private_problem_path),
         "task_markdown": task_markdown,
         "problem_queue_path": str(problem_queue_path),
+        "problem_pool_config": problem_pool_config,
+        "problem_pool_start_task_index": problem_pool_start_task_index,
+        "task_store_dir": str(task_store_dir),
+        "dataset_cache_dir": str(dataset_cache_dir),
         "rollout_token_budget_tokens": rollout_token_budget_tokens,
         "solve_reward_token_credit_tokens": solve_reward_token_credit_tokens,
         "worker_timeout_seconds": worker_timeout_seconds,
@@ -787,6 +795,17 @@ def _problem_records_from_state(state: dict[str, Any]) -> list[ProblemRecord]:
     return records
 
 
+def _problem_pool_batch_record(task_index: int, task_store_dir: Path) -> ProblemRecord:
+    task_id = f"problem_pool_batch_{task_index:06d}"
+    return ProblemRecord(
+        task_index=task_index,
+        task_id=task_id,
+        problem_uid=task_id,
+        task_markdown="# Problem Pool Batch\n\nProblems are leased by request_problem().\n",
+        private_problem_path=task_store_dir / f"{task_id}.json",
+    )
+
+
 def _ensure_problem_queue(
     *,
     queue_path: Path,
@@ -828,74 +847,120 @@ def _ensure_problem_queue(
         assigned = {
             str(key): problem
             for key, problem in assigned.items()
-            if key and isinstance(problem, dict)
-        }
-        active_assigned_uids = {
-            str(problem.get("problem_uid"))
-            for problem in assigned.values()
-            if problem.get("problem_uid") and str(problem.get("problem_uid")) not in solved
-        }
-        problems = [
-            problem
-            for problem in state.get("problems", [])
-            if isinstance(problem, dict)
+            if key
+            and isinstance(problem, dict)
             and str(problem.get("problem_uid") or "") not in solved
-        ]
-        queued_uids = {str(problem.get("problem_uid")) for problem in problems if problem.get("problem_uid")}
-        available_problem_count = sum(
-            1
-            for problem in problems
-            if str(problem.get("problem_uid") or "") not in active_assigned_uids
-        )
+        }
         try:
             next_task_index = int(state.get("next_task_index"))
         except (TypeError, ValueError):
             next_task_index = start_task_index
 
-        if available_problem_count < target_count:
-            for task_index, task in iter_tasks(
-                dataset_name=dataset_name,
-                split=split,
-                config_name=config_name,
-                seed=seed,
-                question_key=question_key,
-                answer_key=answer_key,
-                id_key=id_key,
-                start_task_index=next_task_index,
-                max_tasks=None,
-                dataset_cache_dir=dataset_cache_dir,
-            ):
-                next_task_index = task_index + 1
-                problem = _problem_record_from_task(
-                    dataset_name=dataset_name,
-                    split=split,
-                    config_name=config_name,
-                    task_index=task_index,
-                    task=task,
-                    task_store_dir=task_store_dir,
-                )
-                problem_uid = str(problem["problem_uid"])
-                if problem_uid in solved or problem_uid in queued_uids or problem_uid in active_assigned_uids:
-                    continue
-                problems.append(problem)
-                queued_uids.add(problem_uid)
-                available_problem_count += 1
-                if available_problem_count >= target_count:
-                    break
-
         next_state = {
             "config": config,
-            "next_task_index": next_task_index,
-            "problems": problems,
+            "next_task_index": max(next_task_index, start_task_index),
+            "problems": [],
             "assigned_problems": assigned,
             "solved_problem_uids": sorted(solved),
         }
         _write_json_file_atomic(queue_path, next_state)
         return [
-            record
-            for record in _problem_records_from_state(next_state)
-            if record.problem_uid not in active_assigned_uids
+            _problem_pool_batch_record(start_task_index + offset, task_store_dir)
+            for offset in range(target_count)
         ]
+
+
+def _next_pool_problem(
+    *,
+    state: dict[str, Any],
+    context: dict[str, Any],
+    solved_uids: set[str],
+    active_assigned_uids: set[str],
+) -> tuple[dict[str, Any] | None, int]:
+    config = state.get("config")
+    if not isinstance(config, dict):
+        config = context.get("problem_pool_config")
+    if not isinstance(config, dict):
+        try:
+            return None, int(context.get("problem_pool_start_task_index") or 0)
+        except (TypeError, ValueError):
+            return None, 0
+
+    dataset_name = str(config.get("dataset_name") or "")
+    split = str(config.get("split") or "train")
+    config_name = config.get("config_name")
+    config_name = str(config_name) if config_name is not None else None
+    question_key = config.get("question_key")
+    question_key = str(question_key) if question_key is not None else None
+    answer_key = config.get("answer_key")
+    answer_key = str(answer_key) if answer_key is not None else None
+    id_key = config.get("id_key")
+    id_key = str(id_key) if id_key is not None else None
+    try:
+        seed = int(config.get("seed"))
+    except (TypeError, ValueError):
+        seed = int(context.get("seed") or 42)
+    try:
+        pool_start = int(context.get("problem_pool_start_task_index") or 0)
+    except (TypeError, ValueError):
+        pool_start = 0
+    try:
+        scan_start = max(int(state.get("next_task_index")), pool_start)
+    except (TypeError, ValueError):
+        scan_start = pool_start
+    if not dataset_name:
+        return None, scan_start
+
+    raw_task_store_dir = context.get("task_store_dir")
+    if raw_task_store_dir is None:
+        private_problem_path = context.get("private_problem_path")
+        if private_problem_path:
+            raw_task_store_dir = str(Path(str(private_problem_path)).parent)
+    if raw_task_store_dir is None:
+        return None, scan_start
+    raw_dataset_cache_dir = context.get("dataset_cache_dir") or os.environ.get("HF_DATASETS_CACHE")
+    if raw_dataset_cache_dir is None:
+        return None, scan_start
+    task_store_dir = Path(str(raw_task_store_dir))
+    dataset_cache_dir = Path(str(raw_dataset_cache_dir))
+
+    def scan(start_task_index: int, stop_before: int | None = None) -> tuple[dict[str, Any] | None, int]:
+        next_task_index = start_task_index
+        for task_index, task in iter_tasks(
+            dataset_name=dataset_name,
+            split=split,
+            config_name=config_name,
+            seed=seed,
+            question_key=question_key,
+            answer_key=answer_key,
+            id_key=id_key,
+            start_task_index=start_task_index,
+            max_tasks=None,
+            dataset_cache_dir=dataset_cache_dir,
+        ):
+            if stop_before is not None and task_index >= stop_before:
+                break
+            next_task_index = task_index + 1
+            problem = _problem_record_from_task(
+                dataset_name=dataset_name,
+                split=split,
+                config_name=config_name,
+                task_index=task_index,
+                task=task,
+                task_store_dir=task_store_dir,
+            )
+            problem_uid = str(problem["problem_uid"])
+            if problem_uid in solved_uids or problem_uid in active_assigned_uids:
+                continue
+            return problem, next_task_index
+        return None, next_task_index
+
+    problem, next_task_index = scan(scan_start)
+    if problem is not None:
+        return problem, next_task_index
+    if scan_start > pool_start:
+        return scan(pool_start, scan_start)
+    return None, next_task_index
 
 
 def _assigned_problem_from_queue(queue_path: Path, assignment_key: str) -> ProblemRecord | None:
@@ -1067,12 +1132,21 @@ def _request_problem(
     lock_path = queue_path.with_suffix(queue_path.suffix + ".lock")
     with lock_path.open("w", encoding="utf-8") as lock_fh:
         fcntl.flock(lock_fh, fcntl.LOCK_EX)
-        state = _read_json_file(queue_path, {})
-        if not isinstance(state, dict):
-            state = {}
-        problems = state.get("problems")
-        if not isinstance(problems, list):
-            problems = []
+        config = context.get("problem_pool_config")
+        try:
+            pool_start = int(context.get("problem_pool_start_task_index") or 0)
+        except (TypeError, ValueError):
+            pool_start = 0
+        if isinstance(config, dict):
+            state = _load_problem_queue_state(
+                queue_path,
+                config=config,
+                start_task_index=pool_start,
+            )
+        else:
+            state = _read_json_file(queue_path, {})
+            if not isinstance(state, dict):
+                state = {}
         assigned = state.get("assigned_problems")
         if not isinstance(assigned, dict):
             assigned = {}
@@ -1084,7 +1158,9 @@ def _request_problem(
         assigned = {
             str(key): problem
             for key, problem in assigned.items()
-            if key and isinstance(problem, dict)
+            if key
+            and isinstance(problem, dict)
+            and str(problem.get("problem_uid") or "") not in solved_uids
         }
         problem = assigned.get(assignment_key)
         active_assigned_uids = {
@@ -1092,30 +1168,24 @@ def _request_problem(
             for item in assigned.values()
             if item.get("problem_uid") and str(item.get("problem_uid")) not in solved_uids
         }
-        filtered_problems = [
-            candidate
-            for candidate in problems
-            if isinstance(candidate, dict)
-            and str(candidate.get("problem_uid") or "")
-            and str(candidate.get("problem_uid") or "") not in solved_uids
-        ]
         if not isinstance(problem, dict):
             problem = None
-            for candidate in filtered_problems:
-                candidate_uid = str(candidate.get("problem_uid") or "")
-                if candidate_uid in active_assigned_uids:
-                    continue
-                if problem is None:
-                    problem = candidate
-                    assigned[assignment_key] = candidate
-                    active_assigned_uids.add(candidate_uid)
-                    break
-            state["problems"] = filtered_problems
+            problem, next_task_index = _next_pool_problem(
+                state=state,
+                context=context,
+                solved_uids=solved_uids,
+                active_assigned_uids=active_assigned_uids,
+            )
+            if isinstance(problem, dict):
+                assigned[assignment_key] = problem
+                active_assigned_uids.add(str(problem.get("problem_uid") or ""))
+                state["next_task_index"] = next_task_index
+            state["problems"] = []
             state["assigned_problems"] = assigned
             state["solved_problem_uids"] = sorted(solved_uids)
             _write_json_file_atomic(queue_path, state)
         else:
-            state["problems"] = filtered_problems
+            state["problems"] = []
             state["assigned_problems"] = assigned
             state["solved_problem_uids"] = sorted(solved_uids)
             _write_json_file_atomic(queue_path, state)
@@ -1124,7 +1194,7 @@ def _request_problem(
     if record is None:
         return {
             "success": False,
-            "error": "no unassigned problems are available in the problem queue",
+            "error": "no unassigned problems are available in the problem pool",
         }
     return {
         "success": True,
@@ -2688,7 +2758,7 @@ def parse_args() -> argparse.Namespace:
         "--problem-queue",
         default="logs/problem_queue.json",
         help=(
-            "Persistent queue of unsolved redacted problems. Resolved under "
+            "Persistent problem-pool state for leases, solved IDs, and cursor. Resolved under "
             "--runtime-root unless absolute."
         ),
     )
@@ -2900,8 +2970,16 @@ def main() -> None:
     }
     problem_start_index = _next_step_task_index() if args.step else args.start_task_index
     problem_batch_count = args.max_tasks if args.all_tasks and args.max_tasks is not None else 1
-    anticipated_rollout_count = args.num_rollouts if not parent_pool else len(parent_pool)
-    problem_queue_target_count = problem_batch_count * max(1, anticipated_rollout_count)
+    problem_queue_target_count = problem_batch_count
+    problem_pool_config = _problem_queue_config(
+        dataset_name=args.dataset_name,
+        split=args.split,
+        config_name=args.config_name,
+        seed=args.seed,
+        question_key=args.question_key,
+        answer_key=args.answer_key,
+        id_key=args.id_key,
+    )
     problem_records = _ensure_problem_queue(
         queue_path=problem_queue_path,
         target_count=problem_queue_target_count,
@@ -2919,7 +2997,7 @@ def main() -> None:
     )
     scheduled_problem_records = problem_records[:problem_batch_count]
     if len(scheduled_problem_records) < problem_batch_count:
-        raise RuntimeError("No unsolved problems are available in the problem queue.")
+        raise RuntimeError("No problem pool batches are available.")
 
     for problem in scheduled_problem_records:
         task_index = problem.task_index
@@ -3108,6 +3186,10 @@ def main() -> None:
                 private_problem_path=private_problem_path,
                 task_markdown=task_markdown,
                 problem_queue_path=problem_queue_path,
+                problem_pool_config=problem_pool_config,
+                problem_pool_start_task_index=args.start_task_index,
+                task_store_dir=task_store_dir,
+                dataset_cache_dir=dataset_cache_dir,
                 rollout_token_budget_tokens=rollout_budget_tokens,
                 solve_reward_token_credit_tokens=args.solve_reward_token_credit_tokens,
                 worker_timeout_seconds=args.worker_timeout_seconds,
