@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -57,8 +58,13 @@ def redact_solution_fields(row: dict[str, Any]) -> dict[str, Any]:
 
 def write_private_problem_record(*, task_store_dir: Path, problem_uid: str, row: dict[str, Any]) -> Path:
     task_store_dir.mkdir(parents=True, exist_ok=True)
+    task_store_dir.chmod(0o700)
     path = task_store_dir / f"{_sanitize_for_path(problem_uid)}.json"
-    path.write_text(json.dumps(row, ensure_ascii=False, indent=2), encoding="utf-8")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(row, fh, ensure_ascii=False, indent=2)
+        fh.write("\n")
+    path.chmod(0o600)
     return path
 
 
