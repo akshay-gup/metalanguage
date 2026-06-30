@@ -214,40 +214,27 @@ budget_status_tool: dict[str, Any] = {
 }
 
 
-request_problem_tool: dict[str, Any] = {
-    "type": "function",
-    "name": "request_problem",
-    "description": (
-        "Lease the next redacted problem statement from the supervisor. "
-        "After a correct submit_solution call, this can be called again. "
-        "The response contains the problem text/options, but not the solution."
-    ),
-    "strict": None,
-    "parameters": {
-        "type": "object",
-        "properties": {},
-        "required": [],
-    },
-}
-
-
 submit_solution_tool: dict[str, Any] = {
     "type": "function",
     "name": "submit_solution",
     "description": (
-        "Submit the active leased problem's answer for immediate scoring. The response "
+        "Submit a problem uuid from the shared workspace problem pool and its answer for immediate scoring. The response "
         "returns correct/incorrect, reward, credited tokens, and updated budget."
     ),
     "strict": None,
     "parameters": {
         "type": "object",
         "properties": {
+            "uuid": {
+                "type": "string",
+                "description": "Problem uuid copied from shared_workspace/problem_pool.json or shared_workspace/problem_pool.md.",
+            },
             "answer": {
                 "type": "string",
-                "description": "Answer to score against the active leased problem.",
+                "description": "Answer to score against the selected problem uuid.",
             },
         },
-        "required": ["answer"],
+        "required": ["uuid", "answer"],
     },
 }
 

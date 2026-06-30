@@ -682,39 +682,26 @@ fn metalanguage_dynamic_tools() -> Vec<DynamicToolSpec> {
         },
         DynamicToolSpec {
             namespace: None,
-            name: "request_problem".to_string(),
-            description: concat!(
-                "Lease the next redacted problem statement from the supervisor. ",
-                "After a correct submit_solution call, this can be called again. ",
-                "The response contains the problem text/options, but not the solution."
-            )
-            .to_string(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {},
-                "required": [],
-                "additionalProperties": false,
-            }),
-            defer_loading: false,
-        },
-        DynamicToolSpec {
-            namespace: None,
             name: "submit_solution".to_string(),
             description: concat!(
-                "Submit the active leased problem's answer for immediate scoring. The ",
-                "response returns correct/incorrect, reward, credited tokens, ",
-                "and updated budget status."
+                "Submit a problem uuid from the shared workspace problem pool and its ",
+                "answer for immediate scoring. The response returns correct/incorrect, ",
+                "reward, credited tokens, and updated budget status."
             )
             .to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
+                    "uuid": {
+                        "type": "string",
+                        "description": "Problem uuid copied from shared_workspace/problem_pool.json or shared_workspace/problem_pool.md."
+                    },
                     "answer": {
                         "type": "string",
-                        "description": "Answer to score against the active leased problem."
+                        "description": "Answer to score against the selected problem uuid."
                     }
                 },
-                "required": ["answer"],
+                "required": ["uuid", "answer"],
                 "additionalProperties": false,
             }),
             defer_loading: false,
@@ -791,10 +778,6 @@ fn handle_metalanguage_dynamic_tool(
             budget_state,
             spawn_child_handler_command,
         ),
-        "request_problem" => handle_request_problem_tool(
-            request,
-            spawn_child_handler_command,
-        ),
         "submit_solution" => handle_submit_solution_tool(
             request,
             budget_state,
@@ -817,40 +800,6 @@ fn handle_metalanguage_dynamic_tool(
             json!({"error": "unsupported dynamic tool", "tool": other}),
         ),
     }
-}
-
-fn handle_request_problem_tool(
-    request: &DynamicToolCallRequest,
-    spawn_child_handler_command: Option<&[String]>,
-) -> DynamicToolResponse {
-    let Some(command) = spawn_child_handler_command else {
-        return dynamic_tool_json_response(
-            false,
-            json!({"error": "request_problem handler command is not configured"}),
-        );
-    };
-    if command.is_empty() {
-        return dynamic_tool_json_response(
-            false,
-            json!({"error": "request_problem handler command is empty"}),
-        );
-    }
-
-    let handler_payload = json!({
-        "tool": request.tool,
-        "namespace": request.namespace,
-        "call_id": request.call_id,
-        "arguments": request.arguments,
-    });
-    let output = match run_spawn_child_handler(command, &handler_payload) {
-        Ok(value) => value,
-        Err(message) => return dynamic_tool_json_response(false, json!({"error": message})),
-    };
-    let success = output
-        .get("success")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    dynamic_tool_json_response(success, output)
 }
 
 fn handle_submit_solution_tool(
@@ -1079,6 +1028,13 @@ fn parse_submit_solution_args(arguments: &Value) -> Result<(), String> {
         .ok_or_else(|| "submit_solution requires string answer".to_string())?;
     if answer.trim().is_empty() {
         return Err("answer must be non-empty".to_string());
+    }
+    let uuid = args
+        .get("uuid")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "submit_solution requires string uuid".to_string())?;
+    if uuid.trim().is_empty() {
+        return Err("uuid must be non-empty".to_string());
     }
     Ok(())
 }
