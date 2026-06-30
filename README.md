@@ -43,7 +43,7 @@ take precedence over values in `.env`.
 ## Episode runner
 
 - `main_loop.py`: runs RLVR-style episodes end-to-end:
-  1. by default, treat the shuffled `m-a-p/SuperGPQA` split as the problem pool (override with `--dataset-name`) and keep only lease/solved/cursor state in `--problem-queue`,
+  1. by default, treat the shuffled `m-a-p/SuperGPQA` split as the problem pool (override with `--dataset-name`) and keep solved/cursor state in `--problem-queue`,
   1.5. use `moonshotai/kimi-k2.6` as the default OpenRouter model (override with `--model`),
   2. run 8 bootstrap rollout slots by default with `--num-rollouts`, then let later task width be set by spawned child slots,
   3. assign each rollout index to the matching `spawn_child` slot claimed by the prior task's rollouts,
@@ -51,10 +51,10 @@ take precedence over values in `.env`.
   3.6. assign every rollout instance a UUID and record an `instance_created` event in the token-budget ledger,
   4. expose `archive/world_repo` by default as the durable cross-lineage Git archive available to every rollout (override with `--archive-repo-dir`),
      using a per-rollout temporary worktree so only committed archive changes are merged back and uncommitted archive edits are discarded,
-  5. copy the selected parent seed workspace into the rollout workspace, keep problems outside the rollout workspace, and expose redacted problems through exclusive `request_problem()` leases,
+  5. copy the selected parent seed workspace into the rollout workspace and write `shared_workspace/problem_pool.json` plus `shared_workspace/problem_pool.md`, one shared redacted pool copy of all currently unsolved problems keyed by uuid for the whole rollout batch,
   6. register main-loop tools through the worker backend (OpenRouter tool payloads or Codex `DynamicToolSpec` entries), then run the worker with the minimal fixed prompt `Read README.md.`; operating doctrine is expected to come from the inherited parent seed,
      while `runtime.md` contains only generated paths, runtime IDs, budgets, and peer lists,
-  7. score answers submitted through `submit_solution(answer)`, grounding correctness against the private stored row and internal task identity,
+  7. score answers submitted through `submit_solution(uuid, answer)`, grounding correctness against the private stored row selected by uuid,
   8. after all rollouts in the active batch finish, advance lineage through the `spawn_child(seed_dir, initial_budget_tokens)` slots claimed by those rollouts,
   9. append run metadata to a growing JSONL log and print one-line summary per rollout.
 - Runtime containment:
@@ -72,11 +72,11 @@ take precedence over values in `.env`.
   - a rebuildable projection cache is written next to the ledger and is used for live `budget_status`, transfer, and spawn budget checks;
   - every rollout receives an internal `instance_uuid` recorded in progress logs, run logs, and the ledger;
   - provider-reported model usage is recorded as `token_usage` events after OpenRouter calls and Codex usage events;
-  - `submit_solution(answer)` scores immediately, returns `correct`, `reward`, credited tokens, and updated budget status, and records `solution_scored` events;
-  - correct `submit_solution` calls append one `solve_reward_credit` budget event per distinct solved problem for that rollout, defaulting to 300000 tokens via `--solve-reward-token-credit-tokens`;
+  - `submit_solution(uuid, answer)` scores immediately, returns `correct`, `reward`, credited tokens, and updated budget status, and records `solution_scored` events;
+  - correct `submit_solution` calls append one `solve_reward_credit` budget event per rollout/problem pair, defaulting to 300000 tokens via `--solve-reward-token-credit-tokens`; another rollout can also earn reward for the same problem during the same iteration;
   - there is no answer-file scoring fallback; a rollout that does not call `submit_solution` receives no solution score or solve reward credit;
   - `--rollout-token-budget-tokens` sets each initial rollout's starting budget, defaulting to 300000 tokens, and stops a rollout when reported usage exhausts it;
-  - rollouts can call `request_problem()`, `submit_solution(answer)`, `budget_status()`, `transfer_tokens(target_instance_uuid, amount_tokens)`, and `spawn_child(seed_dir, initial_budget_tokens)` as main-loop tools;
+  - rollouts can call `submit_solution(uuid, answer)`, `budget_status()`, `transfer_tokens(target_instance_uuid, amount_tokens)`, and `spawn_child(seed_dir, initial_budget_tokens)` as main-loop tools;
   - `transfer_tokens` moves budget from one live same-task rollout to another by instance UUID; the sender's remaining budget decreases and the target's effective budget increases;
   - `spawn_child` copies a complete workspace-local seed directory into the next claimed next-iteration rollout slot;
   - the claimed slot receives exactly `initial_budget_tokens`; the call fails if the parent rollout does not have that much budget remaining;
@@ -90,17 +90,18 @@ take precedence over values in `.env`.
 - Resume behavior:
   - runs automatically resume from existing `--runs-log` entries that match dataset/split/model/seed/generation/config/rollout-count;
   - completed rollouts are skipped, partial tasks continue from missing rollout indices using each task's recorded rollout count;
-  - `--problem-queue` is pool state, not a materialized backlog: `request_problem()` draws directly from the dataset pool under a file lock, active leases live in `assigned_problems`, and correct `submit_solution(answer)` calls mark the solved UID and release the lease so the same rollout can request another unsolved problem;
+  - `--problem-queue` is pool state, not the workspace copy: each task batch materializes all currently unsolved redacted problems in the shared workspace, and solved UIDs are marked only after the batch finishes so duplicate same-iteration solves can still receive reward;
   - parent lineage candidates are loaded from `--rollout-temp-root/latest_parent_pool.json`, which is written from claimed `spawn_child` slots;
   - disable this with `--no-resume`.
 - Manual iteration:
   - use `--step` to run exactly one rollout batch, choosing the first incomplete batch from the resume log or the next pool batch index;
   - use `--all-tasks --start-task-index N --max-tasks 1` to run one rollout batch with pool scanning starting at shuffled dataset index `N`.
 - Problem pool state:
-  - `--problem-queue` stores persistent pool metadata, cursor, active leases, and solved problem IDs, and defaults to `logs/problem_queue.json` under `--runtime-root`;
-  - active leases are tracked in `assigned_problems` by rollout assignment key so concurrent rollouts cannot receive the same problem;
-  - `request_problem()` leases the next available unsolved/unassigned problem from the dataset pool, returns the redacted problem statement directly to the rollout, and may be called again after a correct `submit_solution(answer)` to lease another problem;
-  - no problem statement is written into the rollout workspace.
+  - `--problem-queue` stores persistent pool metadata, cursor, and solved problem IDs, and defaults to `logs/problem_queue.json` under `--runtime-root`;
+  - all currently unsolved redacted problems are written to `shared_workspace/problem_pool.json` and `shared_workspace/problem_pool.md`;
+  - rollouts select a uuid directly from those shared pool files; there is no problem request or lease tool;
+  - answers are scored only when the submitted uuid exists in that iteration's shared pool copy;
+  - after each rollout batch, any problem solved by at least one rollout is removed from future pool copies.
 
 ### Codex rollout backend
 

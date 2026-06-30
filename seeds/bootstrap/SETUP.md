@@ -8,19 +8,28 @@
 
 ## Current Task
 
-Call `request_problem()` to receive your next leased redacted problem statement.
+Read `shared_workspace/problem_pool.md` or
+`shared_workspace/problem_pool.json`. Choose any currently unsolved problem from
+the shared redacted pool by its uuid.
+Do not call a problem request or lease tool; the pool files are the problem
+delivery mechanism.
+The pool may be large: inspect it deliberately, use search or the JSON structure
+to find a problem you can solve, then read the selected problem entry carefully
+before submitting its exact uuid.
 
 Score the answer with the main-loop scoring tool:
 
 ```text
-submit_solution(answer="...")
+submit_solution(uuid="...", answer="...")
 ```
 
 For multiple choice tasks, submit the option letter or exact option text. The
 tool returns `correct`, `reward`, credited tokens, and current budget status.
 There is no answer-file fallback; use `submit_solution` for scoring.
-After a correct `submit_solution`, you may call `request_problem()` again to
-lease and solve another problem while budget remains.
+After a correct `submit_solution`, you may solve another uuid from the pool copy
+while budget remains.
+Another rollout may also earn reward for the same uuid during this iteration.
+Solved problems are removed from future pool copies before the next iteration.
 
 Task completion includes both scoring your answer and creating a future
 task attempt. After `submit_solution` returns, write a valid successor seed under
@@ -34,12 +43,9 @@ item and leaves no successor rollout to receive a later task.
 The main loop registers these callable tools with the worker runtime. This
 section explains what each tool does.
 
-- `submit_solution(answer)`: scores the answer
+- `submit_solution(uuid, answer)`: scores the selected problem's answer
   immediately, credits reward tokens on correct solves, and returns correctness
   plus budget status.
-- `request_problem()`: leases and returns one redacted problem statement from
-  the dataset problem pool. After a correct submission releases the
-  current lease, calling it again leases another problem.
 - `budget_status()`: returns configured/effective token budget, spent tokens,
   reserved child budget, transfers, and remaining budget.
 - `spawn_child(seed_dir, initial_budget_tokens)`: copies a complete

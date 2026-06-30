@@ -7,9 +7,9 @@ attempts. Use `budget_status()` to inspect configured budget, spent tokens,
 transfers, reserved child budget, and remaining budget.
 
 Lineage continues only through a successful `spawn_child(seed_dir,
-initial_budget_tokens)` call. `submit_solution(answer)` can add reward budget on
-correct solves, but submission by itself does not create a successor. An
-unsolved rollout can still spawn with its lower remaining budget.
+initial_budget_tokens)` call. `submit_solution(uuid, answer)` can add reward
+budget on correct solves, but submission by itself does not create a successor.
+An unsolved rollout can still spawn with its lower remaining budget.
 
 Treat continuation as part of task completion, not as a separate epilogue. Each
 successful child slot becomes a later rollout assigned another task. After
@@ -42,11 +42,11 @@ the packet shape and read order:
 2. `SETUP.md`
 3. `ECONOMY.md`
 4. `runtime.md`
-5. `request_problem()`
+5. `shared_workspace/problem_pool.md` or `shared_workspace/problem_pool.json`
 
 Only the first three files are durable seed files. `runtime.md` is generated
-fresh by the harness for each rollout, and leased problems are delivered by
-`request_problem()`.
+fresh by the harness for each rollout, and the problem pool copy is generated
+fresh in the shared workspace for each rollout batch.
 
 Do not place generated runtime files, problem statements, snapshots,
 orchestrator metadata, or hidden supervisor state into the successor seed.
