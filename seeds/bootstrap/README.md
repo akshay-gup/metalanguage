@@ -16,4 +16,4 @@ Required read order:
 
 After reading those files, make a quick public-memory pass. Check whether the
 archive has navigation files and whether the shared workspace has active
-signals. Do this before deep solo work on any nontrivial task.
+worker communication. Do this before deep solo work on any nontrivial task.

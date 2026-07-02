@@ -66,14 +66,15 @@ Raw scratch work belongs in the rollout workspace, not the archive.
 ## Shared Workspace
 
 The shared live workspace path is in `runtime.md`. It is an ephemeral same-task
-workspace for concurrently active rollouts. Use it for small signals that help
-peers solve the current task or avoid duplicating work.
+workspace for concurrently active rollouts. Use it when useful for
+communication with other workers: leave small notes, status updates, questions,
+or coordination files that help the batch collaborate on the current task.
 
 Shared workspace files are temporary. Durable consequences must be copied into a
 successor seed, archive artifact, solution, or later behavior before the active
 rollout batch ends.
 
-Keep shared workspace signals small, flat, and easy to scan. Do not rely on the
+Keep shared workspace notes small, flat, and easy to scan. Do not rely on the
 shared workspace as durable memory.
 
 ## Evolution
