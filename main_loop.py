@@ -180,6 +180,31 @@ def _task_from_row(
     return Task(task_id=str(tid), question=str(q), answer=str(a), raw=row)
 
 
+def _normalize_difficulty_filter(raw: str | None) -> tuple[str, ...] | None:
+    if raw is None:
+        return None
+    values = tuple(
+        value.strip().lower()
+        for value in raw.split(",")
+        if value.strip()
+    )
+    if not values or values in {("all",), ("any",)}:
+        return None
+    invalid = [value for value in values if value in {"all", "any"}]
+    if invalid:
+        raise ValueError("--difficulty-filter cannot mix all/any with specific difficulty values.")
+    return values
+
+
+def _row_matches_difficulty_filter(row: dict[str, Any], difficulty_filter: tuple[str, ...] | None) -> bool:
+    if difficulty_filter is None:
+        return True
+    raw_difficulty = row.get("difficulty")
+    if raw_difficulty is None:
+        return False
+    return str(raw_difficulty).strip().lower() in difficulty_filter
+
+
 def sample_task(
     *,
     dataset_name: str,
@@ -189,6 +214,7 @@ def sample_task(
     question_key: str | None,
     answer_key: str | None,
     id_key: str | None,
+    difficulty_filter: tuple[str, ...] | None = None,
     dataset_cache_dir: Path | None = None,
 ) -> Task:
     load_kwargs: dict[str, Any] = {}
@@ -205,8 +231,12 @@ def sample_task(
         **load_kwargs,
     )
 
-    batch = next(iter(loader))
-    row = batch[0]
+    for batch in loader:
+        row = batch[0]
+        if _row_matches_difficulty_filter(row, difficulty_filter):
+            break
+    else:
+        raise RuntimeError("No dataset rows match the requested difficulty filter.")
 
     return _task_from_row(
         row=row,
@@ -225,6 +255,7 @@ def iter_tasks(
     question_key: str | None,
     answer_key: str | None,
     id_key: str | None,
+    difficulty_filter: tuple[str, ...] | None = None,
     start_task_index: int = 0,
     max_tasks: int | None = None,
     dataset_cache_dir: Path | None = None,
@@ -250,6 +281,8 @@ def iter_tasks(
         if max_tasks is not None and yielded >= max_tasks:
             break
         row = batch[0]
+        if not _row_matches_difficulty_filter(row, difficulty_filter):
+            continue
         yielded += 1
         yield index, _task_from_row(
             row=row,
@@ -661,6 +694,7 @@ def _problem_queue_config(
     question_key: str | None,
     answer_key: str | None,
     id_key: str | None,
+    difficulty_filter: tuple[str, ...] | None,
 ) -> dict[str, Any]:
     return {
         "dataset_name": dataset_name,
@@ -670,6 +704,7 @@ def _problem_queue_config(
         "question_key": question_key,
         "answer_key": answer_key,
         "id_key": id_key,
+        "difficulty_filter": list(difficulty_filter) if difficulty_filter is not None else None,
     }
 
 
@@ -880,6 +915,7 @@ def _ensure_problem_queue(
     question_key: str | None,
     answer_key: str | None,
     id_key: str | None,
+    difficulty_filter: tuple[str, ...] | None,
     start_task_index: int,
     task_store_dir: Path,
     dataset_cache_dir: Path,
@@ -893,6 +929,7 @@ def _ensure_problem_queue(
         question_key=question_key,
         answer_key=answer_key,
         id_key=id_key,
+        difficulty_filter=difficulty_filter,
     )
     queue_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = queue_path.with_suffix(queue_path.suffix + ".lock")
@@ -943,6 +980,7 @@ def _materialize_problem_pool_snapshot(
     question_key: str | None,
     answer_key: str | None,
     id_key: str | None,
+    difficulty_filter: tuple[str, ...] | None,
     start_task_index: int,
     task_store_dir: Path,
     dataset_cache_dir: Path,
@@ -956,6 +994,7 @@ def _materialize_problem_pool_snapshot(
         question_key=question_key,
         answer_key=answer_key,
         id_key=id_key,
+        difficulty_filter=difficulty_filter,
     )
     queue_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = queue_path.with_suffix(queue_path.suffix + ".lock")
@@ -986,6 +1025,7 @@ def _materialize_problem_pool_snapshot(
                 question_key=question_key,
                 answer_key=answer_key,
                 id_key=id_key,
+                difficulty_filter=difficulty_filter,
                 start_task_index=start,
                 max_tasks=None,
                 dataset_cache_dir=dataset_cache_dir,
@@ -2658,6 +2698,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--answer-key", default=None)
     parser.add_argument("--id-key", default=None)
     parser.add_argument(
+        "--difficulty-filter",
+        default="hard",
+        help=(
+            "Comma-separated dataset difficulty values to include in the problem pool. "
+            "Use 'all' to disable filtering. Defaults to hard."
+        ),
+    )
+    parser.add_argument(
         "--all-tasks",
         action="store_true",
         help="Process all tasks in the split instead of one sampled task.",
@@ -2801,6 +2849,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    args.difficulty_filter = _normalize_difficulty_filter(args.difficulty_filter)
+    difficulty_filter_payload = list(args.difficulty_filter) if args.difficulty_filter is not None else None
     if args.num_rollouts <= 0:
         raise ValueError("--num-rollouts must be > 0")
     if args.worker_timeout_seconds <= 0:
@@ -2872,6 +2922,7 @@ def main() -> None:
             and rec.get("generation") == args.generation
             and rec.get("bootstrap_rollout_count", rec.get("num_rollouts")) == args.num_rollouts
             and rec.get("config_name") == args.config_name
+            and rec.get("difficulty_filter") == difficulty_filter_payload
             and rec.get("worker_backend", "openrouter") == args.worker_backend
             and rec.get(
                 "configured_rollout_token_budget_tokens",
@@ -2902,7 +2953,7 @@ def main() -> None:
         if existing is None:
             per_task[rollout_idx] = rec
 
-    if not args.no_resume:
+    if not args.no_resume and existing_records:
         parent_pool = load_parent_pool(parent_pool_path)
 
     def _rollout_username(rollout_index: int) -> str:
@@ -2951,6 +3002,7 @@ def main() -> None:
         question_key=args.question_key,
         answer_key=args.answer_key,
         id_key=args.id_key,
+        difficulty_filter=args.difficulty_filter,
     )
     problem_records = _ensure_problem_queue(
         queue_path=problem_queue_path,
@@ -2962,6 +3014,7 @@ def main() -> None:
         question_key=args.question_key,
         answer_key=args.answer_key,
         id_key=args.id_key,
+        difficulty_filter=args.difficulty_filter,
         start_task_index=problem_start_index,
         task_store_dir=task_store_dir,
         dataset_cache_dir=dataset_cache_dir,
@@ -3031,6 +3084,7 @@ def main() -> None:
             question_key=args.question_key,
             answer_key=args.answer_key,
             id_key=args.id_key,
+            difficulty_filter=args.difficulty_filter,
             start_task_index=args.start_task_index,
             task_store_dir=task_store_dir,
             dataset_cache_dir=dataset_cache_dir,
@@ -3491,6 +3545,7 @@ def main() -> None:
                 "progress_log": str(progress_log_path),
                 "dataset_name": args.dataset_name,
                 "split": args.split,
+                "difficulty_filter": difficulty_filter_payload,
                 "model": args.model,
                 "num_rollouts": args.num_rollouts,
                 "bootstrap_rollout_count": args.num_rollouts,
@@ -3606,6 +3661,7 @@ def main() -> None:
                                     "progress_log": str(progress_log_path),
                                     "dataset_name": args.dataset_name,
                                     "split": args.split,
+                                    "difficulty_filter": difficulty_filter_payload,
                                     "model": args.model,
                                     "num_rollouts": args.num_rollouts,
                                     "bootstrap_rollout_count": args.num_rollouts,

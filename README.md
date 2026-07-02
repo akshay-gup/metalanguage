@@ -43,7 +43,7 @@ take precedence over values in `.env`.
 ## Episode runner
 
 - `main_loop.py`: runs RLVR-style episodes end-to-end:
-  1. by default, treat the shuffled `m-a-p/SuperGPQA` split as the problem pool (override with `--dataset-name`) and keep solved/cursor state in `--problem-queue`,
+  1. by default, treat hard rows from the shuffled `m-a-p/SuperGPQA` split as the problem pool (override with `--dataset-name` and `--difficulty-filter`) and keep solved/cursor state in `--problem-queue`,
   1.5. use `moonshotai/kimi-k2.6` as the default OpenRouter model (override with `--model`),
   2. run 8 bootstrap rollout slots by default with `--num-rollouts`, then let later task width be set by spawned child slots,
   3. assign each rollout index to the matching `spawn_child` slot claimed by the prior task's rollouts,
@@ -98,6 +98,7 @@ take precedence over values in `.env`.
   - use `--all-tasks --start-task-index N --max-tasks 1` to run one rollout batch with pool scanning starting at shuffled dataset index `N`.
 - Problem pool state:
   - `--problem-queue` stores persistent pool metadata, cursor, and solved problem IDs, and defaults to `logs/problem_queue.json` under `--runtime-root`;
+  - `--difficulty-filter` selects which dataset difficulty values can enter the pool, defaulting to `hard`; pass `--difficulty-filter all` to include every difficulty or a comma-separated list such as `easy,middle`;
   - all currently unsolved redacted problems are written to `shared_workspace/problem_pool.json` and `shared_workspace/problem_pool.md`;
   - rollouts select a uuid directly from those shared pool files; there is no problem request or lease tool;
   - answers are scored only when the submitted uuid exists in that iteration's shared pool copy;
