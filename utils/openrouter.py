@@ -268,22 +268,27 @@ spawn_child_tool: dict[str, Any] = {
     "type": "function",
     "name": "spawn_child",
     "description": (
-        "Claim a next-iteration rollout slot by copying seed_dir into that "
-        "slot and reserving exactly initial_budget_tokens from this rollout."
+        "Claim a next-iteration rollout slot by passing the child's inherited "
+        "prompt, optionally copying a workspace-local directory into the child "
+        "workspace, and reserving exactly initial_budget_tokens from this rollout."
     ),
     "strict": None,
     "parameters": {
         "type": "object",
         "properties": {
-            "seed_dir": {
+            "prompt": {
                 "type": "string",
-                "description": "Workspace-local directory containing the complete seed workspace to copy into the claimed slot.",
+                "description": "Required non-empty initial prompt for the child rollout. Include the durable core instructions needed to solve, submit_solution, use archive/shared_workspace, and spawn again.",
+            },
+            "workspace_dir": {
+                "type": "string",
+                "description": "Optional workspace-local directory whose contents should be copied into the child rollout root. Leave blank or omit for no inherited workspace files.",
             },
             "initial_budget_tokens": {
                 "type": "integer",
                 "description": "Positive token budget to reserve from this rollout and assign exactly to the claimed slot.",
             },
         },
-        "required": ["seed_dir", "initial_budget_tokens"],
+        "required": ["prompt", "initial_budget_tokens"],
     },
 }

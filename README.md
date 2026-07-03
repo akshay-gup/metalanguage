@@ -47,15 +47,15 @@ take precedence over values in `.env`.
   1.5. use `moonshotai/kimi-k2.6` as the default OpenRouter model (override with `--model`),
   2. run 8 bootstrap rollout slots by default with `--num-rollouts`, then let later task width be set by spawned child slots,
   3. assign each rollout index to the matching `spawn_child` slot claimed by the prior task's rollouts,
-  3.5. expose a shared cross-rollout workspace at `--rollout-temp-root/shared_workspace` where any rollout agent can leave files/messages for any other rollout agent (files written during the task batch are cleaned up after the batch; durable consequences must be copied into a seed, archive artifact, solution, or later behavior),
+  3.5. expose a shared cross-rollout workspace at `--rollout-temp-root/shared_workspace` where any rollout agent can leave files/messages for any other rollout agent (files written during the task batch are cleaned up after the batch; durable consequences must be copied into a successor prompt, optional child workspace, archive artifact, solution, or later behavior),
   3.6. assign every rollout instance a UUID and record an `instance_created` event in the token-budget ledger,
   4. expose `archive/world_repo` by default as the durable cross-lineage Git archive available to every rollout (override with `--archive-repo-dir`),
      using a per-rollout temporary worktree so only committed archive changes are merged back and uncommitted archive edits are discarded,
-  5. copy the selected parent seed workspace into the rollout workspace and write `shared_workspace/problem_pool.json` plus `shared_workspace/problem_pool.md`, one shared redacted pool copy of all currently unsolved problems keyed by uuid for the whole rollout batch,
-  6. register main-loop tools through the worker backend (OpenRouter tool payloads or Codex `DynamicToolSpec` entries), then run the worker with the minimal fixed prompt `Read README.md.`; operating doctrine is expected to come from the inherited parent seed,
+  5. inject the selected parent slot's stored prompt as the rollout's initial user text, optionally copy that slot's inherited workspace directory into the rollout root, and write `shared_workspace/problem_pool.json` plus `shared_workspace/problem_pool.md`, one shared redacted pool copy of all currently unsolved problems keyed by uuid for the whole rollout batch; bootstrap rollouts receive the bundled seed packet in the initial prompt instead of root `README.md`/`SETUP.md`/`ECONOMY.md` files,
+  6. register main-loop tools through the worker backend (OpenRouter tool payloads or Codex `DynamicToolSpec` entries), then run the worker with the inherited prompt and generated runtime context; operating doctrine is expected to come from the inherited prompt,
      while `runtime.md` contains only generated paths, runtime IDs, budgets, and peer lists,
   7. score answers submitted through `submit_solution(uuid, answer)`, grounding correctness against the private stored row selected by uuid,
-  8. after all rollouts in the active batch finish, advance lineage through the `spawn_child(seed_dir, initial_budget_tokens)` slots claimed by those rollouts,
+  8. after all rollouts in the active batch finish, advance lineage through the `spawn_child(prompt, initial_budget_tokens, workspace_dir)` slots claimed by those rollouts,
   9. append run metadata to a growing JSONL log and print one-line summary per rollout.
 - Runtime containment:
   - generated state is rooted at `~/Documents/metalanguage_runs` by default;
@@ -76,22 +76,26 @@ take precedence over values in `.env`.
   - correct `submit_solution` calls append one `solve_reward_credit` budget event per rollout/problem pair, defaulting to 300000 tokens via `--solve-reward-token-credit-tokens`; another rollout can also earn reward for the same problem during the same iteration;
   - there is no answer-file scoring fallback; a rollout that does not call `submit_solution` receives no solution score or solve reward credit;
   - `--rollout-token-budget-tokens` sets each initial rollout's starting budget, defaulting to 300000 tokens, and stops a rollout when reported usage exhausts it;
-  - rollouts can call `submit_solution(uuid, answer)`, `budget_status()`, `transfer_tokens(target_instance_uuid, amount_tokens)`, and `spawn_child(seed_dir, initial_budget_tokens)` as main-loop tools;
+  - rollouts can call `submit_solution(uuid, answer)`, `budget_status()`, `transfer_tokens(target_instance_uuid, amount_tokens)`, and `spawn_child(prompt, initial_budget_tokens, workspace_dir)` as main-loop tools;
   - `transfer_tokens` moves budget from one live same-task rollout to another by instance UUID; the sender's remaining budget decreases and the target's effective budget increases;
-  - `spawn_child` copies a complete workspace-local seed directory into the next claimed next-iteration rollout slot;
+  - `spawn_child` stores the required non-empty `prompt` in supervisor-side slot metadata as the child rollout's next initial user text;
+  - when `workspace_dir` is provided and non-blank, `spawn_child` copies that workspace-local directory's contents into the next slot's inherited workspace; `workspace_dir` must be inside the rollout workspace and must not be the rollout root;
+  - when `workspace_dir` is omitted or blank, the child rollout starts with no inherited workspace files beyond generated runtime files, symlinks, and an empty `seed_output/`;
+  - `spawn_child` does not require or create `prompt.md`; prompt text lives in slot metadata/logs outside the child workspace;
   - the claimed slot receives exactly `initial_budget_tokens`; the call fails if the parent rollout does not have that much budget remaining;
   - tool responses are counted when they are sent back as model input on the next model call.
 - Lineage behavior:
-  - the first rollout batch can bootstrap without a parent seed;
-  - a rollout continues only by successfully calling `spawn_child(seed_dir, initial_budget_tokens)`;
+  - the first rollout batch can bootstrap without a parent slot;
+  - a rollout continues only by successfully calling `spawn_child(prompt, initial_budget_tokens, workspace_dir)`;
+  - the successor `prompt` should at minimum preserve the core instructions needed by the next child to inspect `runtime.md`, solve from `shared_workspace/problem_pool`, call `submit_solution(uuid, answer)`, use `archive/` and `shared_workspace/`, and spawn again;
   - solving/submitting alone does not continue lineage; if no rollout claims a child slot, that lineage dies and the loop exits with an error;
   - correct solves can add reward budget for spawning, while unsolved rollouts may still spawn with their lower remaining budget;
-  - after bootstrap, missing parent seeds are terminal and the loop will not silently continue as a fresh lineage.
+  - after bootstrap, missing parent slots are terminal and the loop will not silently continue as a fresh lineage.
 - Resume behavior:
   - runs automatically resume from existing `--runs-log` entries that match dataset/split/model/seed/generation/config/rollout-count;
   - completed rollouts are skipped, partial tasks continue from missing rollout indices using each task's recorded rollout count;
   - `--problem-queue` is pool state, not the workspace copy: each task batch materializes all currently unsolved redacted problems in the shared workspace, and solved UIDs are marked only after the batch finishes so duplicate same-iteration solves can still receive reward;
-  - parent lineage candidates are loaded from `--rollout-temp-root/latest_parent_pool.json`, which is written from claimed `spawn_child` slots;
+  - parent lineage candidates are loaded from `--rollout-temp-root/latest_parent_pool.json`, which is written from claimed `spawn_child` slot records and carries prompt metadata plus any optional inherited workspace path;
   - disable this with `--no-resume`.
 - Manual iteration:
   - use `--step` to run exactly one rollout batch, choosing the first incomplete batch from the resume log or the next pool batch index;
@@ -131,12 +135,12 @@ Useful flags:
 - `--codex-sandbox-mode read-only|workspace-write|danger-full-access`: choose the
   rollout sandbox mode.
 - `--codex-base-instructions-mode read-readme|codex`: choose whether Codex uses
-  the fixed scaffold base instruction `Read README.md.` (`read-readme`, the
-  default) or its model-catalog base instructions (`codex`).
+  the fixed inherited-packet scaffold instruction (`read-readme`, the default)
+  or its model-catalog base instructions (`codex`).
 - `--codex-initial-prompt TEXT`: choose the first user message.
 
-Example with the seed README as the evolvable prompt and Codex base instructions
-kept to the fixed scaffold pointer:
+Example with Codex base instructions kept to the fixed inherited-packet
+scaffold pointer:
 
 ```bash
 uv run python -B main_loop.py \

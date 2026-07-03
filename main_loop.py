@@ -110,7 +110,19 @@ DEFAULT_SOLVE_REWARD_TOKEN_CREDIT_TOKENS = 300_000
 DEFAULT_RUNTIME_ROOT = Path.home() / "Documents" / "metalanguage_runs"
 DEFAULT_CODEX_HOME = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
 BUNDLED_BOOTSTRAP_SEED_DIR = PROJECT_ROOT / "seeds" / "bootstrap"
-CODEX_READ_README_BASE_INSTRUCTIONS = "Read README.md."
+CORE_SEED_FILENAMES = ("README.md", "SETUP.md", "ECONOMY.md")
+READ_README_TASK_INSTRUCTIONS = (
+    "Read the inherited seed packet. If README.md is present, start there. If "
+    "README.md, SETUP.md, and ECONOMY.md are embedded in this initial prompt "
+    "instead, follow that embedded packet. Then follow the referenced task "
+    "instructions. Try to keep your lineage alive: solve from the shared "
+    "problem pool, call submit_solution(uuid=..., answer=...), prepare a "
+    "durable successor prompt, optionally write workspace files under "
+    "seed_output/workspace/, and call "
+    "spawn_child(prompt=..., initial_budget_tokens=..., workspace_dir=...) "
+    "before stopping."
+)
+CODEX_READ_README_BASE_INSTRUCTIONS = READ_README_TASK_INSTRUCTIONS
 
 
 def _strip_env_quotes(value: str) -> str:
@@ -138,6 +150,31 @@ def load_dotenv(env_path: Path = DEFAULT_ENV_PATH) -> None:
         if not key:
             continue
         os.environ.setdefault(key, _strip_env_quotes(value))
+
+
+def _format_bootstrap_seed_prompt(seed_dir: Path) -> str:
+    sections: list[str] = []
+    for filename in CORE_SEED_FILENAMES:
+        path = seed_dir / filename
+        if not path.is_file():
+            raise FileNotFoundError(f"Bootstrap seed is missing required core file: {path}")
+        content = path.read_text(encoding="utf-8").strip()
+        if not content:
+            raise ValueError(f"Bootstrap seed core file is empty: {path}")
+        sections.append(f"## {filename}\n\n{content}")
+
+    packet = "\n\n---\n\n".join(sections)
+    return (
+        f"{READ_README_TASK_INSTRUCTIONS}\n\n"
+        "Bootstrap seed packet:\n"
+        "This first rollout receives README.md, SETUP.md, and ECONOMY.md here "
+        "instead of as files in the rollout root. The rollout root will not "
+        "contain those three core seed files. To continue the lineage, pass a "
+        "successor prompt that preserves the core instructions to "
+        "spawn_child(prompt=..., initial_budget_tokens=...), and pass "
+        "workspace_dir only for optional workspace files.\n\n"
+        f"{packet}"
+    )
 
 
 def _first_present(row: dict[str, Any], keys: list[str]) -> Any:
@@ -459,20 +496,28 @@ def _parse_transfer_tokens_arguments(args: dict[str, Any]) -> tuple[str | None, 
     return target_instance_uuid.strip(), amount_tokens, None
 
 
-def _parse_spawn_child_arguments(args: dict[str, Any]) -> tuple[str | None, int | None, str | None]:
-    seed_dir = args.get("seed_dir", args.get("seedDir", args.get("seed")))
-    if not isinstance(seed_dir, str) or not seed_dir.strip():
-        return None, None, "spawn_child requires a non-empty string seed_dir"
+def _parse_spawn_child_arguments(args: dict[str, Any]) -> tuple[str | None, str | None, int | None, str | None]:
+    prompt = args.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        return None, None, None, "spawn_child requires a non-empty string prompt"
+
+    raw_workspace_dir = args.get("workspace_dir", args.get("workspaceDir"))
+    workspace_dir: str | None = None
+    if raw_workspace_dir is not None:
+        if not isinstance(raw_workspace_dir, str):
+            return None, None, None, "workspace_dir must be a string when provided"
+        if raw_workspace_dir.strip():
+            workspace_dir = raw_workspace_dir.strip()
 
     raw_budget = args.get("initial_budget_tokens", args.get("initialBudgetTokens"))
     try:
         initial_budget_tokens = int(raw_budget)
     except (TypeError, ValueError):
-        return None, None, "spawn_child requires integer initial_budget_tokens"
+        return None, None, None, "spawn_child requires integer initial_budget_tokens"
     if initial_budget_tokens <= 0:
-        return None, None, "initial_budget_tokens must be > 0"
+        return None, None, None, "initial_budget_tokens must be > 0"
 
-    return seed_dir, initial_budget_tokens, None
+    return prompt, workspace_dir, initial_budget_tokens, None
 
 
 def _parse_submit_solution_arguments(args: dict[str, Any]) -> tuple[str | None, str | None, str | None]:
@@ -545,17 +590,16 @@ def _latest_solution_scored_event(events_path: Path, instance_uuid: str) -> dict
     return events[-1] if events else None
 
 
-def _resolve_spawn_seed_dir(context: dict[str, Any], seed_dir: str) -> tuple[Path | None, str | None]:
+def _resolve_spawn_workspace_dir(context: dict[str, Any], workspace_dir: str | None) -> tuple[Path | None, str | None]:
+    if workspace_dir is None:
+        return None, None
     workdir = Path(str(context["workdir"])).resolve()
-    raw_path = Path(seed_dir).expanduser()
+    raw_path = Path(workspace_dir).expanduser()
     candidate = raw_path.resolve() if raw_path.is_absolute() else (workdir / raw_path).resolve()
     if candidate == workdir or not _is_within(candidate, workdir):
-        return None, "seed_dir must be a workspace-local directory, not the rollout workspace root"
+        return None, "workspace_dir must be a workspace-local directory, not the rollout workspace root"
     if not candidate.is_dir():
-        return None, f"seed_dir is not a directory: {seed_dir}"
-    readme = candidate / "README.md"
-    if not readme.is_file() or not readme.read_text(encoding="utf-8").strip():
-        return None, "seed_dir must contain a non-empty README.md"
+        return None, f"workspace_dir is not a directory: {workspace_dir}"
     return candidate, None
 
 
@@ -1440,7 +1484,8 @@ def _claim_spawn_slot(
     *,
     context: dict[str, Any],
     child_instance_uuid: str,
-    source_seed_dir: Path,
+    child_prompt: str,
+    source_workspace_dir: Path | None,
     initial_budget_tokens: int,
     parent_budget: dict[str, Any],
 ) -> dict[str, Any]:
@@ -1462,17 +1507,27 @@ def _claim_spawn_slot(
             slots = []
 
         slot_index = len(slots)
-        child_seed_dir = slots_dir / f"slot_{slot_index:03d}_{child_instance_uuid[:8]}"
-        child_seed_dir.mkdir(parents=True, exist_ok=False)
-        copy_seed_workspace(source_seed_dir, child_seed_dir)
+        slot_dir = slots_dir / f"slot_{slot_index:03d}_{child_instance_uuid[:8]}"
+        slot_dir.mkdir(parents=True, exist_ok=False)
+        child_workspace_dir: Path | None = None
+        if source_workspace_dir is not None:
+            child_workspace_dir = slot_dir / "workspace"
+            child_workspace_dir.mkdir(parents=True, exist_ok=False)
+            copy_seed_workspace(source_workspace_dir, child_workspace_dir)
+        manifest_path = slot_dir / "slot_manifest.json"
         metadata = {
             "child_instance_uuid": child_instance_uuid,
             "slot_index": slot_index,
             "parent_instance_uuid": context["instance_uuid"],
             "parent_rollout_username": context["rollout_username"],
+            "prompt": child_prompt,
+            "prompt_chars": len(child_prompt),
             "initial_budget_tokens": initial_budget_tokens,
             "assigned_budget_tokens": initial_budget_tokens,
-            "source_seed_dir": str(source_seed_dir),
+            "source_workspace_dir": str(source_workspace_dir) if source_workspace_dir is not None else None,
+            "workspace_dir": str(child_workspace_dir) if child_workspace_dir is not None else None,
+            "slot_dir": str(slot_dir),
+            "manifest_path": str(manifest_path),
             "source_task_index": context["task_index"],
             "source_problem_task_index": source_problem_task_index,
             "source_task_id": source_task_id,
@@ -1480,10 +1535,8 @@ def _claim_spawn_slot(
             "source_rollout_index": context["rollout_index"],
             "parent_budget": parent_budget,
         }
-        slot_record = {
-            **metadata,
-            "seed_dir": str(child_seed_dir),
-        }
+        _write_json_file_atomic(manifest_path, metadata)
+        slot_record = dict(metadata)
         slots.append(slot_record)
         _write_json_file_atomic(
             slots_path,
@@ -1500,11 +1553,61 @@ def _claim_spawn_slot(
             "reservation_committed": True,
             "slot_index": slot_index,
             "child_instance_uuid": child_instance_uuid,
-            "child_seed_dir": str(child_seed_dir),
+            "slot_dir": str(slot_dir),
+            "workspace_dir": str(child_workspace_dir) if child_workspace_dir is not None else None,
+            "prompt_chars": len(child_prompt),
             "initial_budget_tokens": initial_budget_tokens,
             "assigned_budget_tokens": initial_budget_tokens,
             "claimed_slots": len(slots),
         }
+
+
+def _read_slot_manifest(slot: dict[str, Any]) -> dict[str, Any]:
+    raw_manifest_path = slot.get("manifest_path")
+    if not isinstance(raw_manifest_path, str) or not raw_manifest_path:
+        raw_slot_dir = slot.get("slot_dir")
+        if not isinstance(raw_slot_dir, str) or not raw_slot_dir:
+            return {}
+        raw_manifest_path = str(Path(raw_slot_dir) / "slot_manifest.json")
+    manifest = _read_json_file(Path(raw_manifest_path), {})
+    return manifest if isinstance(manifest, dict) else {}
+
+
+def _slot_prompt(slot: dict[str, Any]) -> str | None:
+    prompt = slot.get("prompt")
+    if isinstance(prompt, str) and prompt.strip():
+        return prompt
+    manifest_prompt = _read_slot_manifest(slot).get("prompt")
+    if isinstance(manifest_prompt, str) and manifest_prompt.strip():
+        return manifest_prompt
+    return None
+
+
+def _slot_workspace_dir(slot: dict[str, Any]) -> Path | None:
+    raw_workspace_dir = slot.get("workspace_dir")
+    if not isinstance(raw_workspace_dir, str) or not raw_workspace_dir:
+        raw_workspace_dir = _read_slot_manifest(slot).get("workspace_dir")
+    if isinstance(raw_workspace_dir, str) and raw_workspace_dir:
+        return Path(raw_workspace_dir)
+    return None
+
+
+def _slot_budget_tokens(slot: dict[str, Any]) -> int | None:
+    metadata = slot if slot.get("initial_budget_tokens") is not None else _read_slot_manifest(slot)
+    try:
+        budget = int(metadata.get("initial_budget_tokens"))
+    except (TypeError, ValueError):
+        return None
+    return budget if budget > 0 else None
+
+
+def _slot_child_instance_uuid(slot: dict[str, Any]) -> str | None:
+    child_instance_uuid = slot.get("child_instance_uuid")
+    if not isinstance(child_instance_uuid, str) or not child_instance_uuid:
+        child_instance_uuid = _read_slot_manifest(slot).get("child_instance_uuid")
+    if isinstance(child_instance_uuid, str) and child_instance_uuid:
+        return child_instance_uuid
+    return None
 
 
 def _load_spawned_child_slots(
@@ -1530,66 +1633,13 @@ def _load_spawned_child_slots(
                     continue
             except (TypeError, ValueError):
                 continue
-        seed_dir = slot.get("seed_dir")
-        if isinstance(seed_dir, str) and seed_dir:
+        if _slot_prompt(slot) is not None:
             child_slots.append(slot)
     return child_slots
 
 
-def _load_spawned_child_seed_dirs(spawn_slots_path: Path) -> list[Path]:
-    seed_dirs: list[Path] = []
-    for slot in _load_spawned_child_slots(spawn_slots_path):
-        seed_dir = slot.get("seed_dir")
-        if isinstance(seed_dir, str) and seed_dir:
-            seed_dirs.append(Path(seed_dir))
-    return seed_dirs
-
-
-def _spawn_slots_path_for_child_seed_dir(seed_dir: Path) -> Path | None:
-    slots_dir = seed_dir.parent
-    suffix = "_next_iteration"
-    if not slots_dir.name.endswith(suffix):
-        return None
-    return slots_dir.with_name(f"{slots_dir.name.removesuffix(suffix)}_spawn_slots.json")
-
-
-def _spawn_slot_seed_dir_matches(slot: dict[str, Any], seed_dir: Path) -> bool:
-    raw_seed_dir = slot.get("seed_dir")
-    if not isinstance(raw_seed_dir, str) or not raw_seed_dir:
-        return False
-    try:
-        return Path(raw_seed_dir).resolve() == seed_dir.resolve()
-    except OSError:
-        return raw_seed_dir == str(seed_dir)
-
-
-def _spawn_child_metadata_for_seed_dir(seed_dir: Path) -> dict[str, Any]:
-    slots_path = _spawn_slots_path_for_child_seed_dir(seed_dir)
-    if slots_path is not None:
-        state = _read_json_file(slots_path, {})
-        slots = state.get("slots") if isinstance(state, dict) else None
-        if isinstance(slots, list):
-            for slot in slots:
-                if isinstance(slot, dict) and _spawn_slot_seed_dir_matches(slot, seed_dir):
-                    return slot
-    return {}
-
-
-def _seed_budget_tokens(seed_dir: Path) -> int | None:
-    metadata = _spawn_child_metadata_for_seed_dir(seed_dir)
-    try:
-        budget = int(metadata.get("initial_budget_tokens"))
-    except (TypeError, ValueError):
-        return None
-    return budget if budget > 0 else None
-
-
-def _seed_child_instance_uuid(seed_dir: Path) -> str | None:
-    metadata = _spawn_child_metadata_for_seed_dir(seed_dir)
-    child_instance_uuid = metadata.get("child_instance_uuid")
-    if isinstance(child_instance_uuid, str) and child_instance_uuid:
-        return child_instance_uuid
-    return None
+def _load_spawned_child_parent_slots(spawn_slots_path: Path) -> list[dict[str, Any]]:
+    return _load_spawned_child_slots(spawn_slots_path)
 
 
 def _is_within(path: Path, root: Path) -> bool:
@@ -1740,15 +1790,18 @@ def _cleanup_rollout_shared_writes(root: Path, before: dict[Path, tuple[int, int
             continue
 
 
-def copy_seed_workspace(parent_dir: Path, workdir: Path) -> None:
-    """Copy a seed workspace directory into a rollout workspace."""
+def copy_seed_workspace(parent_dir: Path, workdir: Path, *, exclude_names: tuple[str, ...] = ()) -> None:
+    """Copy a workspace directory's contents into a rollout workspace."""
     if not parent_dir.exists():
         return
+    excluded = set(exclude_names)
 
     def _ignore_symlinks(directory: str, names: list[str]) -> list[str]:
         return [name for name in names if (Path(directory) / name).is_symlink()]
 
     for item in parent_dir.iterdir():
+        if item.name in excluded:
+            continue
         if item.is_symlink():
             continue
         dest = workdir / item.name
@@ -1853,19 +1906,19 @@ def _spawn_child_continuation(
     parent_budget: dict[str, Any],
     progress_callback: Any = None,
 ) -> dict[str, Any]:
-    seed_dir_arg, initial_budget_tokens, error = _parse_spawn_child_arguments(args)
-    if error is not None or seed_dir_arg is None or initial_budget_tokens is None:
+    child_prompt, workspace_dir_arg, initial_budget_tokens, error = _parse_spawn_child_arguments(args)
+    if error is not None or child_prompt is None or initial_budget_tokens is None:
         return {
             "success": False,
             "reservation_committed": False,
             "error": error or "invalid spawn_child arguments",
         }
-    source_seed_dir, error = _resolve_spawn_seed_dir(context, seed_dir_arg)
-    if error is not None or source_seed_dir is None:
+    source_workspace_dir, error = _resolve_spawn_workspace_dir(context, workspace_dir_arg)
+    if error is not None:
         return {
             "success": False,
             "reservation_committed": False,
-            "error": error or "invalid seed_dir",
+            "error": error or "invalid workspace_dir",
         }
 
     budget_ledger_events = Path(str(context["budget_ledger_events"]))
@@ -1877,7 +1930,8 @@ def _spawn_child_continuation(
     child_instance_uuid = new_instance_uuid()
     reservation_committed = False
     slot_index: int | None = None
-    child_seed_dir: str | None = None
+    child_slot_dir: str | None = None
+    child_workspace_dir: str | None = None
     slot_result: dict[str, Any] | None = None
 
     def _progress(event: str, **fields: Any) -> None:
@@ -1909,18 +1963,21 @@ def _spawn_child_continuation(
 
     try:
         def _build_spawn_event_specs(budget_status: dict[str, Any]) -> list[dict[str, Any]]:
-            nonlocal slot_result, slot_index, child_seed_dir
+            nonlocal slot_result, slot_index, child_slot_dir, child_workspace_dir
             slot_result = _claim_spawn_slot(
                 context=context,
                 child_instance_uuid=child_instance_uuid,
-                source_seed_dir=source_seed_dir,
+                child_prompt=child_prompt,
+                source_workspace_dir=source_workspace_dir,
                 initial_budget_tokens=initial_budget_tokens,
                 parent_budget=budget_status,
             )
             if not slot_result.get("slot_claimed"):
                 raise RuntimeError(slot_result.get("error") or "spawn_child slot was not claimed")
             slot_index = int(slot_result["slot_index"])
-            child_seed_dir = str(slot_result["child_seed_dir"])
+            child_slot_dir = str(slot_result["slot_dir"])
+            raw_workspace_dir = slot_result.get("workspace_dir")
+            child_workspace_dir = str(raw_workspace_dir) if raw_workspace_dir else None
             return [
                 {
                     "event_type": "child_spawned",
@@ -1929,7 +1986,9 @@ def _spawn_child_continuation(
                     "metadata": {
                         "child_instance_uuid": child_instance_uuid,
                         "slot_index": slot_index,
-                        "child_seed_dir": child_seed_dir,
+                        "child_slot_dir": child_slot_dir,
+                        "child_workspace_dir": child_workspace_dir,
+                        "prompt_chars": len(child_prompt),
                         "parent_tokens_spent": budget_status.get("tokens_spent"),
                         "parent_reserved_for_children_before": budget_status.get(
                             "tokens_reserved_for_children"
@@ -1966,7 +2025,9 @@ def _spawn_child_continuation(
         if slot_result is None:
             raise RuntimeError("spawn_child transaction did not claim a slot")
         slot_index = int(slot_result["slot_index"])
-        child_seed_dir = str(slot_result["child_seed_dir"])
+        child_slot_dir = str(slot_result["slot_dir"])
+        raw_workspace_dir = slot_result.get("workspace_dir")
+        child_workspace_dir = str(raw_workspace_dir) if raw_workspace_dir else None
         reservation_committed = True
         result = {
             **slot_result,
@@ -1983,7 +2044,9 @@ def _spawn_child_continuation(
             "reservation_committed": reservation_committed,
             "child_instance_uuid": child_instance_uuid,
             "slot_index": slot_index,
-            "child_seed_dir": child_seed_dir,
+            "child_slot_dir": child_slot_dir,
+            "child_workspace_dir": child_workspace_dir,
+            "prompt_chars": len(child_prompt),
             "initial_budget_tokens": initial_budget_tokens,
             "error": f"{type(exc).__name__}: {exc}",
         }
@@ -2013,6 +2076,7 @@ def run_worker(
     bash_timeout_seconds: int,
     openrouter_max_retries: int,
     continuation_context: dict[str, Any],
+    initial_user_text: str,
     progress_callback: Any = None,
 ) -> WorkerResult:
     """Run a multi-turn tool-calling worker loop and return final assistant text."""
@@ -2022,7 +2086,7 @@ def run_worker(
             "content": [
                 {
                     "type": "input_text",
-                    "text": "Read README.md.",
+                    "text": initial_user_text,
                 }
             ],
         }
@@ -2496,7 +2560,7 @@ def load_existing_run_records(log_path: Path) -> list[dict[str, Any]]:
     return records
 
 
-def load_parent_pool(parent_pool_path: Path) -> list[Path]:
+def load_parent_pool(parent_pool_path: Path) -> list[dict[str, Any]]:
     if not parent_pool_path.exists():
         return []
     try:
@@ -2506,20 +2570,24 @@ def load_parent_pool(parent_pool_path: Path) -> list[Path]:
     if not isinstance(raw, list):
         return []
 
-    paths: list[Path] = []
+    slots: list[dict[str, Any]] = []
     for item in raw:
-        if not isinstance(item, str) or not item:
+        if not isinstance(item, dict):
             continue
-        p = Path(item)
-        if p.exists():
-            paths.append(p)
-    return paths
+        slot = dict(item)
+        prompt = _slot_prompt(slot)
+        if prompt is None:
+            continue
+        if "prompt" not in slot:
+            slot["prompt"] = prompt
+        slots.append(slot)
+    return slots
 
 
-def save_parent_pool(parent_pool_path: Path, parent_pool: list[Path]) -> None:
+def save_parent_pool(parent_pool_path: Path, parent_pool: list[dict[str, Any]]) -> None:
     parent_pool_path.parent.mkdir(parents=True, exist_ok=True)
     parent_pool_path.write_text(
-        json.dumps([str(path) for path in parent_pool], ensure_ascii=False, indent=2),
+        json.dumps(parent_pool, ensure_ascii=False, indent=2, sort_keys=True),
         encoding="utf-8",
     )
 
@@ -2753,7 +2821,7 @@ def parse_args() -> argparse.Namespace:
         "--bootstrap-seed-dir",
         default="seeds/bootstrap",
         help=(
-            "Seed workspace copied into bootstrap rollouts before any parent seed exists. "
+            "Bootstrap seed packet used before any parent slot exists. "
             "Resolved under --runtime-root unless absolute."
         ),
     )
@@ -2832,7 +2900,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--codex-initial-prompt",
-        default="Read README.md.",
+        default=READ_README_TASK_INSTRUCTIONS,
         help="Initial user text submitted to the Codex runner for each rollout.",
     )
     parser.add_argument(
@@ -2841,7 +2909,7 @@ def parse_args() -> argparse.Namespace:
         default="read-readme",
         help=(
             "Codex base-instructions mode. 'codex' uses the model catalog default; "
-            "'read-readme' uses the fixed scaffold instruction `Read README.md.`."
+            "'read-readme' uses the fixed scaffold task instruction."
         ),
     )
     return parser.parse_args()
@@ -2904,7 +2972,7 @@ def main() -> None:
     shared_workspace_lock = threading.Lock()
     progress_log_lock = threading.Lock()
 
-    parent_pool: list[Path] = []
+    parent_pool: list[dict[str, Any]] = []
 
     existing_records: list[dict[str, Any]] = []
     if not args.no_resume:
@@ -3052,7 +3120,7 @@ def main() -> None:
                 continue
             if rollout_index < len(parent_pool):
                 task_instance_uuids[rollout_index] = (
-                    _seed_child_instance_uuid(parent_pool[rollout_index]) or new_instance_uuid()
+                    _slot_child_instance_uuid(parent_pool[rollout_index]) or new_instance_uuid()
                 )
                 continue
             task_instance_uuids[rollout_index] = new_instance_uuid()
@@ -3106,11 +3174,11 @@ def main() -> None:
                 raise RuntimeError(f"rollout {rollout_index} already exists and should not have been submitted")
 
             rollout_username = _rollout_username(rollout_index)
-            sampled_parent: Path | None = (
+            sampled_parent: dict[str, Any] | None = (
                 parent_pool[rollout_index] if rollout_index < len(parent_pool) else None
             )
             rollout_budget_tokens = (
-                _seed_budget_tokens(sampled_parent)
+                _slot_budget_tokens(sampled_parent)
                 if sampled_parent is not None
                 else args.rollout_token_budget_tokens
             )
@@ -3160,12 +3228,17 @@ def main() -> None:
                     "task_id": task_id,
                     "problem_uid": problem_uid,
                     "rollout_token_budget_tokens": rollout_budget_tokens,
+                    "parent_instance_uuid": (
+                        sampled_parent.get("parent_instance_uuid") if sampled_parent else None
+                    ),
+                    "parent_slot_dir": sampled_parent.get("slot_dir") if sampled_parent else None,
                 },
             )
             _progress(
                 "rollout_started",
                 instance_uuid=instance_uuid,
-                parent_rollout_dir=str(sampled_parent) if sampled_parent else None,
+                parent_slot_dir=sampled_parent.get("slot_dir") if sampled_parent else None,
+                parent_workspace_dir=sampled_parent.get("workspace_dir") if sampled_parent else None,
                 bootstrap_seed_dir=str(bootstrap_seed_dir) if sampled_parent is None else None,
             )
             archive_worktree = create_archive_worktree(
@@ -3184,12 +3257,26 @@ def main() -> None:
             temp_dir = fixed_temp_dir / f"{task_index:06d}" / f"rollout_{rollout_index:03d}"
             shutil.rmtree(temp_dir, ignore_errors=True)
             temp_dir.mkdir(parents=True, exist_ok=True)
+            bootstrap_seed_embedded = sampled_parent is None
+            rollout_initial_prompt = args.codex_initial_prompt
             if sampled_parent is not None:
-                copy_seed_workspace(sampled_parent, temp_dir)
+                parent_prompt = _slot_prompt(sampled_parent)
+                if parent_prompt is None:
+                    raise RuntimeError(
+                        "Spawned child slot is missing prompt metadata; "
+                        f"task_index={task_index} rollout_index={rollout_index}"
+                    )
+                rollout_initial_prompt = parent_prompt
+                parent_workspace_dir = _slot_workspace_dir(sampled_parent)
+                if parent_workspace_dir is not None:
+                    if not parent_workspace_dir.is_dir():
+                        raise RuntimeError(f"Spawned child workspace is missing: {parent_workspace_dir}")
+                    copy_seed_workspace(parent_workspace_dir, temp_dir)
             else:
                 if not bootstrap_seed_dir.exists():
                     raise RuntimeError(f"Bootstrap seed directory does not exist: {bootstrap_seed_dir}")
-                copy_seed_workspace(bootstrap_seed_dir, temp_dir)
+                copy_seed_workspace(bootstrap_seed_dir, temp_dir, exclude_names=CORE_SEED_FILENAMES)
+                rollout_initial_prompt = _format_bootstrap_seed_prompt(bootstrap_seed_dir)
 
             seed_output_dir = temp_dir / "seed_output"
             seed_output_dir.mkdir(parents=True, exist_ok=True)
@@ -3202,6 +3289,11 @@ def main() -> None:
             runtime_file.write_text(
                 _format_runtime_markdown(
                     instance_uuid=instance_uuid,
+                    parent_instance_uuid=(
+                        str(sampled_parent.get("parent_instance_uuid"))
+                        if sampled_parent and sampled_parent.get("parent_instance_uuid")
+                        else None
+                    ),
                     rollout_token_budget_tokens=rollout_budget_tokens,
                     problem_pool_json_path="shared_workspace/problem_pool.json",
                     problem_pool_markdown_path="shared_workspace/problem_pool.md",
@@ -3282,6 +3374,8 @@ def main() -> None:
                 codex_base_instructions_chars=(
                     len(codex_base_instructions) if codex_base_instructions is not None else None
                 ),
+                bootstrap_seed_embedded=bootstrap_seed_embedded,
+                rollout_initial_prompt_chars=len(rollout_initial_prompt),
             )
 
             try:
@@ -3305,7 +3399,7 @@ def main() -> None:
                             rollout_username=rollout_username,
                             timeout_seconds=args.worker_timeout_seconds,
                             sandbox_mode=args.codex_sandbox_mode,
-                            initial_user_text=args.codex_initial_prompt,
+                            initial_user_text=rollout_initial_prompt,
                             base_instructions=codex_base_instructions,
                             continuation_context_path=continuation_context_path,
                             progress_callback=_progress,
@@ -3334,6 +3428,7 @@ def main() -> None:
                             bash_timeout_seconds=args.bash_timeout_seconds,
                             openrouter_max_retries=args.openrouter_max_retries,
                             continuation_context=continuation_context,
+                            initial_user_text=rollout_initial_prompt,
                             progress_callback=_progress,
                         )
                 except BaseException as exc:
@@ -3489,12 +3584,18 @@ def main() -> None:
                 spawn_slots_path,
                 source_rollout_index=rollout_index,
             )
-            next_rollout_dir = (
-                Path(str(spawned_child_slots[0]["seed_dir"]))
-                if spawned_child_slots
+            next_child_slot = spawned_child_slots[0] if spawned_child_slots else None
+            next_slot_dir = (
+                str(next_child_slot.get("slot_dir"))
+                if next_child_slot and next_child_slot.get("slot_dir")
                 else None
             )
-            seed_viable = next_rollout_dir is not None
+            next_workspace_dir = (
+                str(next_child_slot.get("workspace_dir"))
+                if next_child_slot and next_child_slot.get("workspace_dir")
+                else None
+            )
+            child_prompt_viable = next_child_slot is not None and _slot_prompt(next_child_slot) is not None
 
             record = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -3514,10 +3615,12 @@ def main() -> None:
                 "submitted_uuid": submitted_uuid,
                 "reported_problem_uid": reported_problem_uid,
                 "reported_task_id": reported_task_id,
-                "parent_rollout_dir": str(sampled_parent) if sampled_parent else None,
+                "parent_slot_dir": sampled_parent.get("slot_dir") if sampled_parent else None,
+                "parent_workspace_dir": sampled_parent.get("workspace_dir") if sampled_parent else None,
                 "bootstrap_seed_dir": str(bootstrap_seed_dir) if sampled_parent is None else None,
-                "next_rollout_dir": str(next_rollout_dir) if next_rollout_dir is not None else None,
-                "seed_viable": seed_viable,
+                "next_slot_dir": next_slot_dir,
+                "next_workspace_dir": next_workspace_dir,
+                "child_prompt_viable": child_prompt_viable,
                 "budget_ledger_events": str(budget_ledger_events),
                 "worker_status": worker_result.status,
                 "worker_stop_reason": worker_result.stop_reason,
@@ -3568,6 +3671,8 @@ def main() -> None:
                     if args.worker_backend == "codex" and codex_base_instructions is not None
                     else None
                 ),
+                "bootstrap_seed_embedded": bootstrap_seed_embedded,
+                "rollout_initial_prompt_chars": len(rollout_initial_prompt),
                 "config_name": args.config_name,
                 "runtime_root": str(runtime_root),
                 "dataset_cache_dir": str(dataset_cache_dir),
@@ -3583,7 +3688,7 @@ def main() -> None:
             return RolloutResult(
                 rollout_index=rollout_index,
                 record=record,
-                successful_dir=next_rollout_dir,
+                successful_dir=Path(next_slot_dir) if next_slot_dir is not None else None,
                 summary=summary,
                 error=worker_result.error_message if worker_result.status == "error" else None,
             )
@@ -3641,10 +3746,12 @@ def main() -> None:
                                     "submitted_uuid": None,
                                     "reported_problem_uid": None,
                                     "reported_task_id": None,
-                                    "parent_rollout_dir": None,
+                                    "parent_slot_dir": None,
+                                    "parent_workspace_dir": None,
                                     "bootstrap_seed_dir": str(bootstrap_seed_dir),
-                                    "next_rollout_dir": None,
-                                    "seed_viable": False,
+                                    "next_slot_dir": None,
+                                    "next_workspace_dir": None,
+                                    "child_prompt_viable": False,
                                     "worker_status": "error",
                                     "worker_stop_reason": type(exc).__name__,
                                     "worker_error_code": None,
@@ -3743,9 +3850,9 @@ def main() -> None:
                 },
             )
 
-        spawned_child_dirs = _load_spawned_child_seed_dirs(spawn_slots_path)
-        if spawned_child_dirs:
-            parent_pool = spawned_child_dirs
+        spawned_child_slots = _load_spawned_child_parent_slots(spawn_slots_path)
+        if spawned_child_slots:
+            parent_pool = spawned_child_slots
             save_parent_pool(parent_pool_path, parent_pool)
         else:
             save_parent_pool(parent_pool_path, parent_pool)

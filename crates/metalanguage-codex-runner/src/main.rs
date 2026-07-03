@@ -81,14 +81,10 @@ impl BudgetState {
     }
 
     fn tokens_remaining(&self) -> Option<i64> {
-        self.effective_rollout_token_budget_tokens()
-            .map(|budget| {
-                (budget
-                    - self.tokens_spent
-                    - self.reserved_child_tokens
-                    - self.transferred_out_tokens)
-                    .max(0)
-            })
+        self.effective_rollout_token_budget_tokens().map(|budget| {
+            (budget - self.tokens_spent - self.reserved_child_tokens - self.transferred_out_tokens)
+                .max(0)
+        })
     }
 
     fn exhausted(&self) -> bool {
@@ -128,7 +124,10 @@ impl BudgetState {
         {
             self.reserved_child_tokens = value;
         }
-        if let Some(value) = snapshot.get("tokens_transferred_in").and_then(Value::as_i64) {
+        if let Some(value) = snapshot
+            .get("tokens_transferred_in")
+            .and_then(Value::as_i64)
+        {
             self.transferred_in_tokens = value;
         }
         if let Some(value) = snapshot
@@ -710,23 +709,28 @@ fn metalanguage_dynamic_tools() -> Vec<DynamicToolSpec> {
             namespace: None,
             name: "spawn_child".to_string(),
             description: concat!(
-                "Claim a next-iteration rollout slot by copying seed_dir into that ",
-                "slot and reserving exactly initial_budget_tokens from this rollout."
+                "Claim a next-iteration rollout slot by passing the child's inherited ",
+                "prompt, optionally copying a workspace-local directory into the child ",
+                "workspace, and reserving exactly initial_budget_tokens from this rollout."
             )
             .to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "seed_dir": {
+                    "prompt": {
                         "type": "string",
-                        "description": "Workspace-local directory containing the complete seed workspace to copy into the claimed slot."
+                        "description": "Required non-empty initial prompt for the child rollout. Include the durable core instructions needed to solve, submit_solution, use archive/shared_workspace, and spawn again."
+                    },
+                    "workspace_dir": {
+                        "type": "string",
+                        "description": "Optional workspace-local directory whose contents should be copied into the child rollout root. Leave blank or omit for no inherited workspace files."
                     },
                     "initial_budget_tokens": {
                         "type": "integer",
                         "description": "Positive token budget to reserve from this rollout and assign exactly to the claimed slot."
                     }
                 },
-                "required": ["seed_dir", "initial_budget_tokens"],
+                "required": ["prompt", "initial_budget_tokens"],
                 "additionalProperties": false,
             }),
             defer_loading: false,
@@ -773,16 +777,12 @@ fn handle_metalanguage_dynamic_tool(
     }
 
     match request.tool.as_str() {
-        "budget_status" => handle_budget_status_tool(
-            request,
-            budget_state,
-            spawn_child_handler_command,
-        ),
-        "submit_solution" => handle_submit_solution_tool(
-            request,
-            budget_state,
-            spawn_child_handler_command,
-        ),
+        "budget_status" => {
+            handle_budget_status_tool(request, budget_state, spawn_child_handler_command)
+        }
+        "submit_solution" => {
+            handle_submit_solution_tool(request, budget_state, spawn_child_handler_command)
+        }
         "spawn_child" => handle_spawn_child_tool(
             request,
             budget_state,
@@ -895,7 +895,8 @@ fn handle_transfer_tokens_tool(
             json!({"error": "transfer_tokens handler command is empty"}),
         );
     }
-    let (target_instance_uuid, amount_tokens) = match parse_transfer_tokens_args(&request.arguments) {
+    let (target_instance_uuid, amount_tokens) = match parse_transfer_tokens_args(&request.arguments)
+    {
         Ok(parsed) => parsed,
         Err(message) => return dynamic_tool_json_response(false, json!({"error": message})),
     };
@@ -949,13 +950,10 @@ fn handle_spawn_child_tool(
             json!({"error": "spawn_child handler command is empty"}),
         );
     }
-    let (seed_dir, child_budget) = match parse_spawn_child_args(&request.arguments) {
+    let (_prompt, child_budget) = match parse_spawn_child_args(&request.arguments) {
         Ok(parsed) => parsed,
         Err(message) => return dynamic_tool_json_response(false, json!({"error": message})),
     };
-    if seed_dir.trim().is_empty() {
-        return dynamic_tool_json_response(false, json!({"error": "seed_dir must be non-empty"}));
-    }
 
     let handler_payload = json!({
         "tool": request.tool,
@@ -1043,13 +1041,22 @@ fn parse_spawn_child_args(arguments: &Value) -> Result<(String, i64), String> {
     let Some(args) = arguments.as_object() else {
         return Err("spawn_child arguments must be an object".to_string());
     };
-    let seed_dir = args
-        .get("seed_dir")
-        .or_else(|| args.get("seedDir"))
-        .or_else(|| args.get("seed"))
+    let prompt = args
+        .get("prompt")
         .and_then(Value::as_str)
-        .ok_or_else(|| "spawn_child requires string seed_dir".to_string())?
+        .ok_or_else(|| "spawn_child requires string prompt".to_string())?
         .to_string();
+    if prompt.trim().is_empty() {
+        return Err("prompt must be non-empty".to_string());
+    }
+    if let Some(workspace_dir) = args
+        .get("workspace_dir")
+        .or_else(|| args.get("workspaceDir"))
+    {
+        if !workspace_dir.is_null() && !workspace_dir.is_string() {
+            return Err("workspace_dir must be a string when provided".to_string());
+        }
+    }
     let budget_value = args
         .get("initial_budget_tokens")
         .or_else(|| args.get("initialBudgetTokens"));
@@ -1059,7 +1066,7 @@ fn parse_spawn_child_args(arguments: &Value) -> Result<(String, i64), String> {
     if child_budget <= 0 {
         return Err("initial_budget_tokens must be > 0".to_string());
     }
-    Ok((seed_dir, child_budget))
+    Ok((prompt, child_budget))
 }
 
 fn parse_transfer_tokens_args(arguments: &Value) -> Result<(String, i64), String> {
@@ -1115,8 +1122,7 @@ fn run_spawn_child_handler(command: &[String], payload: &Value) -> Result<Value,
     if !output.status.success() {
         return Err(format!(
             "spawn_child handler exited with status {}: {}",
-            output.status,
-            stderr
+            output.status, stderr
         ));
     }
     if stdout.is_empty() {

@@ -32,9 +32,11 @@ Another rollout may also earn reward for the same uuid during this iteration.
 Solved problems are removed from future pool copies before the next iteration.
 
 Task completion includes both scoring your answer and creating a future
-task attempt. After `submit_solution` returns, write a valid successor seed under
-`seed_output/` and call
-`spawn_child(seed_dir="seed_output", initial_budget_tokens=...)` before stopping.
+task attempt. After `submit_solution` returns, prepare a durable successor
+prompt and call `spawn_child(prompt="...", initial_budget_tokens=...)` before
+stopping. If the child needs inherited workspace files, write them under a
+workspace-local directory such as `seed_output/workspace/` and pass
+`workspace_dir="seed_output/workspace"`.
 Stopping after `submit_solution` without `spawn_child` solves only the current
 item and leaves no successor rollout to receive a later task.
 
@@ -48,9 +50,10 @@ section explains what each tool does.
   plus budget status.
 - `budget_status()`: returns configured/effective token budget, spent tokens,
   reserved child budget, transfers, and remaining budget.
-- `spawn_child(seed_dir, initial_budget_tokens)`: copies a complete
-  workspace-local seed directory into one claimed next-iteration rollout slot
-  with exactly that starting budget.
+- `spawn_child(prompt, initial_budget_tokens, workspace_dir)`: stores the
+  required non-empty child prompt in the claimed next-iteration rollout slot,
+  optionally copies a workspace-local directory into the child workspace, and
+  assigns exactly that starting budget.
 - `transfer_tokens(target_instance_uuid, amount_tokens)`: transfers budget to a
   live same-task peer listed in `runtime.md`.
 
