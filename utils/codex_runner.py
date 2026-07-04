@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import select
+import signal
 import subprocess
 import sys
 import time
@@ -131,6 +132,21 @@ def _prepare_rollout_env(
     return env
 
 
+def _terminate_runner_process(proc: subprocess.Popen[str], *, kill: bool) -> None:
+    if proc.poll() is not None:
+        return
+    sig = signal.SIGKILL if kill else signal.SIGTERM
+    try:
+        os.killpg(proc.pid, sig)
+    except ProcessLookupError:
+        return
+    except OSError:
+        if kill:
+            proc.kill()
+        else:
+            proc.terminate()
+
+
 def run_codex_rollout(
     *,
     runner_bin: Path,
@@ -151,6 +167,7 @@ def run_codex_rollout(
     instance_uuid: str | None = None,
     spawn_child_handler_context_path: Path | None = None,
     token_usage_callback: TokenUsageCallback | None = None,
+    stop_requested: Callable[[], bool] | None = None,
     progress_callback: Callable[..., None] | None = None,
 ) -> dict[str, Any]:
     runner_bin = runner_bin.expanduser().resolve()
@@ -217,6 +234,9 @@ def run_codex_rollout(
     request_path.write_text(json.dumps(request, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     os.chmod(request_path, 0o600)
 
+    def _stop_requested() -> bool:
+        return stop_requested is not None and stop_requested()
+
     env = _prepare_rollout_env(
         workdir=workdir,
         worker_state_dir=worker_state_dir,
@@ -239,6 +259,7 @@ def run_codex_rollout(
             text=True,
             encoding="utf-8",
             bufsize=1,
+            start_new_session=True,
         )
         assert proc.stdin is not None
         assert proc.stdout is not None
@@ -248,6 +269,8 @@ def run_codex_rollout(
         deadline = started_at + timeout_seconds + 15
         timed_out = False
         budget_exhausted = False
+        cancelled = False
+        cancel_reason: str | None = None
         while True:
             if proc.poll() is not None:
                 remaining = proc.stdout.read()
@@ -269,9 +292,33 @@ def run_codex_rollout(
                         if state.get("budget_exhausted"):
                             budget_exhausted = True
                 break
+            if _stop_requested():
+                cancelled = True
+                cancel_reason = "child_slots_full"
+                if progress_callback is not None:
+                    progress_callback("worker_cancel_requested", reason=cancel_reason)
+                _terminate_runner_process(proc, kill=False)
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    _terminate_runner_process(proc, kill=True)
+                    proc.wait()
+                remaining = proc.stdout.read()
+                if remaining:
+                    for raw_line in remaining.splitlines():
+                        _handle_runner_line(
+                            raw_line,
+                            events_fh=events_fh,
+                            progress_callback=progress_callback,
+                            state=state,
+                            rollout_token_budget_tokens=rollout_token_budget_tokens,
+                            token_usage_callback=token_usage_callback,
+                        )
+                break
             if time.monotonic() > deadline:
                 timed_out = True
-                proc.kill()
+                _terminate_runner_process(proc, kill=True)
+                proc.wait()
                 remaining = proc.stdout.read()
                 if remaining:
                     for raw_line in remaining.splitlines():
@@ -319,6 +366,25 @@ def run_codex_rollout(
     tokens_transferred_out = int(state.get("tokens_transferred_out") or 0)
     effective_budget = state.get("effective_rollout_token_budget_tokens")
     charged_tokens = tokens_spent + tokens_reserved_for_children + tokens_transferred_out
+    if cancelled:
+        return {
+            "final_text": final_text,
+            "status": "cancelled",
+            "stop_reason": cancel_reason or "cancelled",
+            "error_code": cancel_reason or "cancelled",
+            "error_message": "Codex rollout stopped because the child slot cap is full.",
+            "thread_id": thread_id,
+            "session_id": session_id,
+            "tokens_spent": tokens_spent,
+            "tokens_reserved_for_children": tokens_reserved_for_children,
+            "tokens_transferred_in": tokens_transferred_in,
+            "tokens_transferred_out": tokens_transferred_out,
+            "rollout_token_budget_tokens": rollout_token_budget_tokens,
+            "effective_rollout_token_budget_tokens": effective_budget,
+            "request_path": str(request_path),
+            "stderr_path": str(stderr_path),
+            "events_path": str(stdout_events_path),
+        }
     if budget_exhausted:
         return {
             "final_text": final_text,
