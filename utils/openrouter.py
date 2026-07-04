@@ -204,7 +204,7 @@ bash_tool: dict[str, Any] = {
 budget_status_tool: dict[str, Any] = {
     "type": "function",
     "name": "budget_status",
-    "description": "Return this rollout's token budget, spent tokens, reserved/spent continuation budget, transfers, and remaining budget.",
+    "description": "Return this rollout's token budget, spent tokens, reserved/spent continuation budget, transfers, remaining budget, and minimum_child_budget_tokens.",
     "strict": None,
     "parameters": {
         "type": "object",
@@ -268,9 +268,13 @@ spawn_child_tool: dict[str, Any] = {
     "type": "function",
     "name": "spawn_child",
     "description": (
-        "Claim a next-iteration rollout slot by passing the child's inherited "
-        "prompt, optionally copying a workspace-local directory into the child "
-        "workspace, and reserving exactly initial_budget_tokens from this rollout."
+        "Competitively claim a next-iteration rollout slot by passing the child's "
+        "inherited prompt, optionally copying a workspace-local directory into "
+        "the child workspace, and reserving exactly initial_budget_tokens from "
+        "this rollout. initial_budget_tokens must be at least the runtime "
+        "minimum_child_budget_tokens. Slots are first-come first-served; one "
+        "rollout may claim multiple slots, and calls fail without reserving "
+        "budget after the task slot cap is full."
     ),
     "strict": None,
     "parameters": {
@@ -286,7 +290,7 @@ spawn_child_tool: dict[str, Any] = {
             },
             "initial_budget_tokens": {
                 "type": "integer",
-                "description": "Positive token budget to reserve from this rollout and assign exactly to the claimed slot.",
+                "description": "Token budget to reserve from this rollout and assign exactly to the claimed slot. Must be at least minimum_child_budget_tokens from runtime.md.",
             },
         },
         "required": ["prompt", "initial_budget_tokens"],

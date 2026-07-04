@@ -668,7 +668,7 @@ fn metalanguage_dynamic_tools() -> Vec<DynamicToolSpec> {
             name: "budget_status".to_string(),
             description: concat!(
                 "Return this rollout's token budget, spent tokens, reserved child ",
-                "budget, and remaining budget."
+                "budget, remaining budget, and minimum_child_budget_tokens."
             )
             .to_string(),
             input_schema: json!({
@@ -711,7 +711,8 @@ fn metalanguage_dynamic_tools() -> Vec<DynamicToolSpec> {
             description: concat!(
                 "Claim a next-iteration rollout slot by passing the child's inherited ",
                 "prompt, optionally copying a workspace-local directory into the child ",
-                "workspace, and reserving exactly initial_budget_tokens from this rollout."
+                "workspace, and reserving exactly initial_budget_tokens from this rollout. ",
+                "initial_budget_tokens must be at least minimum_child_budget_tokens from runtime.md."
             )
             .to_string(),
             input_schema: json!({
@@ -727,7 +728,7 @@ fn metalanguage_dynamic_tools() -> Vec<DynamicToolSpec> {
                     },
                     "initial_budget_tokens": {
                         "type": "integer",
-                        "description": "Positive token budget to reserve from this rollout and assign exactly to the claimed slot."
+                        "description": "Token budget to reserve from this rollout and assign exactly to the claimed slot. Must be at least minimum_child_budget_tokens from runtime.md."
                     }
                 },
                 "required": ["prompt", "initial_budget_tokens"],
