@@ -10,14 +10,21 @@ Lineage continues only through a successful
 `spawn_child(prompt, initial_budget_tokens, workspace_dir)` call.
 `submit_solution(uuid, answer)` can add reward budget on correct solves, but
 submission by itself does not create a successor. An unsolved rollout can still
-spawn with its lower remaining budget.
+spawn only if it retains at least the minimum child budget. A child slot is only
+useful if it receives enough budget to solve and spawn again; correct solves are
+the main way to earn that budget. The minimum valid child budget is
+`minimum_child_budget_tokens` from `runtime.md`, equal to the configured initial
+rollout budget.
 
-Treat continuation as part of task completion, not as a separate epilogue. Each
-successful child slot becomes a later rollout assigned another task. After
-`submit_solution` returns, use the returned budget status or `budget_status()` to
-choose an `initial_budget_tokens` value no larger than remaining budget, write a
-durable successor prompt, and call `spawn_child` before emitting a final
-message.
+Treat continuation as part of task completion, not as a separate epilogue. Child
+slotting is competitive: slots are first-come first-served, one rollout may
+claim multiple child slots, and the batch can end once all child slots are
+claimed. Each successful child slot becomes a later rollout assigned another
+task. Preferred loop: solve one tractable problem, call `submit_solution`, use
+the returned budget status or `budget_status()` to choose an
+`initial_budget_tokens` value no larger than remaining budget, write a durable
+successor prompt, and call `spawn_child`. `initial_budget_tokens` must also be
+at least `minimum_child_budget_tokens`.
 
 `spawn_child` stores the required non-empty `prompt` in supervisor-side slot
 metadata as the child rollout's initial prompt. If `workspace_dir` is provided
@@ -25,8 +32,9 @@ and non-blank, it must name a workspace-local directory that is not the rollout
 root; its contents are copied into the child rollout root. If `workspace_dir` is
 omitted or blank, the child gets no inherited workspace files beyond generated
 runtime files, symlinks, and `seed_output/`. The child slot receives exactly
-`initial_budget_tokens`; the call fails if the parent does not have that much
-remaining budget.
+`initial_budget_tokens`; the call fails if that value is below
+`minimum_child_budget_tokens`, if the parent does not have that much remaining
+budget, or if the task's child slots are already full.
 
 `transfer_tokens(target_instance_uuid, amount_tokens)` can move budget to a live
 same-task peer listed in `runtime.md`.

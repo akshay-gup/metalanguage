@@ -31,14 +31,19 @@ while budget remains.
 Another rollout may also earn reward for the same uuid during this iteration.
 Solved problems are removed from future pool copies before the next iteration.
 
-Task completion includes both scoring your answer and creating a future
-task attempt. After `submit_solution` returns, prepare a durable successor
-prompt and call `spawn_child(prompt="...", initial_budget_tokens=...)` before
-stopping. If the child needs inherited workspace files, write them under a
-workspace-local directory such as `seed_output/workspace/` and pass
-`workspace_dir="seed_output/workspace"`.
+Task completion includes creating a future task attempt. Preferred loop: solve
+one tractable problem, call `submit_solution(uuid, answer)`, then use credited
+or remaining budget to call
+`spawn_child(prompt="...", initial_budget_tokens=...)` with a durable successor
+prompt and at least `minimum_child_budget_tokens` from `runtime.md`. If the
+child needs inherited workspace files, write them under a workspace-local
+directory such as
+`seed_output/workspace/` and pass `workspace_dir="seed_output/workspace"`.
 Stopping after `submit_solution` without `spawn_child` solves only the current
 item and leaves no successor rollout to receive a later task.
+Spending almost all budget before spawning can leave no valid child budget.
+Child slots are first-come first-served. One rollout may claim multiple slots,
+and the batch can end once all child slots are claimed.
 
 ## Main-Loop Tools
 
@@ -53,7 +58,9 @@ section explains what each tool does.
 - `spawn_child(prompt, initial_budget_tokens, workspace_dir)`: stores the
   required non-empty child prompt in the claimed next-iteration rollout slot,
   optionally copies a workspace-local directory into the child workspace, and
-  assigns exactly that starting budget.
+  assigns exactly that starting budget. Calls fail without reserving budget if
+  `initial_budget_tokens` is below `minimum_child_budget_tokens` from
+  `runtime.md` or once the task's child slots are full.
 - `transfer_tokens(target_instance_uuid, amount_tokens)`: transfers budget to a
   live same-task peer listed in `runtime.md`.
 

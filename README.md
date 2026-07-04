@@ -46,7 +46,7 @@ take precedence over values in `.env`.
   1. by default, treat hard rows from the shuffled `m-a-p/SuperGPQA` split as the problem pool (override with `--dataset-name` and `--difficulty-filter`) and keep solved/cursor state in `--problem-queue`,
   1.5. use `moonshotai/kimi-k2.6` as the default OpenRouter model (override with `--model`),
   2. run 8 bootstrap rollout slots by default with `--num-rollouts`, then let later task width be set by spawned child slots,
-  3. assign each rollout index to the matching `spawn_child` slot claimed by the prior task's rollouts,
+  3. assign each rollout index to the matching `spawn_child` slot claimed by the prior task's rollouts, with each task's child-slot cap equal to that task's rollout count,
   3.5. expose a shared cross-rollout workspace at `--rollout-temp-root/shared_workspace` where any rollout agent can leave files/messages for any other rollout agent (files written during the task batch are cleaned up after the batch; durable consequences must be copied into a successor prompt, optional child workspace, archive artifact, solution, or later behavior),
   3.6. assign every rollout instance a UUID and record an `instance_created` event in the token-budget ledger,
   4. expose `archive/world_repo` by default as the durable cross-lineage Git archive available to every rollout (override with `--archive-repo-dir`),
@@ -55,7 +55,7 @@ take precedence over values in `.env`.
   6. register main-loop tools through the worker backend (OpenRouter tool payloads or Codex `DynamicToolSpec` entries), then run the worker with the inherited prompt and generated runtime context; operating doctrine is expected to come from the inherited prompt,
      while `runtime.md` contains only generated paths, runtime IDs, budgets, and peer lists,
   7. score answers submitted through `submit_solution(uuid, answer)`, grounding correctness against the private stored row selected by uuid,
-  8. after all rollouts in the active batch finish, advance lineage through the `spawn_child(prompt, initial_budget_tokens, workspace_dir)` slots claimed by those rollouts,
+  8. advance lineage through competitively claimed `spawn_child(prompt, initial_budget_tokens, workspace_dir)` slots; slots are first-come first-served, rollouts may claim multiple slots, and the active batch is stopped once the task's child-slot cap is reached,
   9. append run metadata to a growing JSONL log and print one-line summary per rollout.
 - Runtime containment:
   - generated state is rooted at `~/Documents/metalanguage_runs` by default;
@@ -82,14 +82,17 @@ take precedence over values in `.env`.
   - when `workspace_dir` is provided and non-blank, `spawn_child` copies that workspace-local directory's contents into the next slot's inherited workspace; `workspace_dir` must be inside the rollout workspace and must not be the rollout root;
   - when `workspace_dir` is omitted or blank, the child rollout starts with no inherited workspace files beyond generated runtime files, symlinks, and an empty `seed_output/`;
   - `spawn_child` does not require or create `prompt.md`; prompt text lives in slot metadata/logs outside the child workspace;
-  - the claimed slot receives exactly `initial_budget_tokens`; the call fails if the parent rollout does not have that much budget remaining;
+  - `spawn_child` is competitive: child slots are first-come first-served, one rollout may claim more than one slot, and calls fail cleanly without budget reservation after the task's slot cap is full;
+  - the claimed slot receives exactly `initial_budget_tokens`; the call fails if `initial_budget_tokens` is below `minimum_child_budget_tokens` (the configured initial rollout budget, default 300000) or if the parent rollout does not have that much budget remaining;
   - tool responses are counted when they are sent back as model input on the next model call.
 - Lineage behavior:
   - the first rollout batch can bootstrap without a parent slot;
   - a rollout continues only by successfully calling `spawn_child(prompt, initial_budget_tokens, workspace_dir)`;
   - the successor `prompt` should at minimum preserve the core instructions needed by the next child to inspect `runtime.md`, solve from `shared_workspace/problem_pool`, call `submit_solution(uuid, answer)`, use `archive/` and `shared_workspace/`, and spawn again;
   - solving/submitting alone does not continue lineage; if no rollout claims a child slot, that lineage dies and the loop exits with an error;
-  - correct solves can add reward budget for spawning, while unsolved rollouts may still spawn with their lower remaining budget;
+  - there is no correctness gate for spawning: correct solves can add reward budget, while unsolved rollouts may still spawn only if they retain at least the minimum child budget;
+  - a child slot is only useful if it receives enough budget to solve and spawn again; preferred behavior is to solve one tractable problem, submit it, then use credited or remaining budget to spawn quickly with a durable successor prompt;
+  - child slots are first-come first-served, so spending almost all budget before spawning can leave no valid child budget;
   - after bootstrap, missing parent slots are terminal and the loop will not silently continue as a fresh lineage.
 - Resume behavior:
   - runs automatically resume from existing `--runs-log` entries that match dataset/split/model/seed/generation/config/rollout-count;

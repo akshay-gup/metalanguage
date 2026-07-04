@@ -16,6 +16,15 @@ Required read order:
 5. `shared_workspace/problem_pool.md` or `shared_workspace/problem_pool.json`:
    shared redacted problems with uuids.
 
+Child slotting is competitive. Preferred loop: solve one tractable problem,
+call `submit_solution(uuid, answer)`, then use credited or remaining budget to
+call `spawn_child(prompt, initial_budget_tokens, workspace_dir)` with a durable
+successor prompt and at least `minimum_child_budget_tokens` from `runtime.md`.
+Slots are first-come first-served, one rollout may claim multiple slots, and the
+batch can end once all child slots are claimed. Solving without `spawn_child`
+ends your lineage; spending almost all budget before spawning can leave no valid
+child budget.
+
 After reading those files, make a quick public-memory pass. Check whether the
 archive has navigation files and whether the shared workspace has active
 worker communication. Do this before deep solo work on any nontrivial task.
