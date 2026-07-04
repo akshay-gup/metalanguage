@@ -1679,10 +1679,12 @@ def _claim_spawn_slot(
         slot_dir = slots_dir / f"slot_{slot_index:03d}_{child_instance_uuid[:8]}"
         slot_dir.mkdir(parents=True, exist_ok=False)
         child_workspace_dir: Path | None = None
+        source_workspace_consumed = False
         if source_workspace_dir is not None:
             child_workspace_dir = slot_dir / "workspace"
             child_workspace_dir.mkdir(parents=True, exist_ok=False)
-            copy_seed_workspace(source_workspace_dir, child_workspace_dir)
+            copy_seed_workspace(source_workspace_dir, child_workspace_dir, consume=True)
+            source_workspace_consumed = True
         manifest_path = slot_dir / "slot_manifest.json"
         metadata = {
             "child_instance_uuid": child_instance_uuid,
@@ -1694,6 +1696,7 @@ def _claim_spawn_slot(
             "initial_budget_tokens": initial_budget_tokens,
             "assigned_budget_tokens": initial_budget_tokens,
             "source_workspace_dir": str(source_workspace_dir) if source_workspace_dir is not None else None,
+            "source_workspace_consumed": source_workspace_consumed,
             "workspace_dir": str(child_workspace_dir) if child_workspace_dir is not None else None,
             "slot_dir": str(slot_dir),
             "manifest_path": str(manifest_path),
@@ -1735,6 +1738,7 @@ def _claim_spawn_slot(
             "child_instance_uuid": child_instance_uuid,
             "slot_dir": str(slot_dir),
             "workspace_dir": str(child_workspace_dir) if child_workspace_dir is not None else None,
+            "source_workspace_consumed": source_workspace_consumed,
             "prompt_chars": len(child_prompt),
             "initial_budget_tokens": initial_budget_tokens,
             "assigned_budget_tokens": initial_budget_tokens,
@@ -1973,11 +1977,22 @@ def _cleanup_rollout_shared_writes(root: Path, before: dict[Path, tuple[int, int
             continue
 
 
-def copy_seed_workspace(parent_dir: Path, workdir: Path, *, exclude_names: tuple[str, ...] = ()) -> None:
+def copy_seed_workspace(
+    parent_dir: Path,
+    workdir: Path,
+    *,
+    exclude_names: tuple[str, ...] = (),
+    consume: bool = False,
+) -> None:
     """Copy a workspace directory's contents into a rollout workspace."""
     if not parent_dir.exists():
         return
     excluded = set(exclude_names)
+    if consume:
+        parent_resolved = parent_dir.resolve()
+        workdir_resolved = workdir.resolve()
+        if parent_resolved == workdir_resolved or workdir_resolved.is_relative_to(parent_resolved):
+            raise ValueError("cannot consume a workspace while copying into itself")
 
     def _ignore_symlinks(directory: str, names: list[str]) -> list[str]:
         return [name for name in names if (Path(directory) / name).is_symlink()]
@@ -1993,6 +2008,8 @@ def copy_seed_workspace(parent_dir: Path, workdir: Path, *, exclude_names: tuple
         elif item.is_file():
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(item, dest)
+    if consume:
+        shutil.rmtree(parent_dir)
 
 
 LIMIT_ERROR_CODES = {
@@ -3595,7 +3612,11 @@ def main() -> None:
                 if parent_workspace_dir is not None:
                     if not parent_workspace_dir.is_dir():
                         raise RuntimeError(f"Spawned child workspace is missing: {parent_workspace_dir}")
-                    copy_seed_workspace(parent_workspace_dir, temp_dir)
+                    copy_seed_workspace(parent_workspace_dir, temp_dir, consume=True)
+                    _progress(
+                        "parent_workspace_consumed",
+                        parent_workspace_dir=str(parent_workspace_dir),
+                    )
             else:
                 if not bootstrap_seed_dir.exists():
                     raise RuntimeError(f"Bootstrap seed directory does not exist: {bootstrap_seed_dir}")
