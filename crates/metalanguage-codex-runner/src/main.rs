@@ -710,7 +710,7 @@ fn metalanguage_dynamic_tools() -> Vec<DynamicToolSpec> {
             name: "spawn_child".to_string(),
             description: concat!(
                 "Claim a next-iteration rollout slot by passing the child's inherited ",
-                "prompt, optionally copying a workspace-local directory into the child ",
+                "prompt, optionally transferring a workspace-local directory into the child ",
                 "workspace, and reserving exactly initial_budget_tokens from this rollout. ",
                 "initial_budget_tokens must be at least minimum_child_budget_tokens from runtime.md."
             )
@@ -724,7 +724,7 @@ fn metalanguage_dynamic_tools() -> Vec<DynamicToolSpec> {
                     },
                     "workspace_dir": {
                         "type": "string",
-                        "description": "Optional workspace-local directory whose contents should be copied into the child rollout root. Leave blank or omit for no inherited workspace files."
+                        "description": "Optional workspace-local directory whose contents should be transferred into the child rollout root. The source directory is deleted after a successful copy. Leave blank or omit for no inherited workspace files."
                     },
                     "initial_budget_tokens": {
                         "type": "integer",
