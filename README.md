@@ -51,7 +51,7 @@ take precedence over values in `.env`.
   3.6. assign every rollout instance a UUID and record an `instance_created` event in the token-budget ledger,
   4. expose `archive/world_repo` by default as the durable cross-lineage Git archive available to every rollout (override with `--archive-repo-dir`),
      using a per-rollout temporary worktree so only committed archive changes are merged back and uncommitted archive edits are discarded,
-  5. inject the selected parent slot's stored prompt as the rollout's initial user text, optionally copy that slot's inherited workspace directory into the rollout root, and write `shared_workspace/problem_pool.json` plus `shared_workspace/problem_pool.md`, one shared redacted pool copy of all currently unsolved problems keyed by uuid for the whole rollout batch; bootstrap rollouts receive the bundled seed packet in the initial prompt instead of root `README.md`/`SETUP.md`/`ECONOMY.md` files,
+  5. inject the selected parent slot's stored prompt as the rollout's initial user text, optionally transfer that slot's inherited workspace directory into the rollout root, and write `shared_workspace/problem_pool.json` plus `shared_workspace/problem_pool.md`, one shared redacted pool copy of all currently unsolved problems keyed by uuid for the whole rollout batch; bootstrap rollouts receive the bundled seed packet in the initial prompt instead of root `README.md`/`SETUP.md`/`ECONOMY.md` files,
   6. register main-loop tools through the worker backend (OpenRouter tool payloads or Codex `DynamicToolSpec` entries), then run the worker with the inherited prompt and generated runtime context; operating doctrine is expected to come from the inherited prompt,
      while `runtime.md` contains only generated paths, runtime IDs, budgets, and peer lists,
   7. score answers submitted through `submit_solution(uuid, answer)`, grounding correctness against the private stored row selected by uuid,
@@ -79,7 +79,7 @@ take precedence over values in `.env`.
   - rollouts can call `submit_solution(uuid, answer)`, `budget_status()`, `transfer_tokens(target_instance_uuid, amount_tokens)`, and `spawn_child(prompt, initial_budget_tokens, workspace_dir)` as main-loop tools;
   - `transfer_tokens` moves budget from one live same-task rollout to another by instance UUID; the sender's remaining budget decreases and the target's effective budget increases;
   - `spawn_child` stores the required non-empty `prompt` in supervisor-side slot metadata as the child rollout's next initial user text;
-  - when `workspace_dir` is provided and non-blank, `spawn_child` copies that workspace-local directory's contents into the next slot's inherited workspace; `workspace_dir` must be inside the rollout workspace and must not be the rollout root;
+  - when `workspace_dir` is provided and non-blank, `spawn_child` transfers that workspace-local directory's contents into the next slot's inherited workspace and deletes the source directory after a successful copy; `workspace_dir` must be inside the rollout workspace and must not be the rollout root;
   - when `workspace_dir` is omitted or blank, the child rollout starts with no inherited workspace files beyond generated runtime files, symlinks, and an empty `seed_output/`;
   - `spawn_child` does not require or create `prompt.md`; prompt text lives in slot metadata/logs outside the child workspace;
   - `spawn_child` is competitive: child slots are first-come first-served, one rollout may claim more than one slot, and calls fail cleanly without budget reservation after the task's slot cap is full;
@@ -98,7 +98,7 @@ take precedence over values in `.env`.
   - runs automatically resume from existing `--runs-log` entries that match dataset/split/model/seed/generation/config/rollout-count;
   - completed rollouts are skipped, partial tasks continue from missing rollout indices using each task's recorded rollout count;
   - `--problem-queue` is pool state, not the workspace copy: each task batch materializes all currently unsolved redacted problems in the shared workspace, and solved UIDs are marked only after the batch finishes so duplicate same-iteration solves can still receive reward;
-  - parent lineage candidates are loaded from `--rollout-temp-root/latest_parent_pool.json`, which is written from claimed `spawn_child` slot records and carries prompt metadata plus any optional inherited workspace path;
+  - parent lineage candidates are loaded from `--rollout-temp-root/latest_parent_pool.json`, which is written from claimed `spawn_child` slot records and carries prompt metadata plus any optional inherited workspace path; inherited workspace directories are consumed when copied into a child rollout root;
   - disable this with `--no-resume`.
 - Manual iteration:
   - use `--step` to run exactly one rollout batch, choosing the first incomplete batch from the resume log or the next pool batch index;

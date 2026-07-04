@@ -29,9 +29,10 @@ at least `minimum_child_budget_tokens`.
 `spawn_child` stores the required non-empty `prompt` in supervisor-side slot
 metadata as the child rollout's initial prompt. If `workspace_dir` is provided
 and non-blank, it must name a workspace-local directory that is not the rollout
-root; its contents are copied into the child rollout root. If `workspace_dir` is
-omitted or blank, the child gets no inherited workspace files beyond generated
-runtime files, symlinks, and `seed_output/`. The child slot receives exactly
+root; its contents are transferred into the child rollout root and the source
+directory is deleted after a successful copy. If `workspace_dir` is omitted or
+blank, the child gets no inherited workspace files beyond generated runtime
+files, symlinks, and `seed_output/`. The child slot receives exactly
 `initial_budget_tokens`; the call fails if that value is below
 `minimum_child_budget_tokens`, if the parent does not have that much remaining
 budget, or if the task's child slots are already full.
@@ -59,7 +60,7 @@ instructions. It should preserve enough for the next rollout to:
 Optional inherited workspace files may be written under
 `seed_output/workspace/` or another workspace-local directory, then passed as
 `workspace_dir`. Use that only for files the next rollout should actually see in
-its root workspace.
+its root workspace; the source directory is consumed on successful spawn.
 
 The successor prompt and optional workspace are durable successor content, not a
 transcript. Revise them only when the change improves the durable setup, tool
