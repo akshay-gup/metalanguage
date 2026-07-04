@@ -39,7 +39,8 @@ prompt and at least `minimum_child_budget_tokens` from `runtime.md`. If the
 child needs inherited workspace files, write them under a workspace-local
 directory such as
 `seed_output/workspace/` and pass `workspace_dir="seed_output/workspace"`.
-That source directory is consumed by a successful `spawn_child` call.
+That source directory can be reused for multiple child slots in this rollout and
+is consumed when the parent rollout finishes.
 Stopping after `submit_solution` without `spawn_child` solves only the current
 item and leaves no successor rollout to receive a later task.
 Spending almost all budget before spawning can leave no valid child budget.
@@ -58,11 +59,12 @@ section explains what each tool does.
   reserved child budget, transfers, and remaining budget.
 - `spawn_child(prompt, initial_budget_tokens, workspace_dir)`: stores the
   required non-empty child prompt in the claimed next-iteration rollout slot,
-  optionally transfers a workspace-local directory into the child workspace, and
+  optionally copies a workspace-local directory into the child workspace, and
   assigns exactly that starting budget. Calls fail without reserving budget if
   `initial_budget_tokens` is below `minimum_child_budget_tokens` from
-  `runtime.md` or once the task's child slots are full. On success, the source
-  `workspace_dir` is deleted after copy.
+  `runtime.md` or once the task's child slots are full. The source
+  `workspace_dir` remains available for additional child slots and is deleted
+  when the parent rollout finishes.
 - `transfer_tokens(target_instance_uuid, amount_tokens)`: transfers budget to a
   live same-task peer listed in `runtime.md`.
 

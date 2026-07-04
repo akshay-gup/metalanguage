@@ -1679,12 +1679,10 @@ def _claim_spawn_slot(
         slot_dir = slots_dir / f"slot_{slot_index:03d}_{child_instance_uuid[:8]}"
         slot_dir.mkdir(parents=True, exist_ok=False)
         child_workspace_dir: Path | None = None
-        source_workspace_consumed = False
         if source_workspace_dir is not None:
             child_workspace_dir = slot_dir / "workspace"
             child_workspace_dir.mkdir(parents=True, exist_ok=False)
-            copy_seed_workspace(source_workspace_dir, child_workspace_dir, consume=True)
-            source_workspace_consumed = True
+            copy_seed_workspace(source_workspace_dir, child_workspace_dir)
         manifest_path = slot_dir / "slot_manifest.json"
         metadata = {
             "child_instance_uuid": child_instance_uuid,
@@ -1696,7 +1694,6 @@ def _claim_spawn_slot(
             "initial_budget_tokens": initial_budget_tokens,
             "assigned_budget_tokens": initial_budget_tokens,
             "source_workspace_dir": str(source_workspace_dir) if source_workspace_dir is not None else None,
-            "source_workspace_consumed": source_workspace_consumed,
             "workspace_dir": str(child_workspace_dir) if child_workspace_dir is not None else None,
             "slot_dir": str(slot_dir),
             "manifest_path": str(manifest_path),
@@ -1738,7 +1735,6 @@ def _claim_spawn_slot(
             "child_instance_uuid": child_instance_uuid,
             "slot_dir": str(slot_dir),
             "workspace_dir": str(child_workspace_dir) if child_workspace_dir is not None else None,
-            "source_workspace_consumed": source_workspace_consumed,
             "prompt_chars": len(child_prompt),
             "initial_budget_tokens": initial_budget_tokens,
             "assigned_budget_tokens": initial_budget_tokens,
@@ -2010,6 +2006,37 @@ def copy_seed_workspace(
             shutil.copy2(item, dest)
     if consume:
         shutil.rmtree(parent_dir)
+
+
+def consume_spawn_source_workspaces(
+    *,
+    spawned_child_slots: list[dict[str, Any]],
+    rollout_workdir: Path,
+) -> list[str]:
+    consumed: list[str] = []
+    seen: set[Path] = set()
+    rollout_root = rollout_workdir.resolve()
+    for slot in spawned_child_slots:
+        raw_source = slot.get("source_workspace_dir")
+        if not isinstance(raw_source, str) or not raw_source:
+            continue
+        source_dir = Path(raw_source)
+        try:
+            source_resolved = source_dir.resolve()
+        except OSError:
+            continue
+        if source_resolved in seen:
+            continue
+        seen.add(source_resolved)
+        if (
+            source_resolved == rollout_root
+            or rollout_root not in source_resolved.parents
+            or not source_resolved.is_dir()
+        ):
+            continue
+        shutil.rmtree(source_resolved)
+        consumed.append(str(source_resolved))
+    return consumed
 
 
 LIMIT_ERROR_CODES = {
@@ -3936,6 +3963,15 @@ def main() -> None:
                 spawn_slots_path,
                 source_rollout_index=rollout_index,
             )
+            consumed_source_workspaces = consume_spawn_source_workspaces(
+                spawned_child_slots=spawned_child_slots,
+                rollout_workdir=temp_dir,
+            )
+            if consumed_source_workspaces:
+                _progress(
+                    "source_workspaces_consumed",
+                    consumed_source_workspace_dirs=consumed_source_workspaces,
+                )
             next_child_slot = spawned_child_slots[0] if spawned_child_slots else None
             spawned_child_slot_indices: list[int] = []
             for slot in spawned_child_slots:
@@ -3981,6 +4017,7 @@ def main() -> None:
                 "child_prompt_viable": child_prompt_viable,
                 "spawned_child_slot_count": len(spawned_child_slots),
                 "spawned_child_slot_indices": spawned_child_slot_indices,
+                "consumed_source_workspace_dirs": consumed_source_workspaces,
                 "child_slot_cap": child_slot_cap,
                 "minimum_child_budget_tokens": minimum_child_budget_tokens,
                 "budget_ledger_events": str(budget_ledger_events),

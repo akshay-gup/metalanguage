@@ -269,7 +269,7 @@ spawn_child_tool: dict[str, Any] = {
     "name": "spawn_child",
     "description": (
         "Competitively claim a next-iteration rollout slot by passing the child's "
-        "inherited prompt, optionally transferring a workspace-local directory into "
+        "inherited prompt, optionally copying a workspace-local directory into "
         "the child workspace, and reserving exactly initial_budget_tokens from "
         "this rollout. initial_budget_tokens must be at least the runtime "
         "minimum_child_budget_tokens. Slots are first-come first-served; one "
@@ -286,7 +286,7 @@ spawn_child_tool: dict[str, Any] = {
             },
             "workspace_dir": {
                 "type": "string",
-                "description": "Optional workspace-local directory whose contents should be transferred into the child rollout root. The source directory is deleted after a successful copy. Leave blank or omit for no inherited workspace files.",
+                "description": "Optional workspace-local directory whose contents should be copied into the child slot's inherited workspace. The same source can be reused for multiple child slots in this rollout and is consumed when the parent rollout finishes. Leave blank or omit for no inherited workspace files.",
             },
             "initial_budget_tokens": {
                 "type": "integer",
