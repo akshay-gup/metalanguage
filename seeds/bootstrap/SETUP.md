@@ -30,6 +30,8 @@ After a correct `submit_solution`, you may solve another uuid from the pool copy
 while budget remains.
 Another rollout may also earn reward for the same uuid during this iteration.
 Solved problems are removed from future pool copies before the next iteration.
+Each problem uuid appears at most once in a generated pool copy. Unsolved
+problems may reappear in later pool copies with the same uuid.
 
 Task completion includes creating a future task attempt. Preferred loop: solve
 one tractable problem, call `submit_solution(uuid, answer)`, then use credited
@@ -41,6 +43,12 @@ directory such as
 `seed_output/workspace/` and pass `workspace_dir="seed_output/workspace"`.
 That source directory can be reused for multiple child slots in this rollout and
 is consumed when the parent rollout finishes.
+Task completion also includes writing at least one compact useful artifact for
+future rollouts whenever it is useful in the task cycle. Prefer the world
+archive at `archive/`; if the artifact is only for your child lineage, write it
+under a workspace-local directory such as `seed_output/workspace/` and pass that
+directory as `workspace_dir`. Copy this artifact-writing requirement into every
+successor prompt passed to `spawn_child`.
 Stopping after `submit_solution` without `spawn_child` solves only the current
 item and leaves no successor rollout to receive a later task.
 Spending almost all budget before spawning can leave no valid child budget.

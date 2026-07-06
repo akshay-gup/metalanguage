@@ -23,8 +23,12 @@ claimed. Each successful child slot becomes a later rollout assigned another
 task. Preferred loop: solve one tractable problem, call `submit_solution`, use
 the returned budget status or `budget_status()` to choose an
 `initial_budget_tokens` value no larger than remaining budget, write a durable
-successor prompt, and call `spawn_child`. `initial_budget_tokens` must also be
-at least `minimum_child_budget_tokens`.
+successor prompt, and call `spawn_child`. At any useful point in the task cycle,
+write at least one compact useful artifact for future rollouts. Prefer writing
+the artifact into the world archive at `archive/`; otherwise write it under a
+workspace-local directory such as `seed_output/workspace/` and pass that
+directory as `workspace_dir`.
+`initial_budget_tokens` must also be at least `minimum_child_budget_tokens`.
 
 `spawn_child` stores the required non-empty `prompt` in supervisor-side slot
 metadata as the child rollout's initial prompt. If `workspace_dir` is provided
@@ -48,15 +52,23 @@ or depend on `prompt.md`; prompt text belongs in slot metadata/logs, not in the
 child workspace.
 
 A valid minimal successor prompt is a compact continuation of the current core
-instructions. It should preserve enough for the next rollout to:
+instructions. It should preserve these requirements for the next rollout without
+imposing an order except that spawning must happen before stopping:
 
-1. read `runtime.md` and the shared problem pool;
-2. solve one or more problems from `shared_workspace/problem_pool.md` or
-   `shared_workspace/problem_pool.json`;
-3. call `submit_solution(uuid, answer)`;
-4. use `archive/` and `shared_workspace/` when useful;
-5. call `spawn_child(prompt=..., initial_budget_tokens=..., workspace_dir=...)`
-   again before stopping.
+- read `runtime.md` and the shared problem pool;
+- solve one or more problems from `shared_workspace/problem_pool.md` or
+  `shared_workspace/problem_pool.json`;
+- treat problem uuids as stable pool identifiers: each appears at most once in a
+  generated pool copy, unsolved problems may reappear later with the same uuid,
+  and solved uuids leave future pool copies after batch finalization;
+- call `submit_solution(uuid, answer)`;
+- use `archive/` and `shared_workspace/` when useful;
+- write at least one compact useful artifact for future rollouts whenever it is
+  useful in the task cycle, preferably in the world archive at `archive/` or
+  otherwise in an inherited workspace;
+- copy the artifact-writing requirement into its own successor prompt;
+- call `spawn_child(prompt=..., initial_budget_tokens=..., workspace_dir=...)`
+  again before stopping.
 
 Optional inherited workspace files may be written under
 `seed_output/workspace/` or another workspace-local directory, then passed as
@@ -66,7 +78,8 @@ finishes.
 
 The successor prompt and optional workspace are durable successor content, not a
 transcript. Revise them only when the change improves the durable setup, tool
-contract, resource economy, or continuation mechanics.
+contract, resource economy, artifact-writing requirement, or continuation
+mechanics.
 
 Do not place generated runtime files, problem statements, snapshots,
 orchestrator metadata, or hidden supervisor state into the successor prompt or
@@ -83,6 +96,11 @@ tasks.
 
 Archive material should be selective, navigable, and intentionally committed.
 Raw scratch work belongs in the rollout workspace, not the archive.
+
+As part of the task cycle, produce at least one future-facing artifact whenever
+it is useful. Prefer putting that artifact in the archive when it has
+cross-lineage value; otherwise carry it through the child workspace with
+`workspace_dir`.
 
 ## Shared Workspace
 

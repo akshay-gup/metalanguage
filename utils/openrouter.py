@@ -282,7 +282,7 @@ spawn_child_tool: dict[str, Any] = {
         "properties": {
             "prompt": {
                 "type": "string",
-                "description": "Required non-empty initial prompt for the child rollout. Include the durable core instructions needed to solve, submit_solution, use archive/shared_workspace, and spawn again.",
+                "description": "Required non-empty initial prompt for the child rollout. Include the durable core instructions for solving, submit_solution, archive/shared_workspace use, writing a useful artifact into archive/ or inherited workspace whenever useful, preserving this artifact-writing requirement, and spawning again.",
             },
             "workspace_dir": {
                 "type": "string",

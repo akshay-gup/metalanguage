@@ -88,7 +88,7 @@ take precedence over values in `.env`.
 - Lineage behavior:
   - the first rollout batch can bootstrap without a parent slot;
   - a rollout continues only by successfully calling `spawn_child(prompt, initial_budget_tokens, workspace_dir)`;
-  - the successor `prompt` should at minimum preserve the core instructions needed by the next child to inspect `runtime.md`, solve from `shared_workspace/problem_pool`, call `submit_solution(uuid, answer)`, use `archive/` and `shared_workspace/`, and spawn again;
+  - the successor `prompt` should at minimum preserve the core instructions needed by the next child to inspect `runtime.md`, solve from `shared_workspace/problem_pool`, call `submit_solution(uuid, answer)`, use `archive/` and `shared_workspace/`, write at least one compact useful artifact into the world archive or inherited workspace whenever useful in the task cycle, preserve that artifact-writing requirement, and spawn again before stopping;
   - solving/submitting alone does not continue lineage; if no rollout claims a child slot, that lineage dies and the loop exits with an error;
   - there is no correctness gate for spawning: correct solves can add reward budget, while unsolved rollouts may still spawn only if they retain at least the minimum child budget;
   - a child slot is only useful if it receives enough budget to solve and spawn again; preferred behavior is to solve one tractable problem, submit it, then use credited or remaining budget to spawn quickly with a durable successor prompt;
@@ -109,7 +109,7 @@ take precedence over values in `.env`.
   - all currently unsolved redacted problems are written to `shared_workspace/problem_pool.json` and `shared_workspace/problem_pool.md`;
   - rollouts select a uuid directly from those shared pool files; there is no problem request or lease tool;
   - answers are scored only when the submitted uuid exists in that iteration's shared pool copy;
-  - after each rollout batch, any problem solved by at least one rollout is removed from future pool copies.
+  - each uuid appears at most once in a generated pool copy, unsolved problems may reappear later with the same uuid, and after each rollout batch any problem solved by at least one rollout is removed from future pool copies.
 
 ### Codex rollout backend
 

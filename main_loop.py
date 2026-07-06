@@ -132,7 +132,12 @@ READ_README_TASK_INSTRUCTIONS = (
     "claim multiple slots, and the batch can end once every slot is claimed. "
     "Solving without spawn_child ends your lineage; spending almost all budget "
     "before spawning can leave no valid child budget. Optionally write workspace "
-    "files under seed_output/workspace/ before spawning."
+    "files under seed_output/workspace/ before spawning. As part of the task "
+    "cycle, write at least one compact useful artifact for future rollouts "
+    "whenever it is useful: preferably into the world archive at archive/, or "
+    "otherwise into a workspace-local directory such as seed_output/workspace/ "
+    "that you pass as workspace_dir. Copy this artifact-writing requirement into "
+    "every successor prompt you pass to spawn_child."
 )
 CODEX_READ_README_BASE_INSTRUCTIONS = READ_README_TASK_INSTRUCTIONS
 
@@ -483,6 +488,13 @@ def _format_runtime_markdown(
         f"- child_slot_cap: {child_slot_cap if child_slot_cap is not None else ''}",
         f"- minimum_child_budget_tokens: {minimum_child_budget_tokens if minimum_child_budget_tokens is not None else ''}",
         f"- problem_pool_count: {problem_pool_count if problem_pool_count is not None else ''}",
+        "",
+        "## Problem Pool Semantics",
+        "",
+        "- each problem uuid appears at most once in this pool copy;",
+        "- unsolved problems may reappear in later pool copies with the same uuid;",
+        "- solved uuids are removed from future pool copies after the batch finalizes;",
+        "- duplicate same-iteration solves can still be credited because all rollouts share this batch's pool copy.",
     ]
     if live_peer_instances:
         lines.extend(["", "## Live Peer Instances", ""])
@@ -1031,10 +1043,12 @@ def _write_problem_pool_copy(
             "Choose any currently unsolved problem by uuid, solve it, then call "
             "submit_solution(uuid=..., answer=...) to score it. Multiple rollouts "
             "may claim reward for the same problem during this iteration; solved "
-            "problems are removed before the next iteration. The pool may be large: "
-            "inspect it deliberately, use search or the JSON structure to find a "
-            "problem you can solve, then read the selected problem entry carefully "
-            "before submitting its exact uuid."
+            "problems are removed before the next iteration. Each uuid appears at "
+            "most once in this pool copy; unsolved problems may reappear later with "
+            "the same uuid. The pool may be large: inspect it deliberately, use "
+            "search or the JSON structure to find a problem you can solve, then "
+            "read the selected problem entry carefully before submitting its exact "
+            "uuid."
         ),
         "problems": visible_records,
     }
@@ -1051,6 +1065,8 @@ def _write_problem_pool_copy(
         "The pool may be large. Inspect it deliberately, use search or the JSON structure to find a problem you can solve, then read the selected problem entry carefully before submitting its exact uuid.",
         "",
         "Multiple rollouts may claim reward for the same problem during this iteration. Solved problems are removed before the next iteration.",
+        "",
+        "Each uuid appears at most once in this pool copy. Unsolved problems may reappear in later pool copies with the same uuid.",
         "",
     ]
     for idx, record in enumerate(records, start=1):
