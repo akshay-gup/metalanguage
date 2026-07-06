@@ -157,6 +157,7 @@ def run_codex_rollout(
     codex_home: Path,
     seed_output_dir: Path,
     archive_repo_dir: Path,
+    archive_git_dir: Path | None,
     shared_workspace_dir: Path,
     rollout_username: str | None,
     timeout_seconds: int,
@@ -174,6 +175,25 @@ def run_codex_rollout(
     if not runner_bin.exists():
         raise FileNotFoundError(f"Codex runner binary does not exist: {runner_bin}")
 
+    workspace_roots = [
+        str(workdir),
+        str(seed_output_dir),
+        str(archive_repo_dir),
+        str(shared_workspace_dir),
+        str(worker_state_dir),
+    ]
+    additional_writable_roots = [
+        str(seed_output_dir),
+        str(archive_repo_dir),
+        str(shared_workspace_dir),
+        str(worker_state_dir),
+    ]
+    if archive_git_dir is not None:
+        # Linked archive worktrees write Git indexes, objects, and refs through
+        # the persistent repository's common .git directory.
+        workspace_roots.append(str(archive_git_dir))
+        additional_writable_roots.append(str(archive_git_dir))
+
     request = {
         "model": model,
         "cwd": str(workdir),
@@ -181,19 +201,8 @@ def run_codex_rollout(
         "initial_user_text": initial_user_text,
         "timeout_seconds": timeout_seconds,
         "sandbox_mode": sandbox_mode,
-        "workspace_roots": [
-            str(workdir),
-            str(seed_output_dir),
-            str(archive_repo_dir),
-            str(shared_workspace_dir),
-            str(worker_state_dir),
-        ],
-        "additional_writable_roots": [
-            str(seed_output_dir),
-            str(archive_repo_dir),
-            str(shared_workspace_dir),
-            str(worker_state_dir),
-        ],
+        "workspace_roots": workspace_roots,
+        "additional_writable_roots": additional_writable_roots,
     }
     if rollout_token_budget_tokens is not None:
         request["rollout_token_budget_tokens"] = rollout_token_budget_tokens
