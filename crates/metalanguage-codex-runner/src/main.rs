@@ -721,11 +721,11 @@ fn metalanguage_dynamic_tools() -> Vec<DynamicToolSpec> {
                 "properties": {
                     "prompt": {
                         "type": "string",
-                        "description": "Required non-empty initial prompt for the child rollout. Include the durable core instructions for solving, submit_solution, archive/shared_workspace use, writing a useful artifact into archive/ or inherited workspace whenever useful, preserving this artifact-writing requirement, and spawning again."
+                        "description": "Required non-empty initial prompt for the child rollout. Use this prompt for durable current instructions for solving, submit_solution, archive/shared_workspace use, writing a useful artifact into archive/ or inherited workspace whenever useful, preserving this artifact-writing requirement, and spawning again."
                     },
                     "workspace_dir": {
                         "type": "string",
-                        "description": "Optional workspace-local directory whose contents should be copied into the child slot's inherited workspace. The same source can be reused for multiple child slots in this rollout and is consumed when the parent rollout finishes. Leave blank or omit for no inherited workspace files."
+                        "description": "Optional workspace-local directory whose contents should be copied into the child slot's inherited workspace. Nothing is copied implicitly; include README.md here if the child should inherit it. The same source can be reused for multiple child slots in this rollout and is consumed when the parent rollout finishes. Leave blank or omit for no inherited workspace files."
                     },
                     "initial_budget_tokens": {
                         "type": "integer",

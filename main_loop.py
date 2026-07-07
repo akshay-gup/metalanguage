@@ -117,15 +117,17 @@ DEFAULT_SOLVE_REWARD_TOKEN_CREDIT_TOKENS = 300_000
 DEFAULT_RUNTIME_ROOT = Path.home() / "Documents" / "metalanguage_runs"
 DEFAULT_CODEX_HOME = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
 BUNDLED_BOOTSTRAP_SEED_DIR = PROJECT_ROOT / "seeds" / "bootstrap"
-CORE_SEED_FILENAMES = ("README.md", "SETUP.md", "ECONOMY.md")
+STABLE_SEED_FILENAMES = ("README.md",)
+PROMPT_SEED_FILENAMES = ("PROMPT.md",)
 READ_README_TASK_INSTRUCTIONS = (
-    "Read the inherited seed packet. If README.md is present, start there. If "
-    "README.md, SETUP.md, and ECONOMY.md are embedded in this initial prompt "
-    "instead, follow that embedded packet. Then follow the referenced task "
-    "instructions. Try to keep your lineage alive under competitive child "
-    "slotting. Preferred loop: solve one tractable problem from the shared "
-    "problem pool, call submit_solution(uuid=..., answer=...), then use "
-    "credited or remaining budget to call "
+    "Read README.md first. Then follow the current task instructions from this "
+    "prompt, runtime.md, and the shared problem pool. The root README.md is a "
+    "stable inherited file only when a parent explicitly copies it forward via "
+    "workspace_dir; the spawn_child prompt is the evolvable handoff for detailed "
+    "task, tool, economy, and continuation instructions. Try to keep your "
+    "lineage alive under competitive child slotting. Preferred loop: solve one "
+    "tractable problem from the shared problem pool, call submit_solution(uuid=..., "
+    "answer=...), then use credited or remaining budget to call "
     "spawn_child(prompt=..., initial_budget_tokens=..., workspace_dir=...) "
     "with a durable successor prompt and at least minimum_child_budget_tokens "
     "from runtime.md. Child slots are first-come first-served, a rollout may "
@@ -170,26 +172,33 @@ def load_dotenv(env_path: Path = DEFAULT_ENV_PATH) -> None:
 
 
 def _format_bootstrap_seed_prompt(seed_dir: Path) -> str:
-    sections: list[str] = []
-    for filename in CORE_SEED_FILENAMES:
+    for filename in STABLE_SEED_FILENAMES:
         path = seed_dir / filename
         if not path.is_file():
-            raise FileNotFoundError(f"Bootstrap seed is missing required core file: {path}")
+            raise FileNotFoundError(f"Bootstrap seed is missing required stable file: {path}")
+        if not path.read_text(encoding="utf-8").strip():
+            raise ValueError(f"Bootstrap seed stable file is empty: {path}")
+
+    sections: list[str] = []
+    for filename in PROMPT_SEED_FILENAMES:
+        path = seed_dir / filename
+        if not path.is_file():
+            raise FileNotFoundError(f"Bootstrap seed is missing required prompt file: {path}")
         content = path.read_text(encoding="utf-8").strip()
         if not content:
-            raise ValueError(f"Bootstrap seed core file is empty: {path}")
+            raise ValueError(f"Bootstrap seed prompt file is empty: {path}")
         sections.append(f"## {filename}\n\n{content}")
 
     packet = "\n\n---\n\n".join(sections)
     return (
         f"{READ_README_TASK_INSTRUCTIONS}\n\n"
-        "Bootstrap seed packet:\n"
-        "This first rollout receives README.md, SETUP.md, and ECONOMY.md here "
-        "instead of as files in the rollout root. The rollout root will not "
-        "contain those three core seed files. To continue the lineage, pass a "
-        "successor prompt that preserves the core instructions to "
-        "spawn_child(prompt=..., initial_budget_tokens=...), and pass "
-        "workspace_dir only for optional workspace files.\n\n"
+        "Bootstrap prompt packet:\n"
+        "The rollout root contains README.md as the stable inherited file. "
+        "PROMPT.md is embedded below for the bootstrap rollout's current "
+        "task/tool/economy instructions. To continue the lineage, pass a "
+        "successor prompt that preserves the current non-README instructions "
+        "needed by the next rollout. To pass README.md to the child, explicitly "
+        "copy it into the workspace_dir you pass to spawn_child.\n\n"
         f"{packet}"
     )
 
@@ -3671,7 +3680,7 @@ def main() -> None:
             else:
                 if not bootstrap_seed_dir.exists():
                     raise RuntimeError(f"Bootstrap seed directory does not exist: {bootstrap_seed_dir}")
-                copy_seed_workspace(bootstrap_seed_dir, temp_dir, exclude_names=CORE_SEED_FILENAMES)
+                copy_seed_workspace(bootstrap_seed_dir, temp_dir, exclude_names=PROMPT_SEED_FILENAMES)
                 rollout_initial_prompt = _format_bootstrap_seed_prompt(bootstrap_seed_dir)
 
             seed_output_dir = temp_dir / "seed_output"
