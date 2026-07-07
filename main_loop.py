@@ -3025,7 +3025,13 @@ def ensure_local_world_repo(repo_path: Path) -> None:
     if not has_commits:
         genesis_file = repo_path / "WORLD.md"
         genesis_file.write_text(
-            "# Local world repo\n\nPersistent local git substrate for rollout lineage.\n",
+            (
+                "# Local world repo\n\n"
+                "Persistent local git substrate for rollout lineage.\n\n"
+                "Archive edits persist only when they are committed to git. Each rollout "
+                "gets a temporary archive worktree; at finalization, committed changes are "
+                "merged back and uncommitted edits are discarded.\n"
+            ),
             encoding="utf-8",
         )
         subprocess.run(
