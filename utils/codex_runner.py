@@ -191,7 +191,6 @@ def run_codex_rollout(
     if archive_git_dir is not None:
         # Linked archive worktrees write Git indexes, objects, and refs through
         # the persistent repository's common .git directory.
-        workspace_roots.append(str(archive_git_dir))
         additional_writable_roots.append(str(archive_git_dir))
 
     request = {

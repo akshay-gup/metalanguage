@@ -175,12 +175,13 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
     let workspace_root_overrides = absolute_paths(&workspace_roots)?;
     let additional_writable_roots =
         normalize_paths(request.additional_writable_roots.unwrap_or_default())?;
+    let additional_writable_root_overrides = absolute_paths(&additional_writable_roots)?;
     let sandbox_mode = parse_sandbox_mode(request.sandbox_mode.as_deref())?;
     let (sandbox_mode_override, permission_profile_override) = match sandbox_mode {
         SandboxMode::WorkspaceWrite => (
             None,
             Some(PermissionProfile::workspace_write_with(
-                &[],
+                &additional_writable_root_overrides,
                 NetworkSandboxPolicy::Enabled,
                 /*exclude_tmpdir_env_var*/ false,
                 /*exclude_slash_tmp*/ false,
