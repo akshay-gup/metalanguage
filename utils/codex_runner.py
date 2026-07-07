@@ -147,6 +147,35 @@ def _terminate_runner_process(proc: subprocess.Popen[str], *, kill: bool) -> Non
             proc.terminate()
 
 
+def _resolve_git_dir(worktree: Path) -> Path | None:
+    dot_git = worktree / ".git"
+    if dot_git.is_dir():
+        return dot_git.resolve()
+    if not dot_git.is_file():
+        return None
+
+    try:
+        contents = dot_git.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    prefix = "gitdir:"
+    if not contents.startswith(prefix):
+        return None
+
+    git_dir = Path(contents[len(prefix) :].strip())
+    if not git_dir.is_absolute():
+        git_dir = dot_git.parent / git_dir
+    return git_dir.resolve()
+
+
+def _append_unique_path(paths: list[str], path: Path | None) -> None:
+    if path is None:
+        return
+    resolved = str(path)
+    if resolved not in paths:
+        paths.append(resolved)
+
+
 def run_codex_rollout(
     *,
     runner_bin: Path,
@@ -188,10 +217,10 @@ def run_codex_rollout(
         str(shared_workspace_dir),
         str(worker_state_dir),
     ]
-    if archive_git_dir is not None:
-        # Linked archive worktrees write Git indexes, objects, and refs through
-        # the persistent repository's common .git directory.
-        additional_writable_roots.append(str(archive_git_dir))
+    # Linked archive worktrees write their index through the per-worktree
+    # gitdir and objects/refs through the persistent repository's common .git.
+    _append_unique_path(additional_writable_roots, _resolve_git_dir(archive_repo_dir))
+    _append_unique_path(additional_writable_roots, archive_git_dir)
 
     request = {
         "model": model,
