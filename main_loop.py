@@ -1077,6 +1077,8 @@ def _write_problem_pool_copy(
         "",
         "Each uuid appears at most once in this pool copy. Unsolved problems may reappear in later pool copies with the same uuid.",
         "",
+        "`shared_workspace/` is visible to all same-batch peers. Files written there are ephemeral and may be cleaned after the batch; use `archive/` or child workspace artifacts for durable memory.",
+        "",
     ]
     for idx, record in enumerate(records, start=1):
         lines.extend(
