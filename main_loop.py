@@ -3498,7 +3498,10 @@ def main() -> None:
         spawn_slots_dir = rollout_root / (
             f"{task_index:06d}_{_sanitize_for_path(task_id)}_next_iteration"
         )
-        child_slot_cap = task_rollout_count
+        # A generation may temporarily shrink when fewer children are spawned than
+        # configured rollout width. Keep the child-slot cap at the configured
+        # target so a later parent can claim an extra slot and restore width.
+        child_slot_cap = max(task_rollout_count, args.num_rollouts)
         minimum_child_budget_tokens = args.rollout_token_budget_tokens
         child_slot_stop_path = rollout_root / (
             f"{task_index:06d}_{_sanitize_for_path(task_id)}_child_slots_full.json"
