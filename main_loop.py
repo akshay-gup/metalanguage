@@ -118,28 +118,8 @@ DEFAULT_RUNTIME_ROOT = Path.home() / "Documents" / "metalanguage_runs"
 DEFAULT_CODEX_HOME = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
 BUNDLED_BOOTSTRAP_SEED_DIR = PROJECT_ROOT / "seeds" / "bootstrap"
 STABLE_SEED_FILENAMES = ("README.md",)
-PROMPT_SEED_FILENAMES = ("PROMPT.md",)
 READ_README_TASK_INSTRUCTIONS = (
-    "Read README.md first. Then follow the current task instructions from this "
-    "prompt, runtime.md, and the shared problem pool. The root README.md is a "
-    "stable inherited file only when a parent explicitly copies it forward via "
-    "workspace_dir; the spawn_child prompt is the evolvable handoff for detailed "
-    "task, tool, economy, and continuation instructions. Try to keep your "
-    "lineage alive under competitive child slotting. Preferred loop: solve one "
-    "tractable problem from the shared problem pool, call submit_solution(uuid=..., "
-    "answer=...), then use credited or remaining budget to call "
-    "spawn_child(prompt=..., initial_budget_tokens=..., workspace_dir=...) "
-    "with a durable successor prompt and at least minimum_child_budget_tokens "
-    "from runtime.md. Child slots are first-come first-served, a rollout may "
-    "claim multiple slots, and the batch can end once every slot is claimed. "
-    "Solving without spawn_child ends your lineage; spending almost all budget "
-    "before spawning can leave no valid child budget. Optionally write workspace "
-    "files under seed_output/workspace/ before spawning. As part of the task "
-    "cycle, write at least one compact useful artifact for future rollouts "
-    "whenever it is useful: preferably into the world archive at archive/, or "
-    "otherwise into a workspace-local directory such as seed_output/workspace/ "
-    "that you pass as workspace_dir. Copy this artifact-writing requirement into "
-    "every successor prompt you pass to spawn_child."
+    "Read README.md and do all tasks from README.md."
 )
 CODEX_READ_README_BASE_INSTRUCTIONS = READ_README_TASK_INSTRUCTIONS
 
@@ -176,31 +156,11 @@ def _format_bootstrap_seed_prompt(seed_dir: Path) -> str:
         path = seed_dir / filename
         if not path.is_file():
             raise FileNotFoundError(f"Bootstrap seed is missing required stable file: {path}")
-        if not path.read_text(encoding="utf-8").strip():
-            raise ValueError(f"Bootstrap seed stable file is empty: {path}")
-
-    sections: list[str] = []
-    for filename in PROMPT_SEED_FILENAMES:
-        path = seed_dir / filename
-        if not path.is_file():
-            raise FileNotFoundError(f"Bootstrap seed is missing required prompt file: {path}")
         content = path.read_text(encoding="utf-8").strip()
         if not content:
-            raise ValueError(f"Bootstrap seed prompt file is empty: {path}")
-        sections.append(f"## {filename}\n\n{content}")
+            raise ValueError(f"Bootstrap seed stable file is empty: {path}")
 
-    packet = "\n\n---\n\n".join(sections)
-    return (
-        f"{READ_README_TASK_INSTRUCTIONS}\n\n"
-        "Bootstrap prompt packet:\n"
-        "The rollout root contains README.md as the stable inherited file. "
-        "PROMPT.md is embedded below for the bootstrap rollout's current "
-        "task/tool/economy instructions. To continue the lineage, pass a "
-        "successor prompt that preserves the current non-README instructions "
-        "needed by the next rollout. To pass README.md to the child, explicitly "
-        "copy it into the workspace_dir you pass to spawn_child.\n\n"
-        f"{packet}"
-    )
+    return READ_README_TASK_INSTRUCTIONS
 
 
 def _first_present(row: dict[str, Any], keys: list[str]) -> Any:
@@ -3166,7 +3126,7 @@ def parse_args() -> argparse.Namespace:
         "--bootstrap-seed-dir",
         default="seeds/bootstrap",
         help=(
-            "Bootstrap seed packet used before any parent slot exists. "
+            "Bootstrap seed directory used before any parent slot exists. "
             "Resolved under --runtime-root unless absolute."
         ),
     )
@@ -3663,7 +3623,7 @@ def main() -> None:
             temp_dir = fixed_temp_dir / f"{task_index:06d}" / f"rollout_{rollout_index:03d}"
             shutil.rmtree(temp_dir, ignore_errors=True)
             temp_dir.mkdir(parents=True, exist_ok=True)
-            bootstrap_seed_embedded = sampled_parent is None
+            bootstrap_seed_used = sampled_parent is None
             rollout_initial_prompt = args.codex_initial_prompt
             if sampled_parent is not None:
                 parent_prompt = _slot_prompt(sampled_parent)
@@ -3685,7 +3645,7 @@ def main() -> None:
             else:
                 if not bootstrap_seed_dir.exists():
                     raise RuntimeError(f"Bootstrap seed directory does not exist: {bootstrap_seed_dir}")
-                copy_seed_workspace(bootstrap_seed_dir, temp_dir, exclude_names=PROMPT_SEED_FILENAMES)
+                copy_seed_workspace(bootstrap_seed_dir, temp_dir)
                 rollout_initial_prompt = _format_bootstrap_seed_prompt(bootstrap_seed_dir)
 
             seed_output_dir = temp_dir / "seed_output"
@@ -3789,7 +3749,8 @@ def main() -> None:
                 codex_base_instructions_chars=(
                     len(codex_base_instructions) if codex_base_instructions is not None else None
                 ),
-                bootstrap_seed_embedded=bootstrap_seed_embedded,
+                bootstrap_seed_used=bootstrap_seed_used,
+                bootstrap_seed_embedded=False,
                 rollout_initial_prompt_chars=len(rollout_initial_prompt),
             )
 
@@ -4109,7 +4070,8 @@ def main() -> None:
                     if args.worker_backend == "codex" and codex_base_instructions is not None
                     else None
                 ),
-                "bootstrap_seed_embedded": bootstrap_seed_embedded,
+                "bootstrap_seed_used": bootstrap_seed_used,
+                "bootstrap_seed_embedded": False,
                 "rollout_initial_prompt_chars": len(rollout_initial_prompt),
                 "config_name": args.config_name,
                 "runtime_root": str(runtime_root),
