@@ -130,6 +130,7 @@ def list_games(arcade: Any) -> list[str]:
     candidates = (
         "list_games",
         "games",
+        "available_environments",
         "available_games",
         "game_ids",
         "catalog",
@@ -229,6 +230,8 @@ def _coerce_game_list(value: Any) -> list[str]:
                 game_id = item.get("id") or item.get("game_id") or item.get("name")
                 if game_id is not None:
                     games.append(str(game_id))
+            elif hasattr(item, "game_id"):
+                games.append(str(getattr(item, "game_id")))
             else:
                 games.append(str(item))
         return games
@@ -240,6 +243,11 @@ def _jsonable(value: Any) -> Any:
         return value
     if isinstance(value, Path):
         return str(value)
+    if hasattr(value, "isoformat") and callable(value.isoformat):
+        try:
+            return value.isoformat()
+        except Exception:
+            pass
     if isinstance(value, Enum):
         return value.name
     if isinstance(value, dict):
