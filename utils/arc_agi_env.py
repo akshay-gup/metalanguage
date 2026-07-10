@@ -153,7 +153,7 @@ def list_games(arcade: Any) -> list[str]:
 def start_game(
     game_id: str,
     *,
-    render_mode: str | None = "terminal",
+    render_mode: str | None = None,
     api_key_env: str = DEFAULT_ARC_API_KEY_ENV,
 ) -> ArcAgiSession:
     """Create a live ARC game session."""
@@ -250,6 +250,15 @@ def _jsonable(value: Any) -> Any:
             pass
     if isinstance(value, Enum):
         return value.name
+    if hasattr(value, "model_dump") and callable(value.model_dump):
+        try:
+            return _jsonable(value.model_dump(mode="json"))
+        except TypeError:
+            return _jsonable(value.model_dump())
+        except Exception:
+            pass
+    if hasattr(value, "value") and hasattr(value, "name"):
+        return str(getattr(value, "value"))
     if isinstance(value, dict):
         return {str(k): _jsonable(v) for k, v in value.items()}
     if isinstance(value, list | tuple | set):
@@ -279,12 +288,12 @@ def main() -> None:
 
     start_parser = subparsers.add_parser("start", help="Start one game and print initial metadata.")
     start_parser.add_argument("game_id")
-    start_parser.add_argument("--render-mode", default="terminal")
+    start_parser.add_argument("--render-mode", default=None)
 
     step_parser = subparsers.add_parser("step", help="Start one game and run one action.")
     step_parser.add_argument("game_id")
     step_parser.add_argument("action")
-    step_parser.add_argument("--render-mode", default="terminal")
+    step_parser.add_argument("--render-mode", default=None)
 
     args = parser.parse_args()
     if args.command == "doctor":

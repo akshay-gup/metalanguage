@@ -9,5 +9,7 @@ build_logs/
 
 logs/
 archive/
+environment_files/
+recordings/
 multi_problem_outputs/
 multi_problem_outputs_cf/
