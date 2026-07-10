@@ -48,6 +48,7 @@ from utils.openrouter import (
     submit_solution_tool,
     transfer_tokens_tool,
 )
+from utils.problem_pool_sampling import deterministic_problem_pool_sample
 from utils.reward import compute_rollout_reward
 from utils.task_store import (
     compute_problem_uid,
@@ -434,6 +435,7 @@ def _format_runtime_markdown(
     minimum_child_budget_tokens: int | None = None,
     problem_pool_json_path: str | None = None,
     problem_pool_markdown_path: str | None = None,
+    configured_problem_pool_size: int | None = None,
     problem_pool_count: int | None = None,
     live_peer_instances: list[dict[str, Any]] | None = None,
     parent_instance_uuid: str | None = None,
@@ -456,10 +458,16 @@ def _format_runtime_markdown(
         f"- rollout_token_budget_tokens: {rollout_token_budget_tokens if rollout_token_budget_tokens is not None else ''}",
         f"- child_slot_cap: {child_slot_cap if child_slot_cap is not None else ''}",
         f"- minimum_child_budget_tokens: {minimum_child_budget_tokens if minimum_child_budget_tokens is not None else ''}",
+        f"- configured_problem_pool_size: {configured_problem_pool_size if configured_problem_pool_size is not None else 'uncapped'}",
         f"- problem_pool_count: {problem_pool_count if problem_pool_count is not None else ''}",
         "",
         "## Problem Pool Semantics",
         "",
+        (
+            "- this pool copy is a deterministic sampled working set of currently unsolved candidates; it may not contain every unsolved problem;"
+            if configured_problem_pool_size is not None
+            else "- this pool copy contains all currently unsolved candidates;"
+        ),
         "- each problem uuid appears at most once in this pool copy;",
         "- unsolved problems may reappear in later pool copies with the same uuid;",
         "- solved uuids are removed from future pool copies after the batch finalizes;",
@@ -645,6 +653,7 @@ def _make_continuation_context(
     problem_pool_records: list[ProblemRecord],
     problem_pool_json_path: Path,
     problem_pool_markdown_path: Path,
+    configured_problem_pool_size: int | None,
     task_store_dir: Path,
     dataset_cache_dir: Path,
     rollout_token_budget_tokens: int | None,
@@ -692,6 +701,8 @@ def _make_continuation_context(
         "problem_pool_records": [_problem_record_to_payload(record) for record in problem_pool_records],
         "problem_pool_json_path": str(problem_pool_json_path),
         "problem_pool_markdown_path": str(problem_pool_markdown_path),
+        "configured_problem_pool_size": configured_problem_pool_size,
+        "problem_pool_count": len(problem_pool_records),
         "task_store_dir": str(task_store_dir),
         "dataset_cache_dir": str(dataset_cache_dir),
         "rollout_token_budget_tokens": rollout_token_budget_tokens,
@@ -1003,13 +1014,29 @@ def _write_problem_pool_copy(
     json_path: Path,
     markdown_path: Path,
     records: list[ProblemRecord],
+    configured_problem_pool_size: int | None = None,
+    sampling_seed: int | None = None,
+    iteration_index: int | None = None,
 ) -> None:
     json_path.parent.mkdir(parents=True, exist_ok=True)
     markdown_path.parent.mkdir(parents=True, exist_ok=True)
     visible_records = [_problem_record_visible_payload(record) for record in records]
+    capped = configured_problem_pool_size is not None
+    scope_description = (
+        "This is a deterministic sampled working set of candidates that were unsolved when this iteration began; it is not necessarily the full unsolved universe."
+        if capped
+        else "This pool contains all candidates that were unsolved when this iteration began."
+    )
     json_payload = {
+        "metadata": {
+            "pool_scope": "sampled_working_set" if capped else "full_unsolved_pool",
+            "configured_problem_pool_size": configured_problem_pool_size,
+            "iteration_index": iteration_index,
+            "problem_pool_count": len(records),
+            "sampling_seed": sampling_seed,
+        },
         "instructions": (
-            "Choose any currently unsolved problem by uuid, solve it, then call "
+            f"{scope_description} Choose any listed problem by uuid, solve it, then call "
             "submit_solution(uuid=..., answer=...) to score it. Multiple rollouts "
             "may claim reward for the same problem during this iteration; solved "
             "problems are removed before the next iteration. Each uuid appears at "
@@ -1029,7 +1056,13 @@ def _write_problem_pool_copy(
     lines = [
         "# Problem Pool",
         "",
-        "Choose any currently unsolved problem by uuid. Submit with `submit_solution(uuid=..., answer=...)`.",
+        scope_description,
+        "",
+        f"Configured problem-pool cap: {configured_problem_pool_size if capped else 'uncapped'}",
+        "",
+        f"Working-set count: {len(records)}",
+        "",
+        "Choose any listed problem by uuid. Submit with `submit_solution(uuid=..., answer=...)`.",
         "",
         "The pool may be large. Inspect it deliberately, use search or the JSON structure to find a problem you can solve, then read the selected problem entry carefully before submitting its exact uuid.",
         "",
@@ -1168,6 +1201,8 @@ def _materialize_problem_pool_snapshot(
     task_store_dir: Path,
     dataset_cache_dir: Path,
     solved_problem_uids: set[str],
+    problem_pool_size: int | None = None,
+    iteration_index: int = 0,
 ) -> list[ProblemRecord]:
     config = _problem_queue_config(
         dataset_name=dataset_name,
@@ -1244,7 +1279,13 @@ def _materialize_problem_pool_snapshot(
             "solved_problem_uids": sorted(solved),
         }
         _write_json_file_atomic(queue_path, next_state)
-        return records
+        return deterministic_problem_pool_sample(
+            records,
+            problem_pool_size=problem_pool_size,
+            seed=seed,
+            iteration_index=iteration_index,
+            record_id=lambda record: record.problem_uid,
+        )
 
 
 def _assigned_problem_from_queue(queue_path: Path, assignment_key: str) -> ProblemRecord | None:
@@ -3021,6 +3062,13 @@ def ensure_local_world_repo(repo_path: Path) -> None:
         )
 
 
+def _positive_int_argument(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run one RLVR episode.")
     parser.add_argument("--dataset-name", default="m-a-p/SuperGPQA")
@@ -3149,6 +3197,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Persistent problem-pool state for solved IDs and cursor. Resolved under "
             "--runtime-root unless absolute."
+        ),
+    )
+    parser.add_argument(
+        "--problem-pool-size",
+        type=_positive_int_argument,
+        default=None,
+        help=(
+            "Maximum number of currently unsolved problems exposed per iteration. "
+            "Defaults to uncapped."
         ),
     )
     parser.add_argument(
@@ -3525,6 +3582,8 @@ def main() -> None:
                 task_store_dir=task_store_dir,
                 dataset_cache_dir=dataset_cache_dir,
                 solved_problem_uids=solved_problem_uids,
+                problem_pool_size=args.problem_pool_size,
+                iteration_index=task_index,
             )
             if not problem_pool_records:
                 raise RuntimeError("No unsolved problems are available for the rollout problem pool.")
@@ -3532,6 +3591,9 @@ def main() -> None:
                 json_path=problem_pool_json_path,
                 markdown_path=problem_pool_markdown_path,
                 records=problem_pool_records,
+                configured_problem_pool_size=args.problem_pool_size,
+                sampling_seed=args.seed,
+                iteration_index=task_index,
             )
 
         def _run_one_rollout(rollout_index: int) -> RolloutResult:
@@ -3571,6 +3633,8 @@ def main() -> None:
                     "rollout_username": rollout_username,
                     "task_id": task_id,
                     "problem_uid": problem_uid,
+                    "configured_problem_pool_size": args.problem_pool_size,
+                    "problem_pool_count": len(problem_pool_records),
                     "elapsed_seconds": round(time.monotonic() - started_at, 3),
                     **fields,
                 }
@@ -3669,6 +3733,7 @@ def main() -> None:
                     minimum_child_budget_tokens=minimum_child_budget_tokens,
                     problem_pool_json_path="shared_workspace/problem_pool.json",
                     problem_pool_markdown_path="shared_workspace/problem_pool.md",
+                    configured_problem_pool_size=args.problem_pool_size,
                     problem_pool_count=len(problem_pool_records),
                     live_peer_instances=rollout_live_peer_instances,
                 ),
@@ -3711,6 +3776,7 @@ def main() -> None:
                 problem_pool_records=problem_pool_records,
                 problem_pool_json_path=problem_pool_json_path,
                 problem_pool_markdown_path=problem_pool_markdown_path,
+                configured_problem_pool_size=args.problem_pool_size,
                 task_store_dir=task_store_dir,
                 dataset_cache_dir=dataset_cache_dir,
                 rollout_token_budget_tokens=rollout_budget_tokens,
@@ -3736,6 +3802,7 @@ def main() -> None:
                 problem_queue_path=str(problem_queue_path),
                 problem_pool_json_path=str(problem_pool_json_path),
                 problem_pool_markdown_path=str(problem_pool_markdown_path),
+                configured_problem_pool_size=args.problem_pool_size,
                 problem_pool_count=len(problem_pool_records),
                 seed_output_dir=str(seed_output_dir),
                 rollout_control_dir=str(rollout_control_dir) if args.worker_backend == "codex" else None,
@@ -4042,6 +4109,7 @@ def main() -> None:
                 "problem_queue_path": str(problem_queue_path),
                 "problem_pool_json_path": str(problem_pool_json_path),
                 "problem_pool_markdown_path": str(problem_pool_markdown_path),
+                "configured_problem_pool_size": args.problem_pool_size,
                 "problem_pool_count": len(problem_pool_records),
                 "shared_workspace_write_log": str(shared_workspace_write_log),
                 "progress_log": str(progress_log_path),
@@ -4134,6 +4202,8 @@ def main() -> None:
                                     "rollout_username": _rollout_username(rollout_index),
                                     "task_id": task_id,
                                     "problem_uid": problem_uid,
+                                    "configured_problem_pool_size": args.problem_pool_size,
+                                    "problem_pool_count": len(problem_pool_records),
                                     "worker_status": "error",
                                     "worker_stop_reason": type(exc).__name__,
                                     "worker_error_message": str(exc),
@@ -4171,6 +4241,7 @@ def main() -> None:
                                         "output_path": None,
                                         "private_problem_path": str(private_problem_path),
                                         "problem_queue_path": str(problem_queue_path),
+                                        "configured_problem_pool_size": args.problem_pool_size,
                                         "problem_pool_count": len(problem_pool_records),
                                         "shared_workspace_write_log": str(shared_workspace_write_log),
                                         "progress_log": str(progress_log_path),
@@ -4255,6 +4326,8 @@ def main() -> None:
                     "task_index": task_index,
                     "task_id": task_id,
                     "problem_uid": problem_uid,
+                    "configured_problem_pool_size": args.problem_pool_size,
+                    "problem_pool_count": len(problem_pool_records),
                     "solved_problem_uids": sorted(batch_solved_problem_uids),
                     "problem_queue_updates": queue_updates,
                 },
