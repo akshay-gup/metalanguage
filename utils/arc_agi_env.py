@@ -19,6 +19,8 @@ from typing import Any
 
 
 DEFAULT_ARC_API_KEY_ENV = "ARC_API_KEY"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_ENV_PATH = PROJECT_ROOT / ".env"
 
 
 class ArcAgiUnavailable(RuntimeError):
@@ -56,9 +58,26 @@ class ArcAgiSession:
         return getattr(self.arcade, "__metalanguage_arcengine_module__", None)
 
 
+def load_env_file(env_path: Path = DEFAULT_ENV_PATH) -> None:
+    """Load simple KEY=VALUE entries without overriding real environment values."""
+
+    if not env_path.exists():
+        return
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key or key in os.environ:
+            continue
+        os.environ[key] = value.strip().strip('"').strip("'")
+
+
 def dependency_status(*, api_key_env: str = DEFAULT_ARC_API_KEY_ENV) -> dict[str, Any]:
     """Return import/API-key status without creating an environment."""
 
+    load_env_file()
     status: dict[str, Any] = {
         "arc_agi_installed": importlib.util.find_spec("arc_agi") is not None,
         "arcengine_installed": importlib.util.find_spec("arcengine") is not None,
@@ -91,6 +110,7 @@ def load_arc_agi_modules() -> ArcAgiModules:
 def make_arcade(*, api_key_env: str = DEFAULT_ARC_API_KEY_ENV) -> Any:
     """Construct an ARC Arcade client using the toolkit's current defaults."""
 
+    load_env_file()
     modules = load_arc_agi_modules()
     if not os.environ.get(api_key_env):
         raise ArcAgiUnavailable(f"{api_key_env} is not set.")
