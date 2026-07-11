@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from utils.benchmark_driver import BenchmarkItemRef
 from utils.budget_ledger import append_budget_event, read_budget_status
 from utils.reward import compute_rollout_reward
 
@@ -191,6 +192,12 @@ def submit_solution(
         "reward": reward,
         "solve_reward_credit_tokens": credited_tokens,
         "submission_source": "submit_solution",
+        "benchmark_item": BenchmarkItemRef(
+            item_id=problem_uid,
+            source_id=task_id,
+            item_index=int(problem["task_index"]),
+            iteration_index=int(context["task_index"]),
+        ).to_metadata(),
     }
     append_budget_event(
         budget_ledger_events,

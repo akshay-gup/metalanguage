@@ -176,26 +176,6 @@ def _append_unique_path(paths: list[str], path: Path | None) -> None:
         paths.append(resolved)
 
 
-def supergpqa_mcp_server_config(context_path: Path) -> dict[str, Any]:
-    """Return one required per-rollout stdio MCP server configuration."""
-
-    return {
-        "supergpqa": {
-            "command": sys.executable,
-            "args": ["-m", "utils.supergpqa_mcp"],
-            "cwd": str(PROJECT_ROOT),
-            "env": {
-                "METALANGUAGE_SUPERGPQA_CONTEXT": str(context_path.resolve())
-            },
-            "required": True,
-            "enabled_tools": ["submit_solution"],
-            "default_tools_approval_mode": "approve",
-            "startup_timeout_sec": 10,
-            "tool_timeout_sec": 30,
-        }
-    }
-
-
 def run_codex_rollout(
     *,
     runner_bin: Path,
@@ -216,7 +196,9 @@ def run_codex_rollout(
     rollout_token_budget_tokens: int | None = None,
     instance_uuid: str | None = None,
     spawn_child_handler_context_path: Path | None = None,
-    supergpqa_mcp_context_path: Path | None = None,
+    benchmark_mcp_servers: dict[str, Any] | None = None,
+    mcp_budget_reconcile_tools: tuple[tuple[str, str], ...] = (),
+    sensitive_mcp_tools: tuple[tuple[str, str], ...] = (),
     token_usage_callback: TokenUsageCallback | None = None,
     stop_requested: Callable[[], bool] | None = None,
     progress_callback: Callable[..., None] | None = None,
@@ -264,10 +246,18 @@ def run_codex_rollout(
             "--child-tool-handler",
             str(spawn_child_handler_context_path),
         ]
-    if supergpqa_mcp_context_path is not None:
-        request["mcp_servers"] = supergpqa_mcp_server_config(
-            supergpqa_mcp_context_path
-        )
+    if benchmark_mcp_servers:
+        request["mcp_servers"] = benchmark_mcp_servers
+    if mcp_budget_reconcile_tools:
+        request["mcp_budget_reconcile_tools"] = [
+            {"server": server, "tool": tool}
+            for server, tool in mcp_budget_reconcile_tools
+        ]
+    if sensitive_mcp_tools:
+        request["sensitive_mcp_tools"] = [
+            {"server": server, "tool": tool}
+            for server, tool in sensitive_mcp_tools
+        ]
     if base_instructions is not None and base_instructions.strip():
         request["base_instructions"] = base_instructions
     control_dir.mkdir(parents=True, exist_ok=True)

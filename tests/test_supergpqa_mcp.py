@@ -13,7 +13,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from utils.budget_ledger import append_budget_event
-from utils.codex_runner import supergpqa_mcp_server_config
+from utils.supergpqa_benchmark import supergpqa_mcp_servers
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -174,7 +174,7 @@ class SuperGpqaMcpTests(unittest.IsolatedAsyncioTestCase):
 
     def test_runner_config_is_private_required_and_per_rollout(self) -> None:
         context = Path("/private/rollout/context.json")
-        config = supergpqa_mcp_server_config(context)
+        config = supergpqa_mcp_servers(context)
         self.assertEqual(set(config), {"supergpqa"})
         server = config["supergpqa"]
         self.assertTrue(server["required"])

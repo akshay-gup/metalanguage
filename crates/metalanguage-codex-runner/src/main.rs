@@ -69,6 +69,15 @@ struct RunnerRequest {
     instance_uuid: Option<String>,
     spawn_child_handler_command: Option<Vec<String>>,
     mcp_servers: Option<HashMap<String, Value>>,
+    mcp_budget_reconcile_tools: Option<Vec<McpToolSelector>>,
+    sensitive_mcp_tools: Option<Vec<McpToolSelector>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct McpToolSelector {
+    server: String,
+    tool: String,
 }
 
 #[derive(Debug)]
@@ -252,6 +261,19 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
                 .context("parse per-rollout MCP server configuration")
         })
         .collect::<anyhow::Result<HashMap<_, _>>>()?;
+    let reconcile_tools = validate_mcp_tool_selectors(
+        request
+            .mcp_budget_reconcile_tools
+            .clone()
+            .unwrap_or_default(),
+        &mcp_servers,
+        "mcp_budget_reconcile_tools",
+    )?;
+    let sensitive_tools = validate_mcp_tool_selectors(
+        request.sensitive_mcp_tools.clone().unwrap_or_default(),
+        &mcp_servers,
+        "sensitive_mcp_tools",
+    )?;
     config
         .mcp_servers
         .set(mcp_servers)
@@ -341,6 +363,8 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
         rollout_token_budget_tokens,
         instance_uuid,
         spawn_child_handler_command,
+        reconcile_tools,
+        sensitive_tools,
     )
     .await;
     let shutdown_result = thread.shutdown_and_wait().await;
@@ -370,6 +394,8 @@ async fn run_turn(
     rollout_token_budget_tokens: Option<i64>,
     instance_uuid: Option<String>,
     spawn_child_handler_command: Option<Vec<String>>,
+    reconcile_tools: Vec<McpToolSelector>,
+    sensitive_tools: Vec<McpToolSelector>,
 ) -> anyhow::Result<()> {
     thread
         .submit(Op::UserInput {
@@ -567,7 +593,7 @@ async fn run_turn(
                     "namespace": format!("mcp__{}", event.invocation.server),
                     "call_id": event.call_id,
                     "arguments": logged_tool_arguments(
-                        &event.invocation.tool,
+                        tool_is_selected(&sensitive_tools, &event.invocation.server, &event.invocation.tool),
                         event.invocation.arguments.as_ref(),
                     ),
                 }))?;
@@ -576,6 +602,7 @@ async fn run_turn(
                 let budget_reconciled = reconcile_budget_after_mcp_tool(
                     &event.invocation.server,
                     &event.invocation.tool,
+                    &reconcile_tools,
                     &mut budget_state,
                     spawn_child_handler_command.as_deref(),
                 )
@@ -663,7 +690,7 @@ async fn run_turn(
                     "namespace": request.namespace,
                     "call_id": request.call_id,
                     "turn_id": request.turn_id,
-                    "arguments": logged_tool_arguments(&request.tool, Some(&request.arguments)),
+                    "arguments": request.arguments,
                 }))?;
                 let response = handle_metalanguage_dynamic_tool(
                     request,
@@ -818,14 +845,11 @@ fn dynamic_tool_name(tool: &DynamicToolSpec) -> &str {
     }
 }
 
-fn logged_tool_arguments(tool: &str, arguments: Option<&Value>) -> Value {
-    if tool != "submit_solution" {
+fn logged_tool_arguments(sensitive: bool, arguments: Option<&Value>) -> Value {
+    if !sensitive {
         return arguments.cloned().unwrap_or(Value::Null);
     }
-    json!({
-        "uuid": arguments.and_then(|value| value.get("uuid")),
-        "answer": "<redacted>",
-    })
+    json!({"redacted": true})
 }
 
 fn handle_metalanguage_dynamic_tool(
@@ -1042,20 +1066,47 @@ fn refresh_budget_status_from_handler(
 fn reconcile_budget_after_mcp_tool(
     server: &str,
     tool: &str,
+    reconcile_tools: &[McpToolSelector],
     budget_state: &mut BudgetState,
     spawn_child_handler_command: Option<&[String]>,
 ) -> Result<bool, String> {
-    if server != "supergpqa" || tool != "submit_solution" {
+    if !tool_is_selected(reconcile_tools, server, tool) {
         return Ok(false);
     }
     let Some(command) = spawn_child_handler_command else {
-        return Err("budget handler command is required after submit_solution".to_string());
+        return Err("budget handler command is required after configured MCP tool".to_string());
     };
     if command.is_empty() {
-        return Err("budget handler command is empty after submit_solution".to_string());
+        return Err("budget handler command is empty after configured MCP tool".to_string());
     }
     refresh_budget_status_from_handler(budget_state, Some(command))?;
     Ok(true)
+}
+
+fn tool_is_selected(selectors: &[McpToolSelector], server: &str, tool: &str) -> bool {
+    selectors
+        .iter()
+        .any(|item| item.server == server && item.tool == tool)
+}
+
+fn validate_mcp_tool_selectors(
+    selectors: Vec<McpToolSelector>,
+    servers: &HashMap<String, impl Sized>,
+    field: &str,
+) -> anyhow::Result<Vec<McpToolSelector>> {
+    let mut seen = std::collections::HashSet::new();
+    for selector in &selectors {
+        if selector.server.trim().is_empty() || selector.tool.trim().is_empty() {
+            bail!("{field} entries require non-empty server and tool");
+        }
+        if !servers.contains_key(&selector.server) {
+            bail!("{field} references unconfigured MCP server");
+        }
+        if !seen.insert((selector.server.clone(), selector.tool.clone())) {
+            bail!("{field} contains a duplicate server/tool pair");
+        }
+    }
+    Ok(selectors)
 }
 
 fn parse_spawn_child_args(arguments: &Value) -> Result<(String, i64), String> {
@@ -1203,17 +1254,17 @@ mod tests {
     }
 
     #[test]
-    fn submit_solution_answer_is_redacted_from_runner_events() {
+    fn sensitive_mcp_arguments_are_redacted_from_runner_events() {
         let logged = logged_tool_arguments(
-            "submit_solution",
+            true,
             Some(&json!({"uuid": "problem", "answer": "private-answer"})),
         );
-        assert_eq!(logged, json!({"uuid": "problem", "answer": "<redacted>"}));
+        assert_eq!(logged, json!({"redacted": true}));
         assert!(!logged.to_string().contains("private-answer"));
     }
 
     #[test]
-    fn supergpqa_mcp_completion_reconciles_budget_immediately() {
+    fn configured_mcp_completion_reconciles_budget_immediately() {
         let mut budget = BudgetState {
             rollout_token_budget_tokens: Some(100),
             tokens_spent: 10,
@@ -1234,8 +1285,12 @@ mod tests {
         ];
 
         let reconciled = reconcile_budget_after_mcp_tool(
-            "supergpqa",
-            "submit_solution",
+            "benchmark",
+            "score",
+            &[McpToolSelector {
+                server: "benchmark".to_string(),
+                tool: "score".to_string(),
+            }],
             &mut budget,
             Some(&command),
         )
@@ -1245,6 +1300,32 @@ mod tests {
         assert_eq!(budget.transferred_in_tokens, 50);
         assert_eq!(budget.effective_rollout_token_budget_tokens(), Some(150));
         assert_eq!(budget.tokens_remaining(), Some(140));
+    }
+
+    #[test]
+    fn mcp_tool_selectors_are_strict_and_server_scoped() {
+        let servers = HashMap::from([("benchmark".to_string(), json!({}))]);
+        let valid = validate_mcp_tool_selectors(
+            vec![McpToolSelector {
+                server: "benchmark".to_string(),
+                tool: "score".to_string(),
+            }],
+            &servers,
+            "selectors",
+        )
+        .expect("valid selector");
+        assert!(tool_is_selected(&valid, "benchmark", "score"));
+        assert!(
+            validate_mcp_tool_selectors(
+                vec![McpToolSelector {
+                    server: "missing".to_string(),
+                    tool: "score".to_string(),
+                }],
+                &servers,
+                "selectors",
+            )
+            .is_err()
+        );
     }
 }
 
