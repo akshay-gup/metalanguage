@@ -50,6 +50,9 @@ def environment_info_records(arcade: Any | None = None) -> list[dict[str, Any]]:
         game_id = str(payload.get("game_id") or payload.get("id") or "").strip()
         if not game_id:
             continue
+        # Remote listings stamp fetch time into this field, which is not task
+        # identity and would make identical sampled pools differ across runs.
+        payload.pop("date_downloaded", None)
         records.append(
             {
                 "uuid": arc_task_uuid(game_id),

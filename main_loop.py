@@ -1923,6 +1923,31 @@ def _resolve_runtime_path(value: str, runtime_root: Path, label: str) -> Path:
     return path
 
 
+def _materialize_arc_problem_pool(args: argparse.Namespace, runtime_root: Path) -> None:
+    from utils.arc_agi_tasks import environment_info_records, write_arc_task_pool
+
+    rollout_root = _resolve_runtime_path(
+        args.rollout_temp_root, runtime_root, "--rollout-temp-root"
+    )
+    shared_workspace_dir = rollout_root / "shared_workspace"
+    candidate_records = environment_info_records()
+    records = deterministic_problem_pool_sample(
+        candidate_records,
+        problem_pool_size=args.problem_pool_size,
+        seed=args.seed,
+        iteration_index=args.start_task_index,
+        record_id=lambda record: str(record["uuid"]),
+    )
+    write_arc_task_pool(
+        json_path=shared_workspace_dir / "problem_pool.json",
+        markdown_path=shared_workspace_dir / "problem_pool.md",
+        records=records,
+        configured_problem_pool_size=args.problem_pool_size,
+        seed=args.seed,
+        iteration_index=args.start_task_index,
+    )
+
+
 def _configure_runtime_environment(runtime_root: Path) -> Path:
     cache_root = runtime_root / "cache"
     dataset_cache_dir = cache_root / "huggingface_datasets"
@@ -3347,7 +3372,11 @@ def main() -> None:
     unresolved_runtime_root = _resolve_runtime_root(args.runtime_root, create=False)
     _check_runtime_benchmark(unresolved_runtime_root, args.benchmark)
     if args.benchmark == "arc-agi":
-        raise SystemExit("error: --benchmark arc-agi is not yet wired")
+        _claim_runtime_benchmark(unresolved_runtime_root, args.benchmark)
+        _materialize_arc_problem_pool(args, unresolved_runtime_root)
+        raise SystemExit(
+            "error: --benchmark arc-agi pool materialized; rollout gameplay is not yet wired"
+        )
 
     load_dotenv()
     api_key: str | None = os.environ.get("OPENROUTER_API_KEY")
