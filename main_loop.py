@@ -118,6 +118,7 @@ DEFAULT_SOLVE_REWARD_TOKEN_CREDIT_TOKENS = 300_000
 DEFAULT_RUNTIME_ROOT = Path.home() / "Documents" / "metalanguage_runs"
 DEFAULT_CODEX_HOME = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
 BUNDLED_BOOTSTRAP_SEED_DIR = PROJECT_ROOT / "seeds" / "bootstrap"
+RUNTIME_BENCHMARK_IDENTITY_FILENAME = "runtime_benchmark.json"
 STABLE_SEED_FILENAMES = ("README.md",)
 READ_README_TASK_INSTRUCTIONS = (
     "Read README.md and do all tasks from README.md."
@@ -1861,14 +1862,57 @@ def _is_within(path: Path, root: Path) -> bool:
         return False
 
 
-def _resolve_runtime_root(value: str) -> Path:
+def _resolve_runtime_root(value: str, *, create: bool = True) -> Path:
     documents_dir = (Path.home() / "Documents").resolve()
     raw_root = Path(value).expanduser()
     root = raw_root.resolve() if raw_root.is_absolute() else (documents_dir / raw_root).resolve()
     if not _is_within(root, documents_dir):
         raise ValueError(f"--runtime-root must stay inside {documents_dir}: {root}")
-    root.mkdir(parents=True, exist_ok=True)
+    if create:
+        root.mkdir(parents=True, exist_ok=True)
     return root
+
+
+def _runtime_benchmark(runtime_root: Path) -> str | None:
+    identity_path = runtime_root / RUNTIME_BENCHMARK_IDENTITY_FILENAME
+    if not identity_path.exists():
+        if not runtime_root.exists() or not any(runtime_root.iterdir()):
+            return None
+        # The only runtime format predating this marker is SuperGPQA.
+        return "supergpqa"
+    try:
+        payload = json.loads(identity_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        raise RuntimeError("Runtime benchmark identity is unreadable.") from None
+    if not isinstance(payload, dict):
+        raise RuntimeError("Runtime benchmark identity is invalid.")
+    benchmark = payload.get("benchmark", "supergpqa")
+    if benchmark not in {"supergpqa", "arc-agi"}:
+        raise RuntimeError("Runtime benchmark identity is invalid.")
+    return str(benchmark)
+
+
+def _check_runtime_benchmark(runtime_root: Path, requested: str) -> None:
+    existing = _runtime_benchmark(runtime_root)
+    if existing is not None and existing != requested:
+        raise SystemExit(
+            f"error: runtime belongs to benchmark {existing}; cannot use {requested}"
+        )
+
+
+def _claim_runtime_benchmark(runtime_root: Path, requested: str) -> None:
+    _check_runtime_benchmark(runtime_root, requested)
+    identity_path = runtime_root / RUNTIME_BENCHMARK_IDENTITY_FILENAME
+    if identity_path.exists():
+        return
+    _write_json_file_atomic(
+        identity_path,
+        {
+            "format": "metalanguage-runtime-benchmark",
+            "version": 1,
+            "benchmark": requested,
+        },
+    )
 
 
 def _resolve_runtime_path(value: str, runtime_root: Path, label: str) -> Path:
@@ -3071,6 +3115,12 @@ def _positive_int_argument(value: str) -> int:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run one RLVR episode.")
+    parser.add_argument(
+        "--benchmark",
+        choices=["supergpqa", "arc-agi"],
+        default="supergpqa",
+        help="Benchmark runtime to use. ARC-AGI gameplay is not yet wired.",
+    )
     parser.add_argument("--dataset-name", default="m-a-p/SuperGPQA")
     parser.add_argument("--split", default="train")
     parser.add_argument("--config-name", default=None)
@@ -3294,6 +3344,11 @@ def main() -> None:
     if args.solve_reward_token_credit_tokens < 0:
         raise ValueError("--solve-reward-token-credit-tokens must be >= 0")
 
+    unresolved_runtime_root = _resolve_runtime_root(args.runtime_root, create=False)
+    _check_runtime_benchmark(unresolved_runtime_root, args.benchmark)
+    if args.benchmark == "arc-agi":
+        raise SystemExit("error: --benchmark arc-agi is not yet wired")
+
     load_dotenv()
     api_key: str | None = os.environ.get("OPENROUTER_API_KEY")
     if args.worker_backend == "openrouter" and not api_key:
@@ -3308,6 +3363,7 @@ def main() -> None:
         )
 
     runtime_root = _resolve_runtime_root(args.runtime_root)
+    _claim_runtime_benchmark(runtime_root, args.benchmark)
     runs_log_path = _resolve_runtime_path(args.runs_log, runtime_root, "--runs-log")
     progress_log_path = _resolve_runtime_path(args.progress_log, runtime_root, "--progress-log")
     outputs_dir = _resolve_runtime_path(args.outputs_dir, runtime_root, "--outputs-dir")
@@ -3345,7 +3401,8 @@ def main() -> None:
         existing_records = [
             rec
             for rec in all_records
-            if rec.get("dataset_name") == args.dataset_name
+            if rec.get("benchmark", "supergpqa") == args.benchmark
+            and rec.get("dataset_name") == args.dataset_name
             and rec.get("split") == args.split
             and rec.get("model") == args.model
             and rec.get("seed") == args.seed
@@ -4060,6 +4117,7 @@ def main() -> None:
 
             record = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
+                "benchmark": args.benchmark,
                 "generation": args.generation,
                 "seed": args.seed,
                 "task_index": task_index,
@@ -4214,6 +4272,7 @@ def main() -> None:
                                     rollout_index=rollout_index,
                                     record={
                                         "timestamp": datetime.now(timezone.utc).isoformat(),
+                                        "benchmark": args.benchmark,
                                         "generation": args.generation,
                                         "seed": args.seed,
                                         "task_index": task_index,
