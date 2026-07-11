@@ -49,7 +49,12 @@ from utils.openrouter import (
     transfer_tokens_tool,
 )
 from utils.problem_pool_sampling import deterministic_problem_pool_sample
-from utils.reward import compute_rollout_reward
+from utils.supergpqa_submit import (
+    latest_solution_scored_event as _latest_solution_scored_event,
+    solution_scored_events as _solution_scored_events,
+    solve_reward_credit_total as _solve_reward_credit_total,
+    submit_solution as _submit_solution,
+)
 from utils.task_store import (
     compute_problem_uid,
     write_private_problem_record,
@@ -526,76 +531,6 @@ def _parse_spawn_child_arguments(args: dict[str, Any]) -> tuple[str | None, str 
     return prompt, workspace_dir, initial_budget_tokens, None
 
 
-def _parse_submit_solution_arguments(args: dict[str, Any]) -> tuple[str | None, str | None, str | None]:
-    raw_uuid = args.get("uuid", args.get("problem_uuid", args.get("problemUid", args.get("problem_uid"))))
-    submitted_uuid = str(raw_uuid).strip() if raw_uuid is not None else None
-    if not submitted_uuid:
-        return None, None, "submit_solution requires a non-empty string uuid"
-
-    answer = args.get("answer")
-    if not isinstance(answer, str) or not answer.strip():
-        return None, None, "submit_solution requires a non-empty string answer"
-    return submitted_uuid, answer.strip(), None
-
-
-def _iter_budget_events(events_path: Path) -> list[dict[str, Any]]:
-    try:
-        lines = events_path.read_text(encoding="utf-8").splitlines()
-    except FileNotFoundError:
-        return []
-    events: list[dict[str, Any]] = []
-    for line in lines:
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(event, dict):
-            events.append(event)
-    return events
-
-
-def _solve_reward_credit_total(events_path: Path, instance_uuid: str) -> int:
-    total = 0
-    for event in _iter_budget_events(events_path):
-        if event.get("event_type") != "solve_reward_credit":
-            continue
-        if event.get("instance_uuid") != instance_uuid:
-            continue
-        try:
-            total += int(event.get("amount_tokens") or 0)
-        except (TypeError, ValueError):
-            continue
-    return total
-
-
-def _solve_reward_credited_problem_uids(events_path: Path, instance_uuid: str) -> set[str]:
-    credited: set[str] = set()
-    for event in _iter_budget_events(events_path):
-        if event.get("event_type") != "solve_reward_credit":
-            continue
-        if event.get("instance_uuid") != instance_uuid:
-            continue
-        metadata = event.get("metadata")
-        metadata = metadata if isinstance(metadata, dict) else {}
-        problem_uid = metadata.get("problem_uid")
-        if isinstance(problem_uid, str) and problem_uid:
-            credited.add(problem_uid)
-    return credited
-
-
-def _solution_scored_events(events_path: Path, instance_uuid: str) -> list[dict[str, Any]]:
-    return [
-        event
-        for event in _iter_budget_events(events_path)
-        if event.get("event_type") == "solution_scored" and event.get("instance_uuid") == instance_uuid
-    ]
-
-
-def _latest_solution_scored_event(events_path: Path, instance_uuid: str) -> dict[str, Any] | None:
-    events = _solution_scored_events(events_path, instance_uuid)
-    return events[-1] if events else None
-
-
 def _resolve_spawn_workspace_dir(context: dict[str, Any], workspace_dir: str | None) -> tuple[Path | None, str | None]:
     if workspace_dir is None:
         return None, None
@@ -1018,6 +953,7 @@ def _write_problem_pool_copy(
     configured_problem_pool_size: int | None = None,
     sampling_seed: int | None = None,
     iteration_index: int | None = None,
+    submit_tool_name: str = "submit_solution",
 ) -> None:
     json_path.parent.mkdir(parents=True, exist_ok=True)
     markdown_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1038,7 +974,7 @@ def _write_problem_pool_copy(
         },
         "instructions": (
             f"{scope_description} Choose any listed problem by uuid, solve it, then call "
-            "submit_solution(uuid=..., answer=...) to score it. Multiple rollouts "
+            f"{submit_tool_name}(uuid=..., answer=...) to score it. Multiple rollouts "
             "may claim reward for the same problem during this iteration; solved "
             "problems are removed before the next iteration. Each uuid appears at "
             "most once in this pool copy; unsolved problems may reappear later with "
@@ -1063,7 +999,10 @@ def _write_problem_pool_copy(
         "",
         f"Working-set count: {len(records)}",
         "",
-        "Choose any listed problem by uuid. Submit with `submit_solution(uuid=..., answer=...)`.",
+        (
+            "Choose any listed problem by uuid. Submit with "
+            f"`{submit_tool_name}(uuid=..., answer=...)`."
+        ),
         "",
         "The pool may be large. Inspect it deliberately, use search or the JSON structure to find a problem you can solve, then read the selected problem entry carefully before submitting its exact uuid.",
         "",
@@ -1347,21 +1286,6 @@ def _problem_record_for_context(
     )
 
 
-def _problem_record_for_uuid(context: dict[str, Any], submitted_uuid: str) -> ProblemRecord | None:
-    records = context.get("problem_pool_records")
-    if not isinstance(records, list):
-        return None
-    for payload in records:
-        if not isinstance(payload, dict):
-            continue
-        problem_uid = payload.get("problem_uid")
-        visible_uuid = payload.get("uuid", problem_uid)
-        if submitted_uuid not in {str(problem_uid or ""), str(visible_uuid or "")}:
-            continue
-        return _problem_record_from_payload(payload)
-    return None
-
-
 def _mark_problem_solved(
     queue_path: Path,
     problem_uid: str,
@@ -1452,111 +1376,6 @@ def _release_problem_assignment(
             "assigned_problem_count": len(retained),
             "previous_assigned_problem_count": before_count,
         }
-
-
-def _submit_solution(
-    *,
-    context: dict[str, Any],
-    args: dict[str, Any],
-) -> dict[str, Any]:
-    submitted_uuid, answer, error = _parse_submit_solution_arguments(args)
-    if error is not None or submitted_uuid is None or answer is None:
-        return {
-            "success": False,
-            "error": error or "invalid submit_solution arguments",
-        }
-
-    instance_uuid = str(context["instance_uuid"])
-    budget_ledger_events = Path(str(context["budget_ledger_events"]))
-    problem = _problem_record_for_uuid(context, submitted_uuid)
-    if problem is None:
-        return {
-            "success": False,
-            "error": "submitted uuid is not in this iteration's shared problem pool copy",
-            "submitted_uuid": submitted_uuid,
-        }
-    problem_uid = problem.problem_uid
-    task_id = problem.task_id
-    private_problem_path = problem.private_problem_path
-    reward = compute_rollout_reward(
-        submitted_answer=answer,
-        expected_task_id=task_id,
-        expected_problem_uid=problem_uid,
-        reported_task_id=None,
-        reported_problem_uid=submitted_uuid,
-        private_problem_path=private_problem_path,
-    )
-    solved = bool(reward >= 1.0)
-    try:
-        configured_credit_tokens = int(context.get("solve_reward_token_credit_tokens") or 0)
-    except (TypeError, ValueError):
-        configured_credit_tokens = 0
-    credited_problem_uids = _solve_reward_credited_problem_uids(budget_ledger_events, instance_uuid)
-    credited_tokens = (
-        configured_credit_tokens
-        if solved and problem_uid not in credited_problem_uids
-        else 0
-    )
-
-    metadata = {
-        "generation": context["generation"],
-        "seed": context["seed"],
-        "task_index": context["task_index"],
-        "problem_task_index": problem.task_index,
-        "rollout_index": context["rollout_index"],
-        "rollout_username": context["rollout_username"],
-        "task_id": task_id,
-        "problem_uid": problem_uid,
-        "private_problem_path": str(private_problem_path),
-        "task_markdown": problem.task_markdown,
-        "submitted_uuid": submitted_uuid,
-        "reported_problem_uid": submitted_uuid,
-        "reported_task_id": None,
-        "submitted_answer": answer,
-        "solved": solved,
-        "reward_credit_claimed": credited_tokens > 0,
-        "reward": reward,
-        "solve_reward_credit_tokens": credited_tokens,
-        "submission_source": "submit_solution",
-    }
-    append_budget_event(
-        budget_ledger_events,
-        event_type="solution_scored",
-        instance_uuid=instance_uuid,
-        metadata=metadata,
-    )
-    if credited_tokens > 0:
-        append_budget_event(
-            budget_ledger_events,
-            event_type="solve_reward_credit",
-            instance_uuid=instance_uuid,
-            amount_tokens=credited_tokens,
-            metadata={
-                "generation": context["generation"],
-                "seed": context["seed"],
-                "task_index": context["task_index"],
-                "problem_task_index": problem.task_index,
-                "rollout_index": context["rollout_index"],
-                "rollout_username": context["rollout_username"],
-                "task_id": task_id,
-                "problem_uid": problem_uid,
-                "reward": reward,
-            },
-        )
-    total_credited_tokens = _solve_reward_credit_total(budget_ledger_events, instance_uuid)
-    budget_status = read_budget_status(budget_ledger_events, instance_uuid)
-    result = {
-        "success": True,
-        "correct": solved,
-        "solved": solved,
-        "reward_credit_claimed": credited_tokens > 0,
-        "reward": reward,
-        "credited_tokens": credited_tokens,
-        "total_credited_tokens": total_credited_tokens,
-        "submitted_uuid": submitted_uuid,
-        "budget_status": budget_status,
-    }
-    return result
 
 
 def _transfer_tokens(
@@ -2831,6 +2650,7 @@ def run_worker(
 
 def run_codex_worker(
     *,
+    benchmark: str,
     runner_bin: Path,
     model: str,
     workdir: Path,
@@ -2890,6 +2710,9 @@ def run_codex_worker(
         rollout_token_budget_tokens=rollout_token_budget_tokens,
         instance_uuid=instance_uuid,
         spawn_child_handler_context_path=continuation_context_path,
+        supergpqa_mcp_context_path=(
+            continuation_context_path if benchmark == "supergpqa" else None
+        ),
         token_usage_callback=record_token_usage,
         stop_requested=stop_requested,
         progress_callback=progress_callback,
@@ -3680,6 +3503,11 @@ def main() -> None:
                 configured_problem_pool_size=args.problem_pool_size,
                 sampling_seed=args.seed,
                 iteration_index=task_index,
+                submit_tool_name=(
+                    "mcp__supergpqa__submit_solution"
+                    if args.worker_backend == "codex"
+                    else "submit_solution"
+                ),
             )
 
         def _run_one_rollout(rollout_index: int) -> RolloutResult:
@@ -3913,6 +3741,7 @@ def main() -> None:
                         if codex_runner_bin is None:
                             raise RuntimeError("Codex runner binary was not initialized.")
                         worker_result = run_codex_worker(
+                            benchmark=args.benchmark,
                             runner_bin=codex_runner_bin,
                             model=args.model,
                             workdir=temp_dir,
@@ -4483,11 +4312,6 @@ def run_child_tool_handler(context_path: Path) -> None:
                 instance_uuid=str(context["instance_uuid"]),
             )
             result = {"success": True, **result}
-        elif tool == "submit_solution":
-            result = _submit_solution(
-                context=context,
-                args=args,
-            )
         elif tool == "spawn_child":
             raw_parent_budget = payload.get("parent_budget")
             parent_budget = raw_parent_budget if isinstance(raw_parent_budget, dict) else {}

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::io::Read;
 use std::io::Write;
@@ -11,12 +12,14 @@ use std::time::Duration;
 use anyhow::Context;
 use anyhow::anyhow;
 use anyhow::bail;
+use codex_config::TomlValue;
 use codex_core::config::ConfigBuilder;
 use codex_core::config::ConfigOverrides;
 use codex_core_api::AbsolutePathBuf;
 use codex_core_api::Arg0DispatchPaths;
 use codex_core_api::AskForApproval;
 use codex_core_api::AuthManager;
+use codex_core_api::CodexHomeUserInstructionsProvider;
 use codex_core_api::EnvironmentManager;
 use codex_core_api::EventMsg;
 use codex_core_api::ExecServerRuntimePaths;
@@ -30,12 +33,14 @@ use codex_core_api::arg0_dispatch_or_else;
 use codex_core_api::empty_extension_registry;
 use codex_core_api::init_state_db;
 use codex_core_api::item_event_to_server_notification;
+use codex_core_api::local_agent_graph_store_from_state_db;
 use codex_core_api::resolve_installation_id;
 use codex_core_api::set_default_originator;
 use codex_core_api::thread_store_from_config;
 use codex_protocol::config_types::SandboxMode;
 use codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem;
 use codex_protocol::dynamic_tools::DynamicToolCallRequest;
+use codex_protocol::dynamic_tools::DynamicToolFunctionSpec;
 use codex_protocol::dynamic_tools::DynamicToolResponse;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::items::AgentMessageContent;
@@ -63,6 +68,7 @@ struct RunnerRequest {
     rollout_token_budget_tokens: Option<i64>,
     instance_uuid: Option<String>,
     spawn_child_handler_command: Option<Vec<String>>,
+    mcp_servers: Option<HashMap<String, Value>>,
 }
 
 #[derive(Debug)]
@@ -213,12 +219,43 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
         overrides.workspace_roots = None;
     }
 
-    let mut config = ConfigBuilder::default()
+    let mcp_cli_overrides = request
+        .mcp_servers
+        .as_ref()
+        .map(|servers| {
+            servers
+                .iter()
+                .map(|(name, value)| {
+                    serde_json::from_value::<TomlValue>(value.clone())
+                        .map(|value| (format!("mcp_servers.{name}"), value))
+                        .context("convert per-rollout MCP server configuration")
+                })
+                .collect::<anyhow::Result<Vec<_>>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let mut config_builder = ConfigBuilder::default()
         .codex_home(codex_home.clone())
-        .harness_overrides(overrides)
-        .build()
-        .await
-        .context("load Codex config")?;
+        .harness_overrides(overrides);
+    if !mcp_cli_overrides.is_empty() {
+        config_builder = config_builder.cli_overrides(mcp_cli_overrides);
+    }
+    let mut config = config_builder.build().await.context("load Codex config")?;
+    let mcp_servers = request
+        .mcp_servers
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(name, value)| {
+            serde_json::from_value(value)
+                .map(|server| (name, server))
+                .context("parse per-rollout MCP server configuration")
+        })
+        .collect::<anyhow::Result<HashMap<_, _>>>()?;
+    config
+        .mcp_servers
+        .set(mcp_servers)
+        .context("apply per-rollout MCP server configuration")?;
     config
         .features
         .disable(Feature::SpawnCsv)
@@ -249,6 +286,10 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
     let installation_id = resolve_installation_id(&config.codex_home)
         .await
         .context("resolve Codex installation id")?;
+    let user_instructions_provider = Arc::new(CodexHomeUserInstructionsProvider::new(
+        config.codex_home.clone(),
+    ));
+    let agent_graph_store = local_agent_graph_store_from_state_db(state_db.as_ref());
 
     let thread_manager = ThreadManager::new(
         &config,
@@ -256,11 +297,13 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
         SessionSource::Exec,
         environment_manager,
         empty_extension_registry(),
-        None,
+        user_instructions_provider,
+        /*analytics_events_client*/ None,
         Arc::clone(&thread_store),
-        state_db,
+        agent_graph_store,
         installation_id,
-        None,
+        /*attestation_provider*/ None,
+        /*external_time_provider*/ None,
     );
 
     let NewThread {
@@ -334,7 +377,6 @@ async fn run_turn(
                 text: prompt,
                 text_elements: Vec::new(),
             }],
-            environments: None,
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
             additional_context: Default::default(),
@@ -454,7 +496,7 @@ async fn run_turn(
                     "call_id": event.call_id,
                     "turn_id": event.turn_id,
                     "command": event.command,
-                    "cwd": event.cwd.to_string_lossy(),
+                    "cwd": event.cwd.to_string(),
                 }))?;
             }
             EventMsg::ExecCommandOutputDelta(event) => {
@@ -483,7 +525,7 @@ async fn run_turn(
                     "call_id": event.call_id,
                     "turn_id": event.turn_id,
                     "command": event.command,
-                    "cwd": event.cwd.to_string_lossy(),
+                    "cwd": event.cwd.to_string(),
                     "exit_code": event.exit_code,
                     "status": format!("{:?}", event.status),
                     "duration_ms": event.duration.as_millis(),
@@ -516,6 +558,38 @@ async fn run_turn(
                     "success": event.success,
                     "status": patch_status(&event.status),
                     "changed_paths": event.changes.keys().map(path_to_string).collect::<Vec<_>>(),
+                }))?;
+            }
+            EventMsg::McpToolCallBegin(event) => {
+                emit(json!({
+                    "event": "tool_begin",
+                    "tool": event.invocation.tool,
+                    "namespace": format!("mcp__{}", event.invocation.server),
+                    "call_id": event.call_id,
+                    "arguments": logged_tool_arguments(
+                        &event.invocation.tool,
+                        event.invocation.arguments.as_ref(),
+                    ),
+                }))?;
+            }
+            EventMsg::McpToolCallEnd(event) => {
+                let budget_reconciled = reconcile_budget_after_mcp_tool(
+                    &event.invocation.server,
+                    &event.invocation.tool,
+                    &mut budget_state,
+                    spawn_child_handler_command.as_deref(),
+                )
+                .map_err(|message| anyhow!(message))?;
+                emit(json!({
+                    "event": "tool_end",
+                    "tool": event.invocation.tool,
+                    "namespace": format!("mcp__{}", event.invocation.server),
+                    "call_id": event.call_id,
+                    "success": event.is_success(),
+                    "budget_reconciled": budget_reconciled,
+                    "tokens_transferred_in": budget_state.transferred_in_tokens,
+                    "effective_rollout_token_budget_tokens": budget_state.effective_rollout_token_budget_tokens(),
+                    "tokens_remaining": budget_state.tokens_remaining(),
                 }))?;
             }
             EventMsg::ItemCompleted(event) => {
@@ -589,7 +663,7 @@ async fn run_turn(
                     "namespace": request.namespace,
                     "call_id": request.call_id,
                     "turn_id": request.turn_id,
-                    "arguments": request.arguments,
+                    "arguments": logged_tool_arguments(&request.tool, Some(&request.arguments)),
                 }))?;
                 let response = handle_metalanguage_dynamic_tool(
                     request,
@@ -664,8 +738,7 @@ fn bail_with_event(code: &str) -> anyhow::Result<()> {
 
 fn metalanguage_dynamic_tools() -> Vec<DynamicToolSpec> {
     vec![
-        DynamicToolSpec {
-            namespace: None,
+        DynamicToolSpec::Function(DynamicToolFunctionSpec {
             name: "budget_status".to_string(),
             description: concat!(
                 "Return this rollout's token budget, spent tokens, reserved child ",
@@ -679,35 +752,8 @@ fn metalanguage_dynamic_tools() -> Vec<DynamicToolSpec> {
                 "additionalProperties": false,
             }),
             defer_loading: false,
-        },
-        DynamicToolSpec {
-            namespace: None,
-            name: "submit_solution".to_string(),
-            description: concat!(
-                "Submit a problem uuid from the shared workspace problem pool and its ",
-                "answer for immediate scoring. The response returns correct/incorrect, ",
-                "reward, credited tokens, and updated budget status."
-            )
-            .to_string(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "uuid": {
-                        "type": "string",
-                        "description": "Problem uuid copied from shared_workspace/problem_pool.json or shared_workspace/problem_pool.md."
-                    },
-                    "answer": {
-                        "type": "string",
-                        "description": "Answer to score against the selected problem uuid."
-                    }
-                },
-                "required": ["uuid", "answer"],
-                "additionalProperties": false,
-            }),
-            defer_loading: false,
-        },
-        DynamicToolSpec {
-            namespace: None,
+        }),
+        DynamicToolSpec::Function(DynamicToolFunctionSpec {
             name: "spawn_child".to_string(),
             description: concat!(
                 "Claim a next-iteration rollout slot by passing the child's inherited ",
@@ -721,7 +767,7 @@ fn metalanguage_dynamic_tools() -> Vec<DynamicToolSpec> {
                 "properties": {
                     "prompt": {
                         "type": "string",
-                        "description": "Required non-empty initial prompt for the child rollout. Use this prompt for durable current instructions for solving, submit_solution, archive/shared_workspace use, writing a useful artifact into archive/ or inherited workspace whenever useful, preserving this artifact-writing requirement, and spawning again."
+                        "description": "Required non-empty initial prompt for the child rollout. Use this prompt for durable current instructions for solving, benchmark submission, archive/shared_workspace use, writing a useful artifact into archive/ or inherited workspace whenever useful, preserving this artifact-writing requirement, and spawning again."
                     },
                     "workspace_dir": {
                         "type": "string",
@@ -736,9 +782,8 @@ fn metalanguage_dynamic_tools() -> Vec<DynamicToolSpec> {
                 "additionalProperties": false,
             }),
             defer_loading: false,
-        },
-        DynamicToolSpec {
-            namespace: None,
+        }),
+        DynamicToolSpec::Function(DynamicToolFunctionSpec {
             name: "transfer_tokens".to_string(),
             description: concat!(
                 "Transfer part of this rollout's remaining token budget to a live ",
@@ -761,8 +806,26 @@ fn metalanguage_dynamic_tools() -> Vec<DynamicToolSpec> {
                 "additionalProperties": false,
             }),
             defer_loading: false,
-        },
+        }),
     ]
+}
+
+#[cfg(test)]
+fn dynamic_tool_name(tool: &DynamicToolSpec) -> &str {
+    match tool {
+        DynamicToolSpec::Function(function) => &function.name,
+        DynamicToolSpec::Namespace(namespace) => &namespace.name,
+    }
+}
+
+fn logged_tool_arguments(tool: &str, arguments: Option<&Value>) -> Value {
+    if tool != "submit_solution" {
+        return arguments.cloned().unwrap_or(Value::Null);
+    }
+    json!({
+        "uuid": arguments.and_then(|value| value.get("uuid")),
+        "answer": "<redacted>",
+    })
 }
 
 fn handle_metalanguage_dynamic_tool(
@@ -782,9 +845,6 @@ fn handle_metalanguage_dynamic_tool(
         "budget_status" => {
             handle_budget_status_tool(request, budget_state, spawn_child_handler_command)
         }
-        "submit_solution" => {
-            handle_submit_solution_tool(request, budget_state, spawn_child_handler_command)
-        }
         "spawn_child" => handle_spawn_child_tool(
             request,
             budget_state,
@@ -802,45 +862,6 @@ fn handle_metalanguage_dynamic_tool(
             json!({"error": "unsupported dynamic tool", "tool": other}),
         ),
     }
-}
-
-fn handle_submit_solution_tool(
-    request: &DynamicToolCallRequest,
-    budget_state: &mut BudgetState,
-    spawn_child_handler_command: Option<&[String]>,
-) -> DynamicToolResponse {
-    let Some(command) = spawn_child_handler_command else {
-        return dynamic_tool_json_response(
-            false,
-            json!({"error": "submit_solution handler command is not configured"}),
-        );
-    };
-    if command.is_empty() {
-        return dynamic_tool_json_response(
-            false,
-            json!({"error": "submit_solution handler command is empty"}),
-        );
-    }
-    if let Err(message) = parse_submit_solution_args(&request.arguments) {
-        return dynamic_tool_json_response(false, json!({"error": message}));
-    }
-
-    let handler_payload = json!({
-        "tool": request.tool,
-        "namespace": request.namespace,
-        "call_id": request.call_id,
-        "arguments": request.arguments,
-    });
-    let output = match run_spawn_child_handler(command, &handler_payload) {
-        Ok(value) => value,
-        Err(message) => return dynamic_tool_json_response(false, json!({"error": message})),
-    };
-    apply_budget_status_from_tool_output(budget_state, &output);
-    let success = output
-        .get("success")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    dynamic_tool_json_response(success, output)
 }
 
 fn handle_budget_status_tool(
@@ -1018,25 +1039,23 @@ fn refresh_budget_status_from_handler(
     Ok(())
 }
 
-fn parse_submit_solution_args(arguments: &Value) -> Result<(), String> {
-    let Some(args) = arguments.as_object() else {
-        return Err("submit_solution arguments must be an object".to_string());
+fn reconcile_budget_after_mcp_tool(
+    server: &str,
+    tool: &str,
+    budget_state: &mut BudgetState,
+    spawn_child_handler_command: Option<&[String]>,
+) -> Result<bool, String> {
+    if server != "supergpqa" || tool != "submit_solution" {
+        return Ok(false);
+    }
+    let Some(command) = spawn_child_handler_command else {
+        return Err("budget handler command is required after submit_solution".to_string());
     };
-    let answer = args
-        .get("answer")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "submit_solution requires string answer".to_string())?;
-    if answer.trim().is_empty() {
-        return Err("answer must be non-empty".to_string());
+    if command.is_empty() {
+        return Err("budget handler command is empty after submit_solution".to_string());
     }
-    let uuid = args
-        .get("uuid")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "submit_solution requires string uuid".to_string())?;
-    if uuid.trim().is_empty() {
-        return Err("uuid must be non-empty".to_string());
-    }
-    Ok(())
+    refresh_budget_status_from_handler(budget_state, Some(command))?;
+    Ok(true)
 }
 
 fn parse_spawn_child_args(arguments: &Value) -> Result<(String, i64), String> {
@@ -1164,6 +1183,69 @@ fn agent_message_text(content: &[AgentMessageContent]) -> String {
             AgentMessageContent::Text { text } => text.as_str(),
         })
         .collect::<String>()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_tools_never_include_submit_solution() {
+        let names = metalanguage_dynamic_tools()
+            .into_iter()
+            .map(|tool| dynamic_tool_name(&tool).to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec!["budget_status", "spawn_child", "transfer_tokens"]
+        );
+        assert!(!names.contains(&"submit_solution".to_string()));
+    }
+
+    #[test]
+    fn submit_solution_answer_is_redacted_from_runner_events() {
+        let logged = logged_tool_arguments(
+            "submit_solution",
+            Some(&json!({"uuid": "problem", "answer": "private-answer"})),
+        );
+        assert_eq!(logged, json!({"uuid": "problem", "answer": "<redacted>"}));
+        assert!(!logged.to_string().contains("private-answer"));
+    }
+
+    #[test]
+    fn supergpqa_mcp_completion_reconciles_budget_immediately() {
+        let mut budget = BudgetState {
+            rollout_token_budget_tokens: Some(100),
+            tokens_spent: 10,
+            reserved_child_tokens: 0,
+            transferred_in_tokens: 0,
+            transferred_out_tokens: 0,
+        };
+        let command = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            concat!(
+                "cat >/dev/null; printf '%s\\n' '",
+                "{\"success\":true,\"rollout_token_budget_tokens\":100,",
+                "\"tokens_spent\":10,\"tokens_reserved_for_children\":0,",
+                "\"tokens_transferred_in\":50,\"tokens_transferred_out\":0}'"
+            )
+            .to_string(),
+        ];
+
+        let reconciled = reconcile_budget_after_mcp_tool(
+            "supergpqa",
+            "submit_solution",
+            &mut budget,
+            Some(&command),
+        )
+        .expect("reconcile budget");
+
+        assert!(reconciled);
+        assert_eq!(budget.transferred_in_tokens, 50);
+        assert_eq!(budget.effective_rollout_token_budget_tokens(), Some(150));
+        assert_eq!(budget.tokens_remaining(), Some(140));
+    }
 }
 
 fn parse_sandbox_mode(value: Option<&str>) -> anyhow::Result<SandboxMode> {
