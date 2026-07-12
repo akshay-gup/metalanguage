@@ -29,12 +29,15 @@ from utils.arc_agi_rollout import (
     reset_arc_rollout_command,
     step_arc_rollout_command,
 )
+from utils.benchmark_driver import BenchmarkItemRef
+from utils.budget_ledger import append_budget_event
 
 
 CONTEXT_ENV = "METALANGUAGE_ARC_CONTEXT"
 CONTEXT_SCHEMA = "metalanguage.arc_mcp_context"
 CONTEXT_VERSION = 1
-_CONTEXT_FIELDS = {
+DRIVER_CONTEXT_VERSION = 2
+_CONTEXT_FIELDS_V1 = {
     "schema",
     "version",
     "allowed_game_ids",
@@ -44,6 +47,11 @@ _CONTEXT_FIELDS = {
     "rollout_root",
     "artifact_root",
     "render_scale",
+}
+_CONTEXT_FIELDS_V2 = _CONTEXT_FIELDS_V1 | {
+    "instance_uuid",
+    "benchmark_events_path",
+    "benchmark_items",
 }
 
 mcp = FastMCP("ARC-AGI", json_response=True)
@@ -62,6 +70,9 @@ class ArcMcpContext:
     rollout_root: Path = field(repr=False)
     artifact_root: Path = field(repr=False)
     render_scale: int
+    instance_uuid: str | None = field(default=None, repr=False)
+    benchmark_events_path: Path | None = field(default=None, repr=False)
+    benchmark_items: dict[str, BenchmarkItemRef] = field(default_factory=dict, repr=False)
 
 
 class ArcCommandService:
@@ -93,11 +104,13 @@ class ArcCommandService:
             if selected != game_id:
                 raise ArcAgiMcpError("RESET cannot change the selected ARC game")
             try:
-                return self._reset(self.context.state_path)
+                result = self._reset(self.context.state_path)
             except Exception:
                 raise ArcAgiMcpError("ARC RESET failed") from None
+            self._publish_selection(game_id)
+            return result
         try:
-            return self._initialize(
+            result = self._initialize(
                 self.context.state_path,
                 self.context.rollout_root,
                 self.context.base_url,
@@ -106,6 +119,8 @@ class ArcCommandService:
             )
         except Exception:
             raise ArcAgiMcpError("ARC RESET failed") from None
+        self._publish_selection(game_id)
+        return result
 
     def action(
         self,
@@ -121,6 +136,30 @@ class ArcCommandService:
         except Exception:
             raise ArcAgiMcpError(f"ARC {action} failed") from None
 
+    def _publish_selection(self, game_id: str) -> None:
+        if self.context.instance_uuid is None:
+            return
+        events_path = self.context.benchmark_events_path
+        item_ref = self.context.benchmark_items.get(game_id)
+        if events_path is None or item_ref is None:
+            raise ArcAgiMcpError("ARC benchmark provenance is unavailable")
+        expected = item_ref.to_metadata()
+        try:
+            if _selection_exists(events_path, self.context.instance_uuid, expected):
+                return
+            append_budget_event(
+                events_path,
+                event_type="benchmark_item_selected",
+                instance_uuid=self.context.instance_uuid,
+                metadata={
+                    "benchmark": "arc-agi",
+                    "game_id": game_id,
+                    "benchmark_item": expected,
+                },
+            )
+        except Exception:
+            raise ArcAgiMcpError("ARC benchmark provenance could not be recorded") from None
+
 
 def load_context(path: str | Path) -> ArcMcpContext:
     context_path = _canonical_file(Path(path), "ARC handler context")
@@ -134,10 +173,18 @@ def load_context(path: str | Path) -> ArcMcpContext:
         raise
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         raise ArcAgiMcpError("ARC handler context is unreadable") from None
-    if not isinstance(value, dict) or set(value) != _CONTEXT_FIELDS:
+    if not isinstance(value, dict):
         raise ArcAgiMcpError("ARC handler context has an invalid schema")
-    if value.get("schema") != CONTEXT_SCHEMA or value.get("version") != CONTEXT_VERSION:
+    version = value.get("version")
+    expected_fields = (
+        _CONTEXT_FIELDS_V1
+        if version == CONTEXT_VERSION
+        else _CONTEXT_FIELDS_V2 if version == DRIVER_CONTEXT_VERSION else None
+    )
+    if value.get("schema") != CONTEXT_SCHEMA or expected_fields is None:
         raise ArcAgiMcpError("ARC handler context has an unsupported version")
+    if set(value) != expected_fields:
+        raise ArcAgiMcpError("ARC handler context has an invalid schema")
 
     games = value.get("allowed_game_ids")
     if (
@@ -180,6 +227,35 @@ def load_context(path: str | Path) -> ArcMcpContext:
     scale = value.get("render_scale")
     if isinstance(scale, bool) or not isinstance(scale, int) or not 1 <= scale <= MAX_SCALE:
         raise ArcAgiMcpError("ARC handler context has invalid render scale")
+    instance_uuid: str | None = None
+    events_path: Path | None = None
+    benchmark_items: dict[str, BenchmarkItemRef] = {}
+    if version == DRIVER_CONTEXT_VERSION:
+        instance_uuid = value.get("instance_uuid")
+        if not isinstance(instance_uuid, str) or not instance_uuid:
+            raise ArcAgiMcpError("ARC handler context has invalid instance identity")
+        events_path = _canonical_path(
+            value.get("benchmark_events_path"), "ARC benchmark events path"
+        )
+        if events_path.is_symlink() or not events_path.is_file() or events_path.resolve() != events_path:
+            raise ArcAgiMcpError("ARC benchmark events path is unavailable")
+        _require_private_file(events_path, "ARC benchmark events path")
+        raw_items = value.get("benchmark_items")
+        if not isinstance(raw_items, dict) or set(raw_items) != set(games):
+            raise ArcAgiMcpError("ARC handler context has invalid benchmark items")
+        for game_id, metadata in raw_items.items():
+            item_ref = BenchmarkItemRef.from_metadata(metadata)
+            if (
+                item_ref is None
+                or item_ref.source_id != game_id
+                or item_ref.item_index is None
+                or item_ref.iteration_index is None
+            ):
+                raise ArcAgiMcpError("ARC handler context has invalid benchmark items")
+            benchmark_items[game_id] = item_ref
+        if len({item.item_id for item in benchmark_items.values()}) != len(benchmark_items):
+            raise ArcAgiMcpError("ARC handler context has duplicate benchmark items")
+
     return ArcMcpContext(
         tuple(games),
         base_url,
@@ -188,7 +264,34 @@ def load_context(path: str | Path) -> ArcMcpContext:
         rollout_root,
         artifact_root,
         scale,
+        instance_uuid,
+        events_path,
+        benchmark_items,
     )
+
+
+def _selection_exists(
+    events_path: Path,
+    instance_uuid: str,
+    expected_item: dict[str, Any],
+) -> bool:
+    try:
+        lines = events_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    for line in reversed(lines):
+        try:
+            event = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if (
+            isinstance(event, dict)
+            and event.get("event_type") == "benchmark_item_selected"
+            and event.get("instance_uuid") == instance_uuid
+        ):
+            metadata = event.get("metadata")
+            return isinstance(metadata, dict) and metadata.get("benchmark_item") == expected_item
+    return False
 
 
 def _load_service() -> ArcCommandService:
