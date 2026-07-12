@@ -56,6 +56,23 @@ class ArcAgiCommandResult:
     frame_paths: tuple[Path, ...] = field(repr=False)
 
 
+@dataclass(frozen=True)
+class ArcAgiSessionSnapshot:
+    """Supervisor view of persisted session state, including private handles."""
+
+    game_id: str
+    state: str
+    levels_completed: int
+    win_levels: int
+    available_actions: tuple[int, ...]
+    step_index: int
+    operation: str
+    closed: bool
+    base_url: str = field(repr=False)
+    card_id: str = field(repr=False)
+    guid: str = field(repr=False)
+
+
 def initialize_arc_rollout(
     state_path: str | Path,
     rollout_root: str | Path,
@@ -293,6 +310,27 @@ def arc_rollout_game_id(state_path: str | Path) -> str:
         state = _load_state(state_file)
         _require_open(state)
         return state["game_id"]
+
+
+def inspect_arc_rollout_session(state_path: str | Path) -> ArcAgiSessionSnapshot:
+    """Read authoritative session state without requiring visible artifacts."""
+
+    state_file = Path(state_path).resolve()
+    with _state_lock(state_file, exclusive=False):
+        state = _load_state(state_file)
+        return ArcAgiSessionSnapshot(
+            game_id=state["game_id"],
+            state=state["state"],
+            levels_completed=state["levels_completed"],
+            win_levels=state["win_levels"],
+            available_actions=tuple(state["available_actions"]),
+            step_index=state["step_index"],
+            operation=state["operation"],
+            closed=state["closed"],
+            base_url=state["base_url"],
+            card_id=state["card_id"],
+            guid=state["guid"],
+        )
 
 
 def _command_result(
