@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from utils.arc_agi_benchmark import ArcAgiBenchmarkDriver, ArcAgiConfig
 from utils.budget_ledger import (
     append_budget_event,
     budget_ledger_transaction,
@@ -53,7 +54,6 @@ from utils.openrouter import (
     spawn_child_tool,
     transfer_tokens_tool,
 )
-from utils.problem_pool_sampling import deterministic_problem_pool_sample
 from utils.supergpqa_benchmark import SuperGpqaBenchmarkDriver, SuperGpqaConfig
 
 
@@ -977,44 +977,72 @@ def _resolve_runtime_path(value: str, runtime_root: Path, label: str) -> Path:
     return path
 
 
-def _materialize_arc_problem_pool(args: argparse.Namespace, runtime_root: Path) -> None:
-    from utils.arc_agi_tasks import environment_info_records, write_arc_task_pool
-
-    rollout_root = _resolve_runtime_path(
-        args.rollout_temp_root, runtime_root, "--rollout-temp-root"
-    )
-    shared_workspace_dir = rollout_root / "shared_workspace"
-    candidate_records = environment_info_records()
-    records = deterministic_problem_pool_sample(
-        candidate_records,
-        problem_pool_size=args.problem_pool_size,
-        seed=args.seed,
-        iteration_index=args.start_task_index,
-        record_id=lambda record: str(record["uuid"]),
-    )
-    write_arc_task_pool(
-        json_path=shared_workspace_dir / "problem_pool.json",
-        markdown_path=shared_workspace_dir / "problem_pool.md",
-        records=records,
-        configured_problem_pool_size=args.problem_pool_size,
-        seed=args.seed,
-        iteration_index=args.start_task_index,
-    )
-
-
-def _configure_runtime_environment(runtime_root: Path) -> Path:
+def _configure_runtime_environment(
+    runtime_root: Path, *, include_huggingface: bool = True
+) -> Path:
     cache_root = runtime_root / "cache"
     dataset_cache_dir = cache_root / "huggingface_datasets"
     env_dirs = {
         "XDG_CACHE_HOME": cache_root / "xdg",
-        "HF_HOME": cache_root / "huggingface",
-        "HF_DATASETS_CACHE": dataset_cache_dir,
         "TMPDIR": runtime_root / "tmp" / "process",
     }
+    if include_huggingface:
+        env_dirs.update(
+            {
+                "HF_HOME": cache_root / "huggingface",
+                "HF_DATASETS_CACHE": dataset_cache_dir,
+            }
+        )
     for name, path in env_dirs.items():
         path.mkdir(parents=True, exist_ok=True)
         os.environ[name] = str(path)
     return dataset_cache_dir
+
+
+def _create_benchmark_driver(
+    args: argparse.Namespace,
+    *,
+    arc_benchmark_state_path: Path,
+    problem_queue_path: Path,
+    task_store_dir: Path,
+    dataset_cache_dir: Path,
+    existing_records: list[dict[str, Any]],
+) -> BenchmarkDriver:
+    if args.benchmark == "arc-agi":
+        return ArcAgiBenchmarkDriver(
+            ArcAgiConfig(
+                state_path=arc_benchmark_state_path,
+                seed=args.seed,
+                problem_pool_size=args.problem_pool_size,
+            )
+        )
+    return SuperGpqaBenchmarkDriver(
+        SuperGpqaConfig(
+            dataset_name=args.dataset_name,
+            split=args.split,
+            config_name=args.config_name,
+            seed=args.seed,
+            question_key=args.question_key,
+            answer_key=args.answer_key,
+            id_key=args.id_key,
+            difficulty_filter=args.difficulty_filter,
+            start_task_index=args.start_task_index,
+            problem_pool_size=args.problem_pool_size,
+            solve_reward_token_credit_tokens=args.solve_reward_token_credit_tokens,
+            queue_path=problem_queue_path,
+            task_store_dir=task_store_dir,
+            dataset_cache_dir=dataset_cache_dir,
+            historical_run_records=tuple(existing_records),
+            backend=args.worker_backend,
+        )
+    )
+
+
+def _validate_benchmark_backend(benchmark: str, worker_backend: str) -> None:
+    if benchmark == "arc-agi" and worker_backend != "codex":
+        raise SystemExit(
+            "error: --benchmark arc-agi currently requires --worker-backend codex"
+        )
 
 
 def _ensure_runtime_bootstrap_seed(bootstrap_seed_dir: Path) -> None:
@@ -2209,7 +2237,7 @@ def parse_args() -> argparse.Namespace:
         "--benchmark",
         choices=["supergpqa", "arc-agi"],
         default="supergpqa",
-        help="Benchmark runtime to use. ARC-AGI gameplay is not yet wired.",
+        help="Benchmark runtime to use.",
     )
     parser.add_argument("--dataset-name", default="m-a-p/SuperGPQA")
     parser.add_argument("--split", default="train")
@@ -2417,7 +2445,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
+def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
     args = parse_args()
     args.difficulty_filter = _normalize_difficulty_filter(args.difficulty_filter)
     difficulty_filter_payload = list(args.difficulty_filter) if args.difficulty_filter is not None else None
@@ -2436,12 +2464,7 @@ def main() -> None:
 
     unresolved_runtime_root = _resolve_runtime_root(args.runtime_root, create=False)
     _check_runtime_benchmark(unresolved_runtime_root, args.benchmark)
-    if args.benchmark == "arc-agi":
-        _claim_runtime_benchmark(unresolved_runtime_root, args.benchmark)
-        _materialize_arc_problem_pool(args, unresolved_runtime_root)
-        raise SystemExit(
-            "error: --benchmark arc-agi pool materialized; rollout gameplay is not yet wired"
-        )
+    _validate_benchmark_backend(args.benchmark, args.worker_backend)
 
     load_dotenv()
     api_key: str | None = os.environ.get("OPENROUTER_API_KEY")
@@ -2465,10 +2488,14 @@ def main() -> None:
     rollout_root = _resolve_runtime_path(args.rollout_temp_root, runtime_root, "--rollout-temp-root")
     task_store_dir = _resolve_runtime_path(args.task_store_dir, runtime_root, "--task-store-dir")
     problem_queue_path = _resolve_runtime_path(args.problem_queue, runtime_root, "--problem-queue")
+    arc_benchmark_state_path = runtime_root / "logs" / "arc_agi" / "benchmark_state.json"
     archive_repo_dir = _resolve_runtime_path(args.archive_repo_dir, runtime_root, "--archive-repo-dir")
     bootstrap_seed_dir = _resolve_runtime_path(args.bootstrap_seed_dir, runtime_root, "--bootstrap-seed-dir")
     budget_ledger_events = runtime_root / "logs" / "budget_ledger.jsonl"
-    dataset_cache_dir = _configure_runtime_environment(runtime_root)
+    dataset_cache_dir = _configure_runtime_environment(
+        runtime_root,
+        include_huggingface=args.benchmark == "supergpqa",
+    )
     _ensure_runtime_bootstrap_seed(bootstrap_seed_dir)
 
     ensure_local_world_repo(archive_repo_dir)
@@ -2492,34 +2519,42 @@ def main() -> None:
         expected_codex_base_mode = (
             args.codex_base_instructions_mode if args.worker_backend == "codex" else None
         )
-        existing_records = [
-            rec
-            for rec in all_records
-            if rec.get("benchmark", "supergpqa") == args.benchmark
-            and rec.get("dataset_name") == args.dataset_name
-            and rec.get("split") == args.split
-            and rec.get("model") == args.model
-            and rec.get("seed") == args.seed
-            and rec.get("generation") == args.generation
-            and rec.get("bootstrap_rollout_count", rec.get("num_rollouts")) == args.num_rollouts
-            and rec.get("config_name") == args.config_name
-            and rec.get("difficulty_filter") == difficulty_filter_payload
-            and rec.get("worker_backend", "openrouter") == args.worker_backend
-            and rec.get(
-                "configured_rollout_token_budget_tokens",
-                rec.get("rollout_token_budget_tokens"),
+        def _matches_run(rec: dict[str, Any]) -> bool:
+            if not (
+                rec.get("benchmark", "supergpqa") == args.benchmark
+                and rec.get("model") == args.model
+                and rec.get("seed") == args.seed
+                and rec.get("generation") == args.generation
+                and rec.get("bootstrap_rollout_count", rec.get("num_rollouts"))
+                == args.num_rollouts
+                and rec.get("worker_backend", "openrouter") == args.worker_backend
+                and rec.get(
+                    "configured_rollout_token_budget_tokens",
+                    rec.get("rollout_token_budget_tokens"),
+                )
+                == args.rollout_token_budget_tokens
+                and (
+                    args.worker_backend != "codex"
+                    or rec.get("codex_base_instructions_mode", "codex")
+                    == expected_codex_base_mode
+                )
+            ):
+                return False
+            if args.benchmark != "supergpqa":
+                return True
+            return (
+                rec.get("dataset_name") == args.dataset_name
+                and rec.get("split") == args.split
+                and rec.get("config_name") == args.config_name
+                and rec.get("difficulty_filter") == difficulty_filter_payload
+                and rec.get(
+                    "configured_solve_reward_token_credit_tokens",
+                    rec.get("solve_reward_token_credit_tokens"),
+                )
+                == args.solve_reward_token_credit_tokens
             )
-            == args.rollout_token_budget_tokens
-            and rec.get(
-                "configured_solve_reward_token_credit_tokens",
-                rec.get("solve_reward_token_credit_tokens"),
-            )
-            == args.solve_reward_token_credit_tokens
-            and (
-                args.worker_backend != "codex"
-                or rec.get("codex_base_instructions_mode", "codex") == expected_codex_base_mode
-            )
-        ]
+
+        existing_records = [rec for rec in all_records if _matches_run(rec)]
 
     existing_by_task: dict[int, dict[int, dict[str, Any]]] = {}
     for rec in existing_records:
@@ -2579,26 +2614,15 @@ def main() -> None:
             return max(eligible_indices) + 1
         return args.start_task_index
 
-    benchmark_driver = SuperGpqaBenchmarkDriver(
-        SuperGpqaConfig(
-            dataset_name=args.dataset_name,
-            split=args.split,
-            config_name=args.config_name,
-            seed=args.seed,
-            question_key=args.question_key,
-            answer_key=args.answer_key,
-            id_key=args.id_key,
-            difficulty_filter=args.difficulty_filter,
-            start_task_index=args.start_task_index,
-            problem_pool_size=args.problem_pool_size,
-            solve_reward_token_credit_tokens=args.solve_reward_token_credit_tokens,
-            queue_path=problem_queue_path,
-            task_store_dir=task_store_dir,
-            dataset_cache_dir=dataset_cache_dir,
-            historical_run_records=tuple(existing_records),
-            backend=args.worker_backend,
-        )
+    benchmark_driver = _create_benchmark_driver(
+        args,
+        arc_benchmark_state_path=arc_benchmark_state_path,
+        problem_queue_path=problem_queue_path,
+        task_store_dir=task_store_dir,
+        dataset_cache_dir=dataset_cache_dir,
+        existing_records=existing_records,
     )
+    active_drivers.append(benchmark_driver)
     problem_start_index = _next_step_task_index() if args.step else args.start_task_index
     problem_batch_count = args.max_tasks if args.all_tasks and args.max_tasks is not None else 1
     scheduled_batches = [
@@ -2907,9 +2931,15 @@ def main() -> None:
                 context={
                     **continuation_context,
                     "continuation_context_path": str(planned_context_path),
+                    "rollout_state_dir": str(rollout_state_dir),
                 },
             )
             continuation_context = rollout_benchmark.context
+            benchmark_instructions = rollout_benchmark.model_metadata.get("instructions")
+            if isinstance(benchmark_instructions, str) and benchmark_instructions:
+                rollout_initial_prompt = (
+                    f"{rollout_initial_prompt.rstrip()}\n\n{benchmark_instructions}\n"
+                )
             continuation_context_path = (
                 _write_continuation_context(continuation_context, rollout_control_dir)
                 if args.worker_backend == "codex"
@@ -2919,7 +2949,9 @@ def main() -> None:
                 "workspace_prepared",
                 working_directory=str(temp_dir),
                 runtime_file=str(runtime_file),
-                problem_queue_path=str(problem_queue_path),
+                problem_queue_path=(
+                    str(problem_queue_path) if args.benchmark == "supergpqa" else None
+                ),
                 problem_pool_json_path=str(problem_pool_json_path),
                 problem_pool_markdown_path=str(problem_pool_markdown_path),
                 configured_problem_pool_size=args.problem_pool_size,
@@ -3051,7 +3083,11 @@ def main() -> None:
             solved = benchmark_outcome.solved
             if not benchmark_outcome.attempted:
                 _progress(
-                    "solution_missing",
+                    (
+                        "solution_missing"
+                        if args.benchmark == "supergpqa"
+                        else "benchmark_outcome_missing"
+                    ),
                     error=benchmark_outcome.error,
                 )
             _progress(
@@ -3139,16 +3175,20 @@ def main() -> None:
                 "reward": reward,
                 "benchmark_outcome_metadata": benchmark_outcome.metadata,
                 "output_path": str(output_dir),
-                "problem_queue_path": str(problem_queue_path),
+                "problem_queue_path": (
+                    str(problem_queue_path) if args.benchmark == "supergpqa" else None
+                ),
                 "problem_pool_json_path": str(problem_pool_json_path),
                 "problem_pool_markdown_path": str(problem_pool_markdown_path),
                 "configured_problem_pool_size": args.problem_pool_size,
                 "problem_pool_count": problem_pool_count,
                 "shared_workspace_write_log": str(shared_workspace_write_log),
                 "progress_log": str(progress_log_path),
-                "dataset_name": args.dataset_name,
-                "split": args.split,
-                "difficulty_filter": difficulty_filter_payload,
+                "dataset_name": args.dataset_name if args.benchmark == "supergpqa" else None,
+                "split": args.split if args.benchmark == "supergpqa" else None,
+                "difficulty_filter": (
+                    difficulty_filter_payload if args.benchmark == "supergpqa" else None
+                ),
                 "model": args.model,
                 "num_rollouts": args.num_rollouts,
                 "bootstrap_rollout_count": args.num_rollouts,
@@ -3158,7 +3198,11 @@ def main() -> None:
                 "openrouter_max_retries": args.openrouter_max_retries,
                 "configured_rollout_token_budget_tokens": args.rollout_token_budget_tokens,
                 "rollout_token_budget_tokens": rollout_budget_tokens,
-                "configured_solve_reward_token_credit_tokens": args.solve_reward_token_credit_tokens,
+                "configured_solve_reward_token_credit_tokens": (
+                    args.solve_reward_token_credit_tokens
+                    if args.benchmark == "supergpqa"
+                    else 0
+                ),
                 "codex_home": str(codex_home) if args.worker_backend == "codex" else None,
                 "codex_runner_bin": str(codex_runner_bin) if codex_runner_bin is not None else None,
                 "codex_sandbox_mode": args.codex_sandbox_mode if args.worker_backend == "codex" else None,
@@ -3174,9 +3218,11 @@ def main() -> None:
                 "bootstrap_seed_used": bootstrap_seed_used,
                 "bootstrap_seed_embedded": False,
                 "rollout_initial_prompt_chars": len(rollout_initial_prompt),
-                "config_name": args.config_name,
+                "config_name": args.config_name if args.benchmark == "supergpqa" else None,
                 "runtime_root": str(runtime_root),
-                "dataset_cache_dir": str(dataset_cache_dir),
+                "dataset_cache_dir": (
+                    str(dataset_cache_dir) if args.benchmark == "supergpqa" else None
+                ),
                 **archive_result,
             }
             record.update(benchmark_outcome.run_record)
@@ -3257,9 +3303,6 @@ def main() -> None:
                                         "rollout_username": _rollout_username(rollout_index),
                                         "task_id": task_id,
                                         "problem_uid": problem_uid,
-                                        "submitted_uuid": None,
-                                        "reported_problem_uid": None,
-                                        "reported_task_id": None,
                                         "parent_slot_dir": None,
                                         "parent_workspace_dir": None,
                                         "bootstrap_seed_dir": str(bootstrap_seed_dir),
@@ -3275,15 +3318,28 @@ def main() -> None:
                                         "solved": False,
                                         "reward": 0.0,
                                         "output_path": None,
-                                        "private_problem_path": None,
-                                        "problem_queue_path": str(problem_queue_path),
+                                        "problem_queue_path": (
+                                            str(problem_queue_path)
+                                            if args.benchmark == "supergpqa"
+                                            else None
+                                        ),
                                         "configured_problem_pool_size": args.problem_pool_size,
                                         "problem_pool_count": problem_pool_count,
                                         "shared_workspace_write_log": str(shared_workspace_write_log),
                                         "progress_log": str(progress_log_path),
-                                        "dataset_name": args.dataset_name,
-                                        "split": args.split,
-                                        "difficulty_filter": difficulty_filter_payload,
+                                        "dataset_name": (
+                                            args.dataset_name
+                                            if args.benchmark == "supergpqa"
+                                            else None
+                                        ),
+                                        "split": (
+                                            args.split if args.benchmark == "supergpqa" else None
+                                        ),
+                                        "difficulty_filter": (
+                                            difficulty_filter_payload
+                                            if args.benchmark == "supergpqa"
+                                            else None
+                                        ),
                                         "model": args.model,
                                         "num_rollouts": args.num_rollouts,
                                         "bootstrap_rollout_count": args.num_rollouts,
@@ -3302,9 +3358,27 @@ def main() -> None:
                                             else None
                                         ),
                                         "codex_base_instructions_chars": None,
-                                        "config_name": args.config_name,
+                                        "config_name": (
+                                            args.config_name
+                                            if args.benchmark == "supergpqa"
+                                            else None
+                                        ),
                                         "runtime_root": str(runtime_root),
-                                        "dataset_cache_dir": str(dataset_cache_dir),
+                                        "dataset_cache_dir": (
+                                            str(dataset_cache_dir)
+                                            if args.benchmark == "supergpqa"
+                                            else None
+                                        ),
+                                        **(
+                                            {
+                                                "submitted_uuid": None,
+                                                "reported_problem_uid": None,
+                                                "reported_task_id": None,
+                                                "private_problem_path": None,
+                                            }
+                                            if args.benchmark == "supergpqa"
+                                            else {"benchmark_item": None}
+                                        ),
                                     },
                                     successful_dir=None,
                                     summary=(
@@ -3394,7 +3468,13 @@ def main() -> None:
                 raise RuntimeError(f"One or more rollouts failed after logging results: {details}")
             print(f"warning: one or more rollouts failed after logging results: {details}")
 
-    benchmark_driver.close()
+def main() -> None:
+    active_drivers: list[BenchmarkDriver] = []
+    try:
+        _run_main(active_drivers)
+    finally:
+        for driver in reversed(active_drivers):
+            driver.close()
 
 
 def run_child_tool_handler(context_path: Path) -> None:
