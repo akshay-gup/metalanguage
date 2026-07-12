@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import fcntl
 import json
 import os
 from pathlib import Path
-from typing import Any
+import tempfile
+from typing import Any, Iterator, TextIO
 import uuid
 
 
 PROJECTION_VERSION = 1
+PRIVATE_FILE_MODE = 0o600
 
 
 def new_instance_uuid() -> str:
@@ -67,8 +70,9 @@ def budget_ledger_transaction(
     events_path.parent.mkdir(parents=True, exist_ok=True)
     projection_path = budget_projection_path(events_path)
     lock_path = events_path.with_suffix(events_path.suffix + ".lock")
-    with lock_path.open("w", encoding="utf-8") as lock_fh:
-        fcntl.flock(lock_fh, fcntl.LOCK_EX)
+    with _private_ledger_lock(lock_path):
+        _harden_private_file(events_path, create=True)
+        _harden_private_file(projection_path, create=False)
         projection = _load_or_rebuild_projection_locked(events_path, projection_path)
         status_before = (
             budget_status_from_projection(projection, debit_instance_uuid)
@@ -98,7 +102,7 @@ def budget_ledger_transaction(
         event_specs = build_event_specs(status_before)
         events = [_make_budget_event(spec) for spec in event_specs]
         if events:
-            with events_path.open("a", encoding="utf-8") as fh:
+            with _open_private_append(events_path) as fh:
                 for event in events:
                     fh.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
                 fh.flush()
@@ -125,8 +129,9 @@ def read_budget_status(events_path: Path, instance_uuid: str) -> dict[str, Any]:
     events_path.parent.mkdir(parents=True, exist_ok=True)
     projection_path = budget_projection_path(events_path)
     lock_path = events_path.with_suffix(events_path.suffix + ".lock")
-    with lock_path.open("w", encoding="utf-8") as lock_fh:
-        fcntl.flock(lock_fh, fcntl.LOCK_EX)
+    with _private_ledger_lock(lock_path):
+        _harden_private_file(events_path, create=True)
+        _harden_private_file(projection_path, create=False)
         projection = _load_or_rebuild_projection_locked(events_path, projection_path)
         _write_projection_locked(events_path, projection_path, projection)
         return budget_status_from_projection(projection, instance_uuid)
@@ -282,12 +287,62 @@ def _write_projection_locked(events_path: Path, projection_path: Path, projectio
     projection["version"] = PROJECTION_VERSION
     projection["updated_at"] = datetime.now(timezone.utc).isoformat()
     projection["ledger_size_bytes"] = events_path.stat().st_size if events_path.exists() else 0
-    temp_path = projection_path.with_suffix(projection_path.suffix + f".{os.getpid()}.tmp")
-    temp_path.write_text(
-        json.dumps(projection, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{projection_path.name}.", dir=projection_path.parent
     )
-    os.replace(temp_path, projection_path)
+    temp_path = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, PRIVATE_FILE_MODE)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(projection, stream, ensure_ascii=False, indent=2, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_path, projection_path)
+        os.chmod(projection_path, PRIVATE_FILE_MODE)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+@contextmanager
+def _private_ledger_lock(lock_path: Path) -> Iterator[None]:
+    descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, PRIVATE_FILE_MODE)
+    try:
+        os.fchmod(descriptor, PRIVATE_FILE_MODE)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def _harden_private_file(path: Path, *, create: bool) -> None:
+    flags = os.O_RDWR | (os.O_CREAT if create else 0)
+    try:
+        descriptor = os.open(path, flags, PRIVATE_FILE_MODE)
+    except FileNotFoundError:
+        return
+    try:
+        os.fchmod(descriptor, PRIVATE_FILE_MODE)
+    finally:
+        os.close(descriptor)
+
+
+@contextmanager
+def _open_private_append(path: Path) -> Iterator[TextIO]:
+    descriptor = os.open(
+        path,
+        os.O_CREAT | os.O_WRONLY | os.O_APPEND,
+        PRIVATE_FILE_MODE,
+    )
+    try:
+        os.fchmod(descriptor, PRIVATE_FILE_MODE)
+        with os.fdopen(descriptor, "a", encoding="utf-8") as stream:
+            descriptor = -1
+            yield stream
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def _apply_event_to_projection(projection: dict[str, Any], event: dict[str, Any]) -> None:
