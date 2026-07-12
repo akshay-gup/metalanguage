@@ -7,10 +7,16 @@ import socket
 import sys
 import tempfile
 import unittest
+from argparse import Namespace
 from pathlib import Path
 from unittest.mock import patch
 
-from main_loop import _claim_spawn_slot
+from main_loop import (
+    _claim_spawn_slot,
+    _configure_runtime_environment,
+    _create_benchmark_driver,
+    _validate_benchmark_backend,
+)
 from utils.arc_agi_benchmark import ARC_TOOL_NAMES, ArcAgiBenchmarkDriver, ArcAgiConfig
 from utils.arc_agi_mcp import DRIVER_CONTEXT_VERSION, ArcCommandService, load_context
 from utils.arc_agi_rollout import ArcAgiCommandResult, ArcAgiSessionSnapshot
@@ -104,6 +110,7 @@ def _supervisor_context(root: Path, name: str) -> dict[str, object]:
 class ArcAgiBenchmarkTests(unittest.TestCase):
     def _driver(
         self,
+        root: Path,
         *,
         cap: int | None = 3,
         launcher: _Launcher | None = None,
@@ -118,7 +125,12 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
             kwargs["rollout_closer"] = closer
         return (
             ArcAgiBenchmarkDriver(
-                ArcAgiConfig(seed=17, problem_pool_size=cap, render_scale=2),
+                ArcAgiConfig(
+                    state_path=root / "arc-benchmark-state.json",
+                    seed=17,
+                    problem_pool_size=cap,
+                    render_scale=2,
+                ),
                 records_loader=lambda: _records(),
                 server_launcher=owned_launcher,
                 client_factory=_ScorecardClient,
@@ -130,7 +142,7 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
     def test_protocol_deterministic_pool_server_ownership_and_duplicates(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            first, launcher = self._driver()
+            first, launcher = self._driver(root)
             self.assertIsInstance(first, BenchmarkDriver)
             batch = first.prepare_batch(4, root / "shared-a")
             self.assertEqual(batch.item_count, 3)
@@ -139,18 +151,18 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "active batch"):
                 first.prepare_batch(5, root / "shared-b")
 
-            second, _ = self._driver()
+            second, _ = self._driver(root)
             second_batch = second.prepare_batch(4, root / "shared-c")
             repeated = json.loads((root / "shared-c/problem_pool.json").read_text())
             self.assertEqual([row["uuid"] for row in sampled], [row["uuid"] for row in repeated])
             self.assertEqual(second_batch.item_count, 3)
 
-            uncapped, _ = self._driver(cap=None)
+            uncapped, _ = self._driver(root / "uncapped", cap=None)
             self.assertEqual(uncapped.prepare_batch(4, root / "shared-d").item_count, 6)
 
             duplicate_launcher = _Launcher()
             duplicate = ArcAgiBenchmarkDriver(
-                ArcAgiConfig(),
+                ArcAgiConfig(state_path=root / "duplicate-state.json"),
                 records_loader=lambda: [*_records(2), {**_records(1)[0], "game_id": "other"}],
                 server_launcher=duplicate_launcher,
             )
@@ -158,7 +170,7 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
                 duplicate.prepare_batch(0, root / "bad")
             self.assertEqual(duplicate_launcher.calls, 0)
             duplicate_game = ArcAgiBenchmarkDriver(
-                ArcAgiConfig(),
+                ArcAgiConfig(state_path=root / "duplicate-game-state.json"),
                 records_loader=lambda: [*_records(2), {**_records(1)[0], "uuid": "other"}],
                 server_launcher=duplicate_launcher,
             )
@@ -169,9 +181,52 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
             second.close()
             uncapped.close()
 
+    def test_main_loop_selects_arc_driver_without_supergpqa_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            args = Namespace(
+                benchmark="arc-agi",
+                seed=23,
+                problem_pool_size=4,
+            )
+            queue = root / "must-not-exist/problem_queue.json"
+            task_store = root / "must-not-exist/task_store"
+            dataset_cache = root / "must-not-exist/dataset_cache"
+            driver = _create_benchmark_driver(
+                args,
+                arc_benchmark_state_path=root / "arc/state.json",
+                problem_queue_path=queue,
+                task_store_dir=task_store,
+                dataset_cache_dir=dataset_cache,
+                existing_records=[],
+            )
+            self.assertIsInstance(driver, ArcAgiBenchmarkDriver)
+            self.assertEqual(driver.config.seed, 23)
+            self.assertEqual(driver.config.problem_pool_size, 4)
+            self.assertFalse(queue.parent.exists())
+            self.assertFalse(task_store.exists())
+            self.assertFalse(dataset_cache.exists())
+            driver.close()
+
+            with self.assertRaisesRegex(SystemExit, "requires --worker-backend codex"):
+                _validate_benchmark_backend("arc-agi", "openrouter")
+            _validate_benchmark_backend("arc-agi", "codex")
+
+            environment = {
+                key: value
+                for key, value in os.environ.items()
+                if key not in {"XDG_CACHE_HOME", "TMPDIR", "HF_HOME", "HF_DATASETS_CACHE"}
+            }
+            with patch.dict(os.environ, environment, clear=True):
+                _configure_runtime_environment(root / "runtime", include_huggingface=False)
+                self.assertNotIn("HF_HOME", os.environ)
+                self.assertNotIn("HF_DATASETS_CACHE", os.environ)
+                self.assertFalse((root / "runtime/cache/huggingface").exists())
+                self.assertFalse((root / "runtime/cache/huggingface_datasets").exists())
+
     def test_launch_install_failure_terminates_server(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
-            driver, launcher = self._driver()
+            driver, launcher = self._driver(Path(temp))
             with patch("utils.arc_agi_benchmark.os.replace", side_effect=OSError("fixture")):
                 with self.assertRaises(OSError):
                     driver.prepare_batch(0, Path(temp) / "shared")
@@ -182,7 +237,7 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
     def test_private_rollout_context_exact_mcp_config_and_isolation(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            driver, _ = self._driver()
+            driver, _ = self._driver(root)
             batch = driver.prepare_batch(2, root / "shared")
             context_a = _supervisor_context(root, "rollout-a")
             context_b = _supervisor_context(root, "rollout-b")
@@ -251,7 +306,7 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
     def test_reset_selection_event_is_idempotent_and_drives_spawn_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            driver, _ = self._driver()
+            driver, _ = self._driver(root)
             batch = driver.prepare_batch(7, root / "shared")
             contexts = [
                 _supervisor_context(root, "selection-a"),
@@ -379,7 +434,7 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
     def test_partial_rollout_failure_removes_private_files(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            driver, _ = self._driver()
+            driver, _ = self._driver(root)
             batch = driver.prepare_batch(0, root / "shared")
             context = _supervisor_context(root, "partial")
             control = Path(context["continuation_context_path"]).parent
@@ -396,6 +451,125 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
             self.assertFalse(rollout_root.exists())
             driver.close()
 
+    def test_win_retirement_is_deduplicated_and_applies_next_iteration(self) -> None:
+        snapshots: dict[str, ArcAgiSessionSnapshot] = {}
+
+        def read_snapshot(path: str | Path) -> ArcAgiSessionSnapshot:
+            return snapshots[str(path)]
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            driver, launcher = self._driver(root, cap=None, snapshot=read_snapshot)
+            batch = driver.prepare_batch(5, root / "shared-current")
+            current_pool_path = root / "shared-current/problem_pool.json"
+            current_pool_bytes = current_pool_path.read_bytes()
+            current_pool = json.loads(current_pool_bytes)
+            won_game = current_pool[0]["game_id"]
+            won_uuid = current_pool[0]["uuid"]
+            partial_game = current_pool[1]["game_id"]
+            partial_uuid = current_pool[1]["uuid"]
+
+            outcomes = []
+            for instance, game_id, official_state in (
+                ("winner-a", won_game, "WIN"),
+                ("winner-b", won_game, "WIN"),
+                ("partial", partial_game, "NOT_FINISHED"),
+            ):
+                rollout = driver.prepare_rollout(
+                    batch,
+                    backend="codex",
+                    context=_supervisor_context(root, instance),
+                )
+                state_path = Path(rollout.context["arc_state_path"])
+                state_path.write_text("{}", encoding="utf-8")
+                state_path.chmod(0o600)
+                snapshots[str(state_path)] = ArcAgiSessionSnapshot(
+                    game_id=game_id,
+                    state=official_state,
+                    levels_completed=4 if official_state == "WIN" else 1,
+                    win_levels=4,
+                    available_actions=(),
+                    step_index=2,
+                    operation="action1",
+                    closed=False,
+                    base_url="http://127.0.0.1:43210",
+                    card_id="private-card",
+                    guid="private-guid",
+                )
+                outcomes.append(
+                    driver.collect_outcome(
+                        batch, instance_uuid=instance, context=rollout.context
+                    )
+                )
+
+            self.assertTrue(outcomes[0].solved)
+            self.assertEqual(outcomes[0].reward, 1)
+            self.assertTrue(outcomes[1].solved)
+            self.assertFalse(outcomes[2].solved)
+            summary = driver.finalize_batch(batch, outcomes)
+            self.assertEqual(summary["newly_solved_item_ids"], [won_uuid])
+            self.assertEqual(summary["already_solved_item_ids"], [])
+            self.assertEqual(summary["total_solved_item_ids"], [won_uuid])
+            self.assertEqual(summary["solved_count"], 1)
+            self.assertEqual(current_pool_path.read_bytes(), current_pool_bytes)
+            self.assertIs(driver.finalize_batch(batch, outcomes), summary)
+            self.assertEqual(launcher.servers[0].terminate_calls, 1)
+
+            state_path = root / "arc-benchmark-state.json"
+            persisted = json.loads(state_path.read_text())
+            self.assertEqual(persisted["schema"], "metalanguage.arc_benchmark_state")
+            self.assertEqual(persisted["version"], 1)
+            self.assertEqual(persisted["solved_items"], [
+                {"game_id": won_game, "item_id": won_uuid}
+            ])
+            self.assertEqual(state_path.parent.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(state_path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(
+                state_path.with_name("arc-benchmark-state.json.lock").stat().st_mode
+                & 0o777,
+                0o600,
+            )
+
+            driver.close()
+            resumed, resumed_launcher = self._driver(
+                root, cap=None, snapshot=read_snapshot
+            )
+            next_batch = resumed.prepare_batch(6, root / "shared-next")
+            next_pool = json.loads((root / "shared-next/problem_pool.json").read_text())
+            next_uuids = {row["uuid"] for row in next_pool}
+            self.assertNotIn(won_uuid, next_uuids)
+            self.assertIn(partial_uuid, next_uuids)
+            child_a = resumed.prepare_rollout(
+                next_batch,
+                backend="codex",
+                context=_supervisor_context(root, "next-child-a"),
+            )
+            child_b = resumed.prepare_rollout(
+                next_batch,
+                backend="codex",
+                context=_supervisor_context(root, "next-child-b"),
+            )
+            allowed_a = load_context(
+                Path(child_a.mcp_servers["arc_agi"]["env"]["METALANGUAGE_ARC_CONTEXT"])
+            ).allowed_game_ids
+            allowed_b = load_context(
+                Path(child_b.mcp_servers["arc_agi"]["env"]["METALANGUAGE_ARC_CONTEXT"])
+            ).allowed_game_ids
+            self.assertEqual(allowed_a, allowed_b)
+            self.assertNotIn(won_game, allowed_a)
+            self.assertFalse(Path(child_a.context["arc_state_path"]).exists())
+            self.assertFalse(Path(child_b.context["arc_state_path"]).exists())
+            resumed.finalize_batch(next_batch, [])
+            resumed.close()
+            self.assertEqual(launcher.calls, 1)
+            self.assertEqual(resumed_launcher.calls, 1)
+            self.assertEqual(resumed_launcher.servers[0].terminate_calls, 1)
+            incompatible, incompatible_launcher = self._driver(root, cap=3)
+            with self.assertRaisesRegex(RuntimeError, "state is incompatible"):
+                incompatible.prepare_batch(7, root / "shared-incompatible")
+            self.assertEqual(incompatible_launcher.calls, 0)
+            incompatible.close()
+
     def test_outcomes_finalization_neutrality_and_cleanup(self) -> None:
         snapshots: dict[str, ArcAgiSessionSnapshot] = {}
         closed: list[str] = []
@@ -411,7 +585,9 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            driver, launcher = self._driver(snapshot=read_snapshot, closer=close_rollout)
+            driver, launcher = self._driver(
+                root, snapshot=read_snapshot, closer=close_rollout
+            )
             batch = driver.prepare_batch(3, root / "shared")
             pool_hash = hashlib.sha256((root / "shared/problem_pool.json").read_bytes()).hexdigest()
             context_a = _supervisor_context(root, "a")
@@ -435,7 +611,7 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
                 path.chmod(0o600)
                 snapshots[str(path)] = ArcAgiSessionSnapshot(
                     game_id=selected_game,
-                    state="NOT_FINISHED",
+                    state="GAME_OVER" if rollout is rollout_a else "NOT_FINISHED",
                     levels_completed=2,
                     win_levels=4,
                     available_actions=(1, 6, 7),
@@ -465,7 +641,7 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
             self.assertNotIn("private-card", safe)
             self.assertNotIn("private-guid", safe)
             self.assertNotIn("must-not-leak", safe)
-            self.assertTrue(outcome_a.metadata["fitness_pending"])
+            self.assertFalse(outcome_a.metadata["fitness_pending"])
 
             path_b = Path(rollout_b.context["arc_state_path"])
             snapshots[str(path_b)] = ArcAgiSessionSnapshot(
@@ -482,12 +658,12 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
             self.assertEqual(closed_outcome.metadata["state"], "WIN")
             self.assertFalse(closed_outcome.metadata["scorecard_available"])
 
-            summary = driver.finalize_batch(batch, [outcome_a, outcome_b])
+            summary = driver.finalize_batch(batch, [outcome_a, closed_outcome])
             self.assertEqual(summary["attempted_count"], 2)
             self.assertEqual(summary["selected_item_count"], 1)
-            self.assertEqual(summary["solved_count"], 0)
-            self.assertEqual(summary["reward_total"], 0)
-            self.assertEqual(summary["total_actions"], 6)
+            self.assertEqual(summary["solved_count"], 1)
+            self.assertEqual(summary["reward_total"], 1)
+            self.assertEqual(summary["total_actions"], 3)
             self.assertEqual(
                 hashlib.sha256((root / "shared/problem_pool.json").read_bytes()).hexdigest(),
                 pool_hash,
@@ -516,7 +692,11 @@ class ArcAgiBenchmarkLiveTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             driver = ArcAgiBenchmarkDriver(
-                ArcAgiConfig(problem_pool_size=1, render_scale=2),
+                ArcAgiConfig(
+                    state_path=root / "arc-benchmark-state.json",
+                    problem_pool_size=1,
+                    render_scale=2,
+                ),
                 records_loader=lambda: [record],
             )
             server = None
