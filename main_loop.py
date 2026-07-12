@@ -2160,6 +2160,33 @@ def finalize_archive_worktree(
     return result
 
 
+def discard_archive_worktree(
+    *,
+    archive_repo_dir: Path,
+    worktree_root: Path,
+    branch: str,
+    git_lock: threading.Lock,
+) -> None:
+    """Remove an unfinalized rollout worktree and branch after setup failure."""
+
+    worktree_path = (worktree_root / _sanitize_for_path(branch)).resolve()
+    try:
+        with git_lock:
+            _run_git(
+                ["worktree", "remove", "--force", str(worktree_path)],
+                archive_repo_dir,
+                check=False,
+            )
+            _run_git(["worktree", "prune"], archive_repo_dir, check=False)
+            _run_git(["branch", "-D", branch], archive_repo_dir, check=False)
+    finally:
+        shutil.rmtree(worktree_path, ignore_errors=True)
+        try:
+            worktree_root.rmdir()
+        except OSError:
+            pass
+
+
 def ensure_local_world_repo(repo_path: Path) -> None:
     """Ensure a local persistent git repo exists with an initial commit."""
     repo_path.mkdir(parents=True, exist_ok=True)
@@ -3270,6 +3297,15 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                         try:
                             results.append(future.result())
                         except BaseException as exc:
+                            discard_archive_worktree(
+                                archive_repo_dir=archive_repo_dir,
+                                worktree_root=archive_worktree_root,
+                                branch=(
+                                    f"rollout/{task_index:06d}-{rollout_index:03d}-"
+                                    f"{_sanitize_for_path(task_id)}"
+                                ),
+                                git_lock=archive_git_lock,
+                            )
                             append_progress_log(
                                 progress_log_path,
                                 progress_log_lock,
