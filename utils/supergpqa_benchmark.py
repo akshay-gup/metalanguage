@@ -317,16 +317,31 @@ class SuperGpqaBenchmarkDriver:
         )
         if historical_ref is not None:
             benchmark_context["active_benchmark_item"] = historical_ref.to_metadata()
+        submit_tool = (
+            "mcp__supergpqa__submit_solution"
+            if backend == "codex"
+            else "submit_solution"
+        )
+        instructions = (
+            "SuperGPQA benchmark: choose a problem by exact uuid from the shared pool "
+            f"and submit with {submit_tool}(uuid=..., answer=...). A correct first "
+            "submission may add solve-credit budget, but preserve enough capacity and "
+            "call spawn_child before extended additional work."
+        )
         if backend != "codex":
             return RolloutBenchmark(
                 benchmark_context,
-                {"submit_tool": "submit_solution", "tools": [submit_solution_tool]},
+                {
+                    "instructions": instructions,
+                    "submit_tool": submit_tool,
+                    "tools": [submit_solution_tool],
+                },
             )
         context_path = Path(str(context["continuation_context_path"]))
         mcp = supergpqa_mcp_servers(context_path)
         return RolloutBenchmark(
             benchmark_context,
-            {"submit_tool": "mcp__supergpqa__submit_solution"},
+            {"instructions": instructions, "submit_tool": submit_tool},
             mcp,
             (("supergpqa", "submit_solution"),),
             (("supergpqa", "submit_solution"),),

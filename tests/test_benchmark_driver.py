@@ -80,6 +80,11 @@ class BenchmarkDriverTests(unittest.TestCase):
             self.assertIsInstance(codex, RolloutBenchmark)
             self.assertEqual(set(codex.mcp_servers), {"supergpqa"})
             self.assertEqual(codex.mcp_budget_reconcile_tools, (("supergpqa", "submit_solution"),))
+            self.assertIn(
+                "mcp__supergpqa__submit_solution",
+                codex.model_metadata["instructions"],
+            )
+            self.assertIn("spawn_child", codex.model_metadata["instructions"])
             self.assertNotIn("answer", json.dumps(codex.context["problem_pool_records"]))
             self.assertIn("mcp__supergpqa__submit_solution", (root / "shared" / "problem_pool.md").read_text())
             open_root = root / "openrouter"
@@ -87,8 +92,26 @@ class BenchmarkDriverTests(unittest.TestCase):
             open_batch = open_driver.prepare_batch(4, open_root / "shared")
             openrouter = open_driver.prepare_rollout(open_batch, backend="openrouter", context=base)
             self.assertFalse(openrouter.mcp_servers)
+            self.assertIn(
+                "submit_solution(uuid=", openrouter.model_metadata["instructions"]
+            )
             self.assertIn("submit_solution(uuid=", (open_root / "shared" / "problem_pool.md").read_text())
             self.assertNotIn("mcp__", (open_root / "shared" / "problem_pool.md").read_text())
+            stable_readme = (
+                Path(__file__).resolve().parents[1] / "seeds/bootstrap/README.md"
+            ).read_text()
+            self.assertNotIn("SuperGPQA", stable_readme)
+            self.assertNotIn("submit_solution", stable_readme)
+            self.assertIn("Benchmark-specific tools", stable_readme)
+            self.assertIn("spawn_child", stable_readme)
+            runtime_text = _format_runtime_markdown(
+                instance_uuid="fixture",
+                rollout_token_budget_tokens=100,
+                configured_problem_pool_size=None,
+            )
+            self.assertNotIn("credited", runtime_text)
+            self.assertNotIn("solved uuids", runtime_text)
+            self.assertIn("benchmark-specific", runtime_text)
 
     def test_outcomes_duplicate_credit_finalization_and_idempotent_close(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

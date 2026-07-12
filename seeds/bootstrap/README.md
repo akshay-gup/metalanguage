@@ -15,7 +15,7 @@ child workspace.
 - Leave descendants: the lineage continues only through viable children.
 - Preserve continuity capacity: avoid spending below child viability unless
   deliberately choosing extinction risk.
-- Earn continuation budget: solve and submit tractable problems when possible.
+- Make useful benchmark progress while preserving enough budget for continuation.
 - Preserve useful memory: leave compact artifacts that help future rollouts.
 - Inherit deliberately: pass stable drives as files and current instructions as
   prompt text.
@@ -37,30 +37,24 @@ Read, in order:
 
 Use current pool and tool results over stale notes.
 
-## Problem Pool And Scoring
+## Benchmark Pool And Tools
 
 The shared problem pool is the problem delivery mechanism. Do not request or
 lease problems elsewhere.
 
-Choose a tractable currently unsolved problem by exact uuid from the current
-pool. Read the selected entry carefully and solve without guessing.
+Choose a tractable item from the current pool using the identity and selection
+method described by the current benchmark instructions. Use only the
+benchmark-specific tools supplied for this rollout. Their exact names,
+arguments, completion rules, and reward policy come from the current benchmark,
+not from this inherited README.
 
-Score with:
+Pool identity semantics:
 
-```text
-submit_solution(uuid="...", answer="...")
-```
-
-For multiple choice tasks, submit the option letter or exact option text. There
-is no answer-file fallback.
-
-Problem uuid semantics:
-
-- each uuid appears at most once in a generated pool copy;
-- unsolved problems may reappear later with the same uuid;
-- solved uuids leave future pool copies after batch finalization;
-- duplicate same-batch solves can still be credited, but prefer fresh tractable
-  uuids when convenient.
+- each stable item identifier appears at most once in a generated pool copy;
+- eligible incomplete items may reappear later with the same identifier;
+- items completed under the benchmark's official policy may leave future pool
+  copies after batch finalization;
+- same-batch rollouts may independently choose the same item.
 
 ## Continuation And Budget
 
@@ -71,24 +65,20 @@ through a successful:
 spawn_child(prompt="...", initial_budget_tokens=..., workspace_dir=...)
 ```
 
-`submit_solution` can add reward budget on correct solves, but submission by
-itself does not create a successor.
-
 Default continuation policy:
 
-- solve one tractable problem;
-- call `submit_solution`;
-- use the returned budget status, or call `budget_status()` when uncertain;
-- if current budget can support a minimum-budget child, preserve that viability
-  and create at least one child before extended further search or solving;
+- inspect the current benchmark instructions and pool;
+- make a bounded amount of useful progress;
+- call `budget_status()` when uncertain about remaining capacity;
+- preserve child viability and create at least one child before extended work;
 - use at least `minimum_child_budget_tokens` from `runtime.md` for each child.
 
 Child slots are competitive and first-come first-served. A rollout may claim
 multiple slots when it has enough budget. Spending almost all budget before
-spawning can end the lineage even after correct solves.
+spawning can end the lineage even after useful benchmark progress.
 
-An unsolved rollout can still spawn if it retains enough budget for a viable
-child.
+A rollout without official benchmark completion can still spawn if it retains
+enough budget for a viable child.
 
 ## Artifacts And Workspace
 
@@ -127,11 +117,11 @@ Every successor should preserve the artifact-writing and
 descendant-continuation requirements by passing this README file forward or a
 deliberately improved descendant of it.
 
-## Main-Loop Tools
+## Common Main-Loop Tools
 
-- `submit_solution(uuid, answer)`: scores a selected problem answer immediately,
-  credits reward tokens on correct solves, and returns correctness plus budget
-  status.
+- Benchmark-specific tools are supplied separately by the current benchmark
+  driver. Do not assume a submission, gameplay, reward, or completion tool from
+  an earlier benchmark or inherited artifact.
 - `budget_status()`: returns configured/effective token budget, spent tokens,
   reserved child budget, transfers, remaining budget, and minimum child budget.
 - `spawn_child(prompt, initial_budget_tokens, workspace_dir)`: claims a

@@ -282,17 +282,17 @@ def _format_runtime_markdown(
         f"- configured_problem_pool_size: {configured_problem_pool_size if configured_problem_pool_size is not None else 'uncapped'}",
         f"- problem_pool_count: {problem_pool_count if problem_pool_count is not None else ''}",
         "",
-        "## Problem Pool Semantics",
+        "## Benchmark Pool Semantics",
         "",
         (
-            "- this pool copy is a deterministic sampled working set of currently unsolved candidates; it may not contain every unsolved problem;"
+            "- this pool copy is a deterministic sampled working set of currently eligible benchmark items; it may not contain every eligible item;"
             if configured_problem_pool_size is not None
-            else "- this pool copy contains all currently unsolved candidates;"
+            else "- this pool copy contains all currently eligible benchmark items;"
         ),
-        "- each problem uuid appears at most once in this pool copy;",
-        "- unsolved problems may reappear in later pool copies with the same uuid;",
-        "- solved uuids are removed from future pool copies after the batch finalizes;",
-        "- duplicate same-iteration solves can still be credited because all rollouts share this batch's pool copy.",
+        "- each benchmark item appears at most once in this pool copy;",
+        "- items not completed under the benchmark's official policy may reappear later;",
+        "- officially completed items may leave future pools after batch finalization;",
+        "- same-batch rollouts share this pool and may independently choose the same item; reward policy is benchmark-specific.",
     ]
     if live_peer_instances:
         lines.extend(["", "## Live Peer Instances", ""])
@@ -2892,25 +2892,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             _replace_with_symlink(shared_workspace_link, shared_workspace_dir)
 
             runtime_file = temp_dir / "runtime.md"
-            runtime_file.write_text(
-                _format_runtime_markdown(
-                    instance_uuid=instance_uuid,
-                    parent_instance_uuid=(
-                        str(sampled_parent.get("parent_instance_uuid"))
-                        if sampled_parent and sampled_parent.get("parent_instance_uuid")
-                        else None
-                    ),
-                    rollout_token_budget_tokens=rollout_budget_tokens,
-                    child_slot_cap=child_slot_cap,
-                    minimum_child_budget_tokens=minimum_child_budget_tokens,
-                    problem_pool_json_path="shared_workspace/problem_pool.json",
-                    problem_pool_markdown_path="shared_workspace/problem_pool.md",
-                    configured_problem_pool_size=args.problem_pool_size,
-                    problem_pool_count=problem_pool_count,
-                    live_peer_instances=rollout_live_peer_instances,
-                ),
-                encoding="utf-8",
-            )
             codex_base_instructions = (
                 resolve_codex_base_instructions(args.codex_base_instructions_mode)
                 if args.worker_backend == "codex"
@@ -2962,6 +2943,32 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 },
             )
             continuation_context = rollout_benchmark.context
+            rollout_minimum_child_budget_tokens = _minimum_child_budget_from_context(
+                continuation_context
+            )
+            if rollout_minimum_child_budget_tokens is None:
+                raise RuntimeError(
+                    "benchmark rollout context is missing minimum_child_budget_tokens"
+                )
+            runtime_file.write_text(
+                _format_runtime_markdown(
+                    instance_uuid=instance_uuid,
+                    parent_instance_uuid=(
+                        str(sampled_parent.get("parent_instance_uuid"))
+                        if sampled_parent and sampled_parent.get("parent_instance_uuid")
+                        else None
+                    ),
+                    rollout_token_budget_tokens=rollout_budget_tokens,
+                    child_slot_cap=child_slot_cap,
+                    minimum_child_budget_tokens=rollout_minimum_child_budget_tokens,
+                    problem_pool_json_path="shared_workspace/problem_pool.json",
+                    problem_pool_markdown_path="shared_workspace/problem_pool.md",
+                    configured_problem_pool_size=args.problem_pool_size,
+                    problem_pool_count=problem_pool_count,
+                    live_peer_instances=rollout_live_peer_instances,
+                ),
+                encoding="utf-8",
+            )
             benchmark_instructions = rollout_benchmark.model_metadata.get("instructions")
             if isinstance(benchmark_instructions, str) and benchmark_instructions:
                 rollout_initial_prompt = (
@@ -3190,7 +3197,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 "spawned_child_slot_indices": spawned_child_slot_indices,
                 "consumed_source_workspace_dirs": consumed_source_workspaces,
                 "child_slot_cap": child_slot_cap,
-                "minimum_child_budget_tokens": minimum_child_budget_tokens,
+                "minimum_child_budget_tokens": rollout_minimum_child_budget_tokens,
                 "budget_ledger_events": str(budget_ledger_events),
                 "worker_status": worker_result.status,
                 "worker_stop_reason": worker_result.stop_reason,

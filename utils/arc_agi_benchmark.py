@@ -253,6 +253,11 @@ class ArcAgiBenchmarkDriver:
             raise ValueError("rollout context must contain instance_uuid")
         if instance_uuid in state.rollouts:
             raise RuntimeError("ARC rollout is already prepared for this instance")
+        rollout_budget = context.get("rollout_token_budget_tokens")
+        if isinstance(rollout_budget, bool) or not isinstance(rollout_budget, int):
+            raise ValueError("rollout context must contain an integer rollout token budget")
+        if rollout_budget <= 1:
+            raise ValueError("ARC rollout token budget must be greater than one")
 
         continuation_path = _absolute_path(
             context.get("continuation_context_path"), "continuation_context_path"
@@ -332,15 +337,21 @@ class ArcAgiBenchmarkDriver:
 
         namespaced_tools = [f"mcp__arc_agi__{name}" for name in ARC_TOOL_NAMES]
         instructions = (
-            "This ARC benchmark overrides any SuperGPQA-specific scoring passages in "
-            "the inherited README: there is no submit_solution requirement or solve-credit "
-            "tool. Choose an official game_id from the shared ARC pool and call "
+            "ARC benchmark: there is no submission or solve-credit tool. Choose an "
+            "official game_id from the shared ARC pool and call "
             "mcp__arc_agi__RESET(game_id=...). Then issue only official ACTION commands "
             "whose integer IDs appear in the latest available_actions; ACTION6 requires "
-            "integer x and y coordinates. Use the returned ordered frames and state."
+            "integer x and y coordinates. Use the returned ordered frames and state. "
+            "ARC gameplay adds no budget credit: do not wait for WIN before preserving "
+            "lineage. After useful observation or progress, retain at least the minimum "
+            "child budget and call spawn_child early if continuation is intended."
         )
         benchmark_context = {
             **context,
+            # ARC currently has no solve-credit policy. Reserving half of the
+            # current budget keeps model-initiated lineage possible after useful
+            # gameplay without auto-spawning or changing the generic CLI default.
+            "minimum_child_budget_tokens": max(1, rollout_budget // 2),
             "arc_mcp_context_path": str(context_path),
             "arc_state_path": str(state_path),
         }
