@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import sys
 import tempfile
 from collections import Counter
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Iterator
 
 from utils.arc_agi_client import ArcAgiClient
 from utils.arc_agi_frames import MAX_SCALE
@@ -37,10 +39,14 @@ from utils.problem_pool_sampling import deterministic_problem_pool_sample
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ARC_TOOL_NAMES = ("RESET", *(f"ACTION{index}" for index in range(1, 8)))
+STATE_SCHEMA = "metalanguage.arc_benchmark_state"
+STATE_VERSION = 1
+_STATE_FIELDS = {"schema", "version", "config", "solved_items"}
 
 
 @dataclass(frozen=True)
 class ArcAgiConfig:
+    state_path: Path
     seed: int = 42
     problem_pool_size: int | None = None
     render_scale: int = 4
@@ -72,6 +78,8 @@ class ArcAgiConfig:
             raise ValueError("MCP timeouts must be positive")
         if not self.python_executable:
             raise ValueError("python_executable must be non-empty")
+        if not self.state_path.is_absolute():
+            raise ValueError("state_path must be absolute")
 
 
 @dataclass(frozen=True)
@@ -100,6 +108,7 @@ class _ArcBatch:
     by_uuid: dict[str, _ArcPoolItem] = field(repr=False)
     by_game_id: dict[str, _ArcPoolItem] = field(repr=False)
     rollouts: dict[str, _ArcRollout] = field(default_factory=dict, repr=False)
+    finalization_summary: dict[str, Any] | None = field(default=None, repr=False)
     closed: bool = False
 
 
@@ -128,6 +137,9 @@ class ArcAgiBenchmarkDriver:
         self._closed = False
         self.cleanup_summary: dict[str, Any] | None = None
         self.finalization_summary: dict[str, Any] | None = None
+        self._cleanup_initialized = 0
+        self._cleanup_closed = 0
+        self._cleanup_errors: list[str] = []
 
     def prepare_batch(self, iteration_index: int, shared_workspace: Path) -> PreparedBatch:
         if self._closed:
@@ -138,15 +150,37 @@ class ArcAgiBenchmarkDriver:
             raise ValueError("iteration_index must be a non-negative integer")
 
         records = self._validated_records(self._records_loader())
+        with self._state_lock():
+            solved_state = self._load_state_locked()
+        solved_ids = {item["item_id"] for item in solved_state["solved_items"]}
+        solved_games = {item["game_id"] for item in solved_state["solved_items"]}
+        records_by_uuid = {str(record["uuid"]): record for record in records}
+        records_by_game = {str(record["game_id"]): record for record in records}
+        for solved in solved_state["solved_items"]:
+            by_uuid = records_by_uuid.get(solved["item_id"])
+            by_game = records_by_game.get(solved["game_id"])
+            if (
+                by_uuid is not None
+                and by_uuid["game_id"] != solved["game_id"]
+                or by_game is not None
+                and by_game["uuid"] != solved["item_id"]
+            ):
+                raise RuntimeError("ARC benchmark state does not match the environment catalog")
+        eligible_records = [
+            record
+            for record in records
+            if record["uuid"] not in solved_ids
+            and record["game_id"] not in solved_games
+        ]
         sampled_records = deterministic_problem_pool_sample(
-            records,
+            eligible_records,
             problem_pool_size=self.config.problem_pool_size,
             seed=self.config.seed,
             iteration_index=iteration_index,
             record_id=lambda record: str(record["uuid"]),
         )
         if not sampled_records:
-            raise RuntimeError("No ARC environments are available")
+            raise RuntimeError("No unsolved ARC environments remain")
         items = tuple(
             _ArcPoolItem(index, str(record["uuid"]), str(record["game_id"]), record)
             for index, record in enumerate(sampled_records)
@@ -298,7 +332,9 @@ class ArcAgiBenchmarkDriver:
 
         namespaced_tools = [f"mcp__arc_agi__{name}" for name in ARC_TOOL_NAMES]
         instructions = (
-            "Choose an official game_id from the shared ARC pool and call "
+            "This ARC benchmark overrides any SuperGPQA-specific scoring passages in "
+            "the inherited README: there is no submit_solution requirement or solve-credit "
+            "tool. Choose an official game_id from the shared ARC pool and call "
             "mcp__arc_agi__RESET(game_id=...). Then issue only official ACTION commands "
             "whose integer IDs appear in the latest available_actions; ACTION6 requires "
             "integer x and y coordinates. Use the returned ordered frames and state."
@@ -391,7 +427,8 @@ class ArcAgiBenchmarkDriver:
             iteration_index=state.iteration_index,
         )
         safe = {
-            "fitness_pending": True,
+            "fitness_pending": False,
+            "completion_policy": "official_state_win",
             "attempted": True,
             "game_id": item.game_id,
             "state": snapshot.state,
@@ -404,11 +441,12 @@ class ArcAgiBenchmarkDriver:
             "scorecard_available": scorecard_available,
             **metrics,
         }
+        solved = snapshot.state == "WIN"
         return BenchmarkOutcome(
             instance_uuid=instance_uuid,
             attempted=True,
-            solved=False,
-            reward=0.0,
+            solved=solved,
+            reward=1.0 if solved else 0.0,
             item_id=item.uuid,
             metadata=safe,
             item_ref=item_ref,
@@ -428,8 +466,36 @@ class ArcAgiBenchmarkDriver:
         batch: PreparedBatch,
         outcomes: list[BenchmarkOutcome],
     ) -> dict[str, Any]:
+        if (
+            isinstance(batch.private, _ArcBatch)
+            and batch.private.finalization_summary is not None
+        ):
+            return batch.private.finalization_summary
         state = self._require_batch(batch)
         selected = sorted({outcome.item_id for outcome in outcomes if outcome.item_id})
+        won_ids = {
+            outcome.item_id
+            for outcome in outcomes
+            if outcome.solved
+            and outcome.item_id in state.by_uuid
+            and outcome.metadata.get("state") == "WIN"
+        }
+        with self._state_lock():
+            persisted = self._load_state_locked()
+            existing_ids = {
+                item["item_id"] for item in persisted["solved_items"]
+            }
+            newly_solved = sorted(won_ids - existing_ids)
+            already_solved = sorted(won_ids & existing_ids)
+            known = {
+                item["item_id"]: item for item in persisted["solved_items"]
+            }
+            for item_id in newly_solved:
+                item = state.by_uuid[item_id]
+                known[item_id] = {"item_id": item.uuid, "game_id": item.game_id}
+            persisted["solved_items"] = [known[key] for key in sorted(known)]
+            self._write_state_locked(persisted)
+            total_solved = sorted(known)
         state_counts = Counter(
             str(outcome.metadata.get("state"))
             for outcome in outcomes
@@ -450,13 +516,20 @@ class ArcAgiBenchmarkDriver:
                 _safe_int(outcome.metadata.get("scorecard_total_actions")) for outcome in outcomes
             ),
             "state_counts": dict(sorted(state_counts.items())),
-            "solved_count": 0,
-            "reward_total": 0.0,
-            "fitness_pending": True,
+            "newly_solved_item_ids": newly_solved,
+            "already_solved_item_ids": already_solved,
+            "total_solved_item_ids": total_solved,
+            "solved_count": len(won_ids),
+            "reward_total": float(sum(outcome.reward for outcome in outcomes)),
+            "fitness_pending": False,
+            "completion_policy": "official_state_win",
         }
         self.finalization_summary = summary
         if self.config.audit_path is not None:
             _atomic_json(Path(self.config.audit_path).resolve(), summary, mode=0o600)
+        state.finalization_summary = summary
+        self._cleanup_batch(state)
+        self._batch = None
         return summary
 
     def close(self) -> None:
@@ -464,31 +537,97 @@ class ArcAgiBenchmarkDriver:
             return
         self._closed = True
         batch = self._batch
-        errors: list[str] = []
-        initialized = 0
-        closed = 0
         if batch is not None:
-            for rollout in batch.rollouts.values():
-                if not rollout.state_path.exists():
-                    continue
-                initialized += 1
-                try:
-                    self._rollout_closer(rollout.state_path)
-                    closed += 1
-                except Exception:
-                    errors.append("scorecard_close_failed")
+            self._cleanup_batch(batch)
+            self._batch = None
+        self._update_cleanup_summary()
+
+    def _cleanup_batch(self, batch: _ArcBatch) -> None:
+        if batch.closed:
+            return
+        for rollout in batch.rollouts.values():
+            if not rollout.state_path.exists():
+                continue
+            self._cleanup_initialized += 1
             try:
-                batch.server.terminate()
+                self._rollout_closer(rollout.state_path)
+                self._cleanup_closed += 1
             except Exception:
-                errors.append("server_terminate_failed")
-            batch.closed = True
+                self._cleanup_errors.append("scorecard_close_failed")
+        try:
+            batch.server.terminate()
+        except Exception:
+            self._cleanup_errors.append("server_terminate_failed")
+        batch.closed = True
+        self._update_cleanup_summary()
+
+    def _update_cleanup_summary(self) -> None:
         self.cleanup_summary = {
-            "initialized_rollout_count": initialized,
-            "closed_rollout_count": closed,
-            "cleanup_error_count": len(errors),
-            "cleanup_errors": errors,
-            "server_terminated": batch is not None and "server_terminate_failed" not in errors,
+            "initialized_rollout_count": self._cleanup_initialized,
+            "closed_rollout_count": self._cleanup_closed,
+            "cleanup_error_count": len(self._cleanup_errors),
+            "cleanup_errors": list(self._cleanup_errors),
+            "server_terminated": "server_terminate_failed" not in self._cleanup_errors,
         }
+
+    @property
+    def _state_config(self) -> dict[str, Any]:
+        return {
+            "benchmark": self.name,
+            "task_source": "arc_agi_3",
+            "seed": self.config.seed,
+            "problem_pool_size": self.config.problem_pool_size,
+        }
+
+    def _load_state_locked(self) -> dict[str, Any]:
+        path = self.config.state_path
+        try:
+            if path.stat().st_size > 1024 * 1024:
+                raise RuntimeError("ARC benchmark state is too large")
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            value = {
+                "schema": STATE_SCHEMA,
+                "version": STATE_VERSION,
+                "config": self._state_config,
+                "solved_items": [],
+            }
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            raise RuntimeError("ARC benchmark state is unreadable") from None
+        if (
+            not isinstance(value, dict)
+            or set(value) != _STATE_FIELDS
+            or value.get("schema") != STATE_SCHEMA
+            or value.get("version") != STATE_VERSION
+            or value.get("config") != self._state_config
+        ):
+            raise RuntimeError("ARC benchmark state is incompatible")
+        solved = value.get("solved_items")
+        if not isinstance(solved, list):
+            raise RuntimeError("ARC benchmark state has invalid solved items")
+        item_ids: set[str] = set()
+        game_ids: set[str] = set()
+        for item in solved:
+            if (
+                not isinstance(item, dict)
+                or set(item) != {"item_id", "game_id"}
+                or not isinstance(item.get("item_id"), str)
+                or not item["item_id"]
+                or not isinstance(item.get("game_id"), str)
+                or not item["game_id"]
+                or item["item_id"] in item_ids
+                or item["game_id"] in game_ids
+            ):
+                raise RuntimeError("ARC benchmark state has invalid solved items")
+            item_ids.add(item["item_id"])
+            game_ids.add(item["game_id"])
+        return value
+
+    def _write_state_locked(self, value: dict[str, Any]) -> None:
+        _atomic_json(self.config.state_path, value, mode=0o600)
+
+    def _state_lock(self):
+        return _locked_private_state(self.config.state_path)
 
     def _require_batch(self, batch: PreparedBatch) -> _ArcBatch:
         if self._closed:
@@ -580,6 +719,20 @@ def _private_empty_file(path: Path) -> None:
     try:
         os.fchmod(descriptor, 0o600)
     finally:
+        os.close(descriptor)
+
+
+@contextmanager
+def _locked_private_state(path: Path) -> Iterator[None]:
+    _private_directory(path.parent)
+    lock_path = path.with_name(f"{path.name}.lock")
+    descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
         os.close(descriptor)
 
 
