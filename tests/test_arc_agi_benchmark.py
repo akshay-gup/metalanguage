@@ -27,6 +27,7 @@ from utils.benchmark_driver import (
     BenchmarkOutcome,
     active_benchmark_item,
 )
+from utils.budget_ledger import append_budget_event
 
 
 def _records(count: int = 6) -> list[dict[str, object]]:
@@ -326,6 +327,24 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
                     ]
                 )
             ).allowed_game_ids[0]
+            next_steps: dict[str, int] = {}
+
+            def command_result(state_path: str | Path, operation: str) -> ArcAgiCommandResult:
+                key = str(state_path)
+                step_index = next_steps.get(key, -1) + 1
+                next_steps[key] = step_index
+                return ArcAgiCommandResult(
+                    {},
+                    {
+                        "game_id": selected_game,
+                        "state": "NOT_FINISHED",
+                        "levels_completed": 0,
+                        "win_levels": 1,
+                        "step_index": step_index,
+                        "operation": operation,
+                    },
+                    (),
+                )
 
             def initialize(
                 state_path: str | Path,
@@ -335,10 +354,17 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
                 path = Path(state_path)
                 path.write_text("{}", encoding="utf-8")
                 path.chmod(0o600)
-                return ArcAgiCommandResult({}, {}, ())
+                return command_result(state_path, "reset")
 
-            def reset(_state_path: str | Path) -> ArcAgiCommandResult:
-                return ArcAgiCommandResult({}, {}, ())
+            def reset(state_path: str | Path) -> ArcAgiCommandResult:
+                return command_result(state_path, "reset")
+
+            def step(
+                state_path: str | Path,
+                action: str,
+                **_kwargs: object,
+            ) -> ArcAgiCommandResult:
+                return command_result(state_path, action.lower())
 
             services = [
                 ArcCommandService(
@@ -351,20 +377,24 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
                     ),
                     initialize=initialize,
                     reset=reset,
+                    step=step,
                     selected_game=lambda _path: selected_game,
                 )
                 for rollout in rollouts
             ]
             with self.assertRaisesRegex(Exception, "assigned ARC pool"):
                 services[0].reset("not-allowed")
-            with patch(
-                "utils.arc_agi_mcp.append_budget_event",
-                side_effect=OSError("fixture"),
-            ):
+            def fail_selection(*args: object, **kwargs: object):
+                if kwargs.get("event_type") == "benchmark_item_selected":
+                    raise OSError("fixture")
+                return append_budget_event(*args, **kwargs)
+
+            with patch("utils.arc_agi_mcp.append_budget_event", side_effect=fail_selection):
                 with self.assertRaisesRegex(Exception, "provenance"):
                     services[0].reset(selected_game)
             services[0].reset(selected_game)
             services[0].reset(selected_game)
+            services[0].action("ACTION1")
             other_game = next(
                 game
                 for game in services[0].context.allowed_game_ids
@@ -394,6 +424,18 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
                 self.assertEqual(ref.source_id, selected_game)
                 self.assertEqual(ref.iteration_index, 7)
                 expected_refs.append(ref)
+                command_events = [
+                    event
+                    for event in events
+                    if event.get("event_type") == "benchmark_command_completed"
+                    and event.get("instance_uuid")
+                    == rollout.context["instance_uuid"]
+                ]
+                self.assertEqual(len(command_events), 4 if rollout is rollouts[0] else 1)
+                command_text = json.dumps(command_events, sort_keys=True)
+                self.assertNotIn("private", command_text)
+                self.assertNotIn("guid", command_text)
+                self.assertNotIn("card", command_text)
             self.assertEqual(expected_refs[0], expected_refs[1])
 
             spawn_context = {
@@ -605,6 +647,21 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
             selected_game = load_context(
                 Path(rollout_a.mcp_servers["arc_agi"]["env"]["METALANGUAGE_ARC_CONTEXT"])
             ).allowed_game_ids[0]
+            selected_row = next(
+                row
+                for row in json.loads((root / "shared/problem_pool.json").read_text())
+                if row["game_id"] == selected_game
+            )
+            selected_index = next(
+                index
+                for index, row in enumerate(
+                    json.loads((root / "shared/problem_pool.json").read_text())
+                )
+                if row["game_id"] == selected_game
+            )
+            selected_ref = BenchmarkItemRef(
+                selected_row["uuid"], selected_game, selected_index, 3
+            )
             for rollout in (rollout_a, rollout_b):
                 path = Path(rollout.context["arc_state_path"])
                 path.write_text("{}", encoding="utf-8")
@@ -622,6 +679,22 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
                     card_id="private-card",
                     guid="private-guid",
                 )
+                for step_index in range(1, 4):
+                    append_budget_event(
+                        Path(rollout.context["budget_ledger_events"]),
+                        event_type="benchmark_command_completed",
+                        instance_uuid=str(rollout.context["instance_uuid"]),
+                        metadata={
+                            "benchmark": "arc-agi",
+                            "benchmark_item": selected_ref.to_metadata(),
+                            "game_id": selected_game,
+                            "command": "ACTION1",
+                            "step_index": step_index,
+                            "state": "NOT_FINISHED",
+                            "levels_completed": 2,
+                            "win_levels": 4,
+                        },
+                    )
 
             outcome_a = driver.collect_outcome(
                 batch, instance_uuid="a", context=rollout_a.context
@@ -636,6 +709,8 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
             self.assertIsInstance(outcome_a.item_ref, BenchmarkItemRef)
             self.assertEqual(outcome_a.item_ref.source_id, selected_game)
             self.assertEqual(outcome_a.metadata["scorecard_total_actions"], 3)
+            self.assertEqual(outcome_a.metadata["accounted_action_count"], 3)
+            self.assertTrue(outcome_a.metadata["action_accounting_consistent"])
             self.assertEqual(outcome_a.metadata["game_total_plays"], 1)
             safe = json.dumps([outcome_a.metadata, outcome_a.run_record], sort_keys=True)
             self.assertNotIn("private-card", safe)
@@ -664,6 +739,8 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
             self.assertEqual(summary["solved_count"], 1)
             self.assertEqual(summary["reward_total"], 1)
             self.assertEqual(summary["total_actions"], 3)
+            self.assertEqual(summary["total_accounted_actions"], 6)
+            self.assertEqual(summary["action_accounting_mismatch_count"], 1)
             self.assertEqual(
                 hashlib.sha256((root / "shared/problem_pool.json").read_bytes()).hexdigest(),
                 pool_hash,

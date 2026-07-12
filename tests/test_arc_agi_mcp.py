@@ -208,7 +208,13 @@ class ArcAgiMcpTests(unittest.IsolatedAsyncioTestCase):
                     self.assertNotIn(str(state_path), json.dumps(observation))
 
                     images = [block for block in reset.content if block.type == "image"]
-                    frame_paths = sorted((root / "one/rollout/arc_observations/step_000000_reset").glob("frame_*.png"))
+                    artifact_dir = root / "one/rollout/arc_observations/step_000000_reset"
+                    frame_paths = sorted(artifact_dir.glob("frame_*.png"))
+                    manifest_text = (artifact_dir / "observation.json").read_text()
+                    manifest = json.loads(manifest_text)
+                    self.assertEqual(manifest["version"], 2)
+                    self.assertNotIn("guid", manifest)
+                    self.assertNotIn("private-guid", manifest_text)
                     self.assertEqual(
                         [hashlib.sha256(base64.b64decode(image.data)).hexdigest() for image in images],
                         [hashlib.sha256(path.read_bytes()).hexdigest() for path in frame_paths],

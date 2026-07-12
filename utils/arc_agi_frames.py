@@ -14,7 +14,7 @@ from arc_agi.rendering import COLOR_MAP, hex_to_rgb
 
 
 FORMAT_NAME = "arc-agi-observation-artifacts"
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
 FRAME_SIZE = 64
 MAX_SCALE = 16
 _OPERATION_PATTERN = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
@@ -90,10 +90,13 @@ def write_arc_observation_artifacts(
             }
         )
 
+    public_metadata = {
+        key: value for key, value in metadata.items() if key != "guid"
+    }
     manifest = {
         "format": FORMAT_NAME,
         "version": FORMAT_VERSION,
-        **metadata,
+        **public_metadata,
         "frame_semantics": "ordered sequential frames from one ARC observation",
         "frame_count": len(frames),
         "dimensions": {

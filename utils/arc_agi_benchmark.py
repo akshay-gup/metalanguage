@@ -426,6 +426,11 @@ class ArcAgiBenchmarkDriver:
             item_index=item.index,
             iteration_index=state.iteration_index,
         )
+        accounting = _safe_command_accounting(
+            context.get("budget_ledger_events"),
+            instance_uuid,
+            item_ref,
+        )
         safe = {
             "fitness_pending": False,
             "completion_policy": "official_state_win",
@@ -440,7 +445,13 @@ class ArcAgiBenchmarkDriver:
             "closed": snapshot.closed,
             "scorecard_available": scorecard_available,
             **metrics,
+            **accounting,
         }
+        safe["action_accounting_consistent"] = (
+            scorecard_available
+            and metrics["scorecard_total_actions"]
+            == accounting["accounted_action_count"]
+        )
         solved = snapshot.state == "WIN"
         return BenchmarkOutcome(
             instance_uuid=instance_uuid,
@@ -514,6 +525,15 @@ class ArcAgiBenchmarkDriver:
             ),
             "total_actions": sum(
                 _safe_int(outcome.metadata.get("scorecard_total_actions")) for outcome in outcomes
+            ),
+            "total_accounted_actions": sum(
+                _safe_int(outcome.metadata.get("accounted_action_count"))
+                for outcome in outcomes
+            ),
+            "action_accounting_mismatch_count": sum(
+                outcome.attempted
+                and not bool(outcome.metadata.get("action_accounting_consistent"))
+                for outcome in outcomes
             ),
             "state_counts": dict(sorted(state_counts.items())),
             "newly_solved_item_ids": newly_solved,
@@ -693,6 +713,51 @@ def _safe_scorecard_metrics(value: Any, game_id: str) -> dict[str, int]:
         "game_total_actions": _safe_int(card.get("total_actions")),
         "game_current_actions": _safe_int(actions[-1]) if isinstance(actions, list) and actions else 0,
         "game_total_resets": sum(_safe_int(item) for item in resets) if isinstance(resets, list) else 0,
+    }
+
+
+def _safe_command_accounting(
+    events_path: Any,
+    instance_uuid: str,
+    item_ref: BenchmarkItemRef,
+) -> dict[str, Any]:
+    events: list[dict[str, Any]] = []
+    if isinstance(events_path, str):
+        try:
+            lines = Path(events_path).read_text(encoding="utf-8").splitlines()
+        except OSError:
+            lines = []
+        for line in lines:
+            try:
+                event = json.loads(line)
+            except (TypeError, ValueError):
+                continue
+            if (
+                isinstance(event, dict)
+                and event.get("event_type") == "benchmark_command_completed"
+                and event.get("instance_uuid") == instance_uuid
+            ):
+                metadata = event.get("metadata")
+                if (
+                    isinstance(metadata, dict)
+                    and metadata.get("benchmark_item") == item_ref.to_metadata()
+                ):
+                    events.append(metadata)
+    commands = Counter(
+        metadata.get("command")
+        for metadata in events
+        if metadata.get("command") in ARC_TOOL_NAMES
+    )
+    return {
+        "action_accounting_source": "benchmark_command_completed",
+        "accounted_command_count": sum(commands.values()),
+        "accounted_action_count": sum(
+            count for command, count in commands.items() if command != "RESET"
+        ),
+        "accounted_reset_count": commands.get("RESET", 0),
+        "accounted_actions": {
+            command: commands.get(command, 0) for command in ARC_TOOL_NAMES
+        },
     }
 
 

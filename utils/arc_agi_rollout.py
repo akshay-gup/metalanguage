@@ -124,7 +124,7 @@ def initialize_arc_rollout_command(
                 "base_url": client.base_url,
                 "game_id": game_id,
                 "card_id": card_id,
-                "guid": metadata["guid"],
+                "guid": response["guid"],
                 "artifact_root": str(artifact_root),
                 "render_scale": scale,
                 "step_index": 0,

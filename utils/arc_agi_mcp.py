@@ -107,6 +107,7 @@ class ArcCommandService:
                 result = self._reset(self.context.state_path)
             except Exception:
                 raise ArcAgiMcpError("ARC RESET failed") from None
+            self._publish_command(result, "RESET", game_id)
             self._publish_selection(game_id)
             return result
         try:
@@ -119,6 +120,7 @@ class ArcCommandService:
             )
         except Exception:
             raise ArcAgiMcpError("ARC RESET failed") from None
+        self._publish_command(result, "RESET", game_id)
         self._publish_selection(game_id)
         return result
 
@@ -132,9 +134,70 @@ class ArcCommandService:
         if not self.context.state_path.exists():
             raise ArcAgiMcpError("RESET must be called before an ARC action")
         try:
-            return self._step(self.context.state_path, action, x=x, y=y)
+            result = self._step(self.context.state_path, action, x=x, y=y)
         except Exception:
             raise ArcAgiMcpError(f"ARC {action} failed") from None
+        game_id = result.summary.get("game_id")
+        self._publish_command(result, action, game_id)
+        return result
+
+    def _publish_command(
+        self,
+        result: ArcAgiCommandResult,
+        command: str,
+        game_id: Any,
+    ) -> None:
+        if self.context.instance_uuid is None:
+            return
+        events_path = self.context.benchmark_events_path
+        item_ref = self.context.benchmark_items.get(game_id)
+        summary = result.summary
+        step_index = summary.get("step_index")
+        state = summary.get("state")
+        levels_completed = summary.get("levels_completed")
+        win_levels = summary.get("win_levels")
+        if (
+            events_path is None
+            or item_ref is None
+            or isinstance(step_index, bool)
+            or not isinstance(step_index, int)
+            or step_index < 0
+            or not isinstance(state, str)
+            or not state
+            or isinstance(levels_completed, bool)
+            or not isinstance(levels_completed, int)
+            or isinstance(win_levels, bool)
+            or not isinstance(win_levels, int)
+        ):
+            raise ArcAgiMcpError("ARC command accounting is unavailable")
+        try:
+            if _command_event_exists(
+                events_path,
+                self.context.instance_uuid,
+                step_index,
+            ):
+                return
+            append_budget_event(
+                events_path,
+                event_type="benchmark_command_completed",
+                instance_uuid=self.context.instance_uuid,
+                metadata={
+                    "benchmark": "arc-agi",
+                    "benchmark_item": item_ref.to_metadata(),
+                    "game_id": game_id,
+                    "command": command,
+                    "step_index": step_index,
+                    "state": state,
+                    "levels_completed": levels_completed,
+                    "win_levels": win_levels,
+                },
+            )
+        except ArcAgiMcpError:
+            raise
+        except Exception:
+            raise ArcAgiMcpError(
+                "ARC command accounting could not be recorded"
+            ) from None
 
     def _publish_selection(self, game_id: str) -> None:
         if self.context.instance_uuid is None:
@@ -291,6 +354,31 @@ def _selection_exists(
         ):
             metadata = event.get("metadata")
             return isinstance(metadata, dict) and metadata.get("benchmark_item") == expected_item
+    return False
+
+
+def _command_event_exists(
+    events_path: Path,
+    instance_uuid: str,
+    step_index: int,
+) -> bool:
+    try:
+        lines = events_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    for line in reversed(lines):
+        try:
+            event = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if (
+            isinstance(event, dict)
+            and event.get("event_type") == "benchmark_command_completed"
+            and event.get("instance_uuid") == instance_uuid
+        ):
+            metadata = event.get("metadata")
+            if isinstance(metadata, dict) and metadata.get("step_index") == step_index:
+                return True
     return False
 
 
