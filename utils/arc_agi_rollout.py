@@ -7,11 +7,16 @@ import json
 import os
 import tempfile
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
 from utils.arc_agi_client import ArcAgiClient, ArcAgiClientError
-from utils.arc_agi_frames import MAX_SCALE, write_arc_observation_artifacts
+from utils.arc_agi_frames import (
+    MAX_SCALE,
+    public_arc_observation,
+    write_arc_observation_artifacts,
+)
 
 
 SCHEMA_NAME = "metalanguage.arc_rollout_session"
@@ -42,6 +47,15 @@ class ArcAgiRolloutError(RuntimeError):
     """Raised for invalid state or failed rollout operations."""
 
 
+@dataclass(frozen=True)
+class ArcAgiCommandResult:
+    """Official observation plus supervisor-private rendered frame locations."""
+
+    observation: dict[str, Any]
+    summary: dict[str, Any]
+    frame_paths: tuple[Path, ...] = field(repr=False)
+
+
 def initialize_arc_rollout(
     state_path: str | Path,
     rollout_root: str | Path,
@@ -51,6 +65,21 @@ def initialize_arc_rollout(
     scale: int = 4,
 ) -> dict[str, Any]:
     """Open, reset, render, and atomically record a new rollout session."""
+
+    return initialize_arc_rollout_command(
+        state_path, rollout_root, base_url, game_id, scale=scale
+    ).summary
+
+
+def initialize_arc_rollout_command(
+    state_path: str | Path,
+    rollout_root: str | Path,
+    base_url: str,
+    game_id: str,
+    *,
+    scale: int = 4,
+) -> ArcAgiCommandResult:
+    """Initialize a session and retain its exact official observation."""
 
     state_file = Path(state_path).resolve()
     artifact_root = (Path(rollout_root).resolve() / "arc_observations")
@@ -94,7 +123,7 @@ def initialize_arc_rollout(
             }
             _validate_state(state)
             _write_state(state_file, state)
-            return _model_view(state)
+            return _command_result(response, artifacts, state)
         except ArcAgiClientError:
             if card_id is not None:
                 try:
@@ -132,6 +161,21 @@ def step_arc_rollout(
 ) -> dict[str, Any]:
     """Take one currently available action and atomically advance state."""
 
+    return step_arc_rollout_command(
+        state_path, action, x=x, y=y, reasoning=reasoning
+    ).summary
+
+
+def step_arc_rollout_command(
+    state_path: str | Path,
+    action: str | int,
+    *,
+    x: int | None = None,
+    y: int | None = None,
+    reasoning: Any = None,
+) -> ArcAgiCommandResult:
+    """Advance one action and retain its exact official observation."""
+
     state_file = Path(state_path).resolve()
     with _state_lock(state_file, exclusive=True):
         state = _load_state(state_file)
@@ -162,6 +206,16 @@ def reset_arc_rollout(
     reasoning: Any = None,
 ) -> dict[str, Any]:
     """Reset the existing GUID and atomically record the new observation."""
+
+    return reset_arc_rollout_command(state_path, reasoning=reasoning).summary
+
+
+def reset_arc_rollout_command(
+    state_path: str | Path,
+    *,
+    reasoning: Any = None,
+) -> ArcAgiCommandResult:
+    """Reset an existing session and retain its exact official observation."""
 
     state_file = Path(state_path).resolve()
     with _state_lock(state_file, exclusive=True):
@@ -203,7 +257,7 @@ def _record_observation(
     state: dict[str, Any],
     response: dict[str, Any],
     operation: str,
-) -> dict[str, Any]:
+) -> ArcAgiCommandResult:
     if response.get("game_id") != state["game_id"] or response.get("guid") != state["guid"]:
         raise ArcAgiRolloutError("ARC server returned a mismatched environment")
     next_step = state["step_index"] + 1
@@ -228,7 +282,29 @@ def _record_observation(
     )
     _validate_state(state)
     _write_state(state_file, state)
-    return _model_view(state)
+    return _command_result(response, artifacts, state)
+
+
+def arc_rollout_game_id(state_path: str | Path) -> str:
+    """Return the selected game identity without exposing private session IDs."""
+
+    state_file = Path(state_path).resolve()
+    with _state_lock(state_file, exclusive=False):
+        state = _load_state(state_file)
+        _require_open(state)
+        return state["game_id"]
+
+
+def _command_result(
+    response: dict[str, Any],
+    artifacts: dict[str, Any],
+    state: dict[str, Any],
+) -> ArcAgiCommandResult:
+    return ArcAgiCommandResult(
+        observation=public_arc_observation(response),
+        summary=_model_view(state),
+        frame_paths=tuple(Path(path) for path in artifacts["frame_paths"]),
+    )
 
 
 def _model_view(state: dict[str, Any]) -> dict[str, Any]:

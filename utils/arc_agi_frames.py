@@ -21,6 +21,25 @@ _OPERATION_PATTERN = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
 _PALETTE = tuple(hex_to_rgb(COLOR_MAP[index]) for index in range(16))
 
 
+def public_arc_observation(response: dict[str, Any]) -> dict[str, Any]:
+    """Validate and copy the official model-visible observation fields."""
+
+    metadata, frames = _validate_response(response)
+    action_input = metadata["action_input"]
+    return {
+        "game_id": metadata["game_id"],
+        "frame": [[list(row) for row in frame] for frame in frames],
+        "state": metadata["state"],
+        "levels_completed": metadata["levels_completed"],
+        "win_levels": metadata["win_levels"],
+        "available_actions": list(metadata["available_actions"]),
+        "action_input": {
+            "id": action_input["id"],
+            "data": dict(action_input["data"]),
+        },
+    }
+
+
 def write_arc_observation_artifacts(
     response: dict[str, Any],
     output_root: str | Path,
