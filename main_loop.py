@@ -1014,6 +1014,7 @@ def _create_benchmark_driver(
                 state_path=arc_benchmark_state_path,
                 seed=args.seed,
                 problem_pool_size=args.problem_pool_size,
+                solve_reward_token_credit_tokens=args.solve_reward_token_credit_tokens,
             )
         )
     return SuperGpqaBenchmarkDriver(
@@ -2417,8 +2418,9 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=DEFAULT_SOLVE_REWARD_TOKEN_CREDIT_TOKENS,
         help=(
-            "Token budget credited to a rollout when submit_solution scores "
-            "a correct answer. Set to 0 to disable solve reward credits."
+            "Token budget credited to a rollout on its first benchmark solve "
+            "(a correct SuperGPQA submission or official ARC WIN). Set to 0 "
+            "to disable solve reward credits."
         ),
     )
     parser.add_argument(
@@ -2567,6 +2569,14 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 )
             ):
                 return False
+            if (
+                rec.get(
+                    "configured_solve_reward_token_credit_tokens",
+                    rec.get("solve_reward_token_credit_tokens", 0),
+                )
+                != args.solve_reward_token_credit_tokens
+            ):
+                return False
             if args.benchmark != "supergpqa":
                 return True
             return (
@@ -2574,11 +2584,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 and rec.get("split") == args.split
                 and rec.get("config_name") == args.config_name
                 and rec.get("difficulty_filter") == difficulty_filter_payload
-                and rec.get(
-                    "configured_solve_reward_token_credit_tokens",
-                    rec.get("solve_reward_token_credit_tokens"),
-                )
-                == args.solve_reward_token_credit_tokens
             )
 
         existing_records = [rec for rec in all_records if _matches_run(rec)]
@@ -3234,8 +3239,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 "rollout_token_budget_tokens": rollout_budget_tokens,
                 "configured_solve_reward_token_credit_tokens": (
                     args.solve_reward_token_credit_tokens
-                    if args.benchmark == "supergpqa"
-                    else 0
                 ),
                 "codex_home": str(codex_home) if args.worker_backend == "codex" else None,
                 "codex_runner_bin": str(codex_runner_bin) if codex_runner_bin is not None else None,

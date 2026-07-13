@@ -49,6 +49,7 @@ class ArcAgiConfig:
     state_path: Path
     seed: int = 42
     problem_pool_size: int | None = None
+    solve_reward_token_credit_tokens: int = 0
     render_scale: int = 4
     server_readiness_timeout: float = 30.0
     mcp_startup_timeout_sec: int = 10
@@ -66,6 +67,12 @@ class ArcAgiConfig:
             or self.problem_pool_size <= 0
         ):
             raise ValueError("problem_pool_size must be a positive integer or None")
+        if (
+            isinstance(self.solve_reward_token_credit_tokens, bool)
+            or not isinstance(self.solve_reward_token_credit_tokens, int)
+            or self.solve_reward_token_credit_tokens < 0
+        ):
+            raise ValueError("solve_reward_token_credit_tokens must be a non-negative integer")
         if (
             isinstance(self.render_scale, bool)
             or not isinstance(self.render_scale, int)
@@ -303,6 +310,9 @@ class ArcAgiBenchmarkDriver:
                 "rollout_root": str(rollout_root),
                 "artifact_root": str(artifact_root),
                 "render_scale": self.config.render_scale,
+                "solve_reward_token_credit_tokens": (
+                    self.config.solve_reward_token_credit_tokens
+                ),
                 "instance_uuid": instance_uuid,
                 "benchmark_events_path": str(benchmark_events_path),
                 "benchmark_items": {
@@ -337,20 +347,21 @@ class ArcAgiBenchmarkDriver:
 
         namespaced_tools = [f"mcp__arc_agi__{name}" for name in ARC_TOOL_NAMES]
         instructions = (
-            "ARC benchmark: there is no submission or solve-credit tool. Choose an "
+            "ARC benchmark: there is no submission or custom scoring tool. Choose an "
             "official game_id from the shared ARC pool and call "
             "mcp__arc_agi__RESET(game_id=...). Then issue only official ACTION commands "
             "whose integer IDs appear in the latest available_actions; ACTION6 requires "
             "integer x and y coordinates. Use the returned ordered frames and state. "
-            "ARC gameplay adds no budget credit: do not wait for WIN before preserving "
-            "lineage. After useful observation or progress, retain at least the minimum "
+            "The first official WIN for this rollout may add solve-credit budget, but "
+            "do not wait for WIN before preserving lineage. After useful observation "
+            "or progress, retain at least the minimum "
             "child budget and call spawn_child early if continuation is intended."
         )
         benchmark_context = {
             **context,
-            # ARC currently has no solve-credit policy. Reserving half of the
-            # current budget keeps model-initiated lineage possible after useful
-            # gameplay without auto-spawning or changing the generic CLI default.
+            # Reserving half of the current budget keeps model-initiated lineage
+            # possible before a WIN and its optional credit, without auto-spawning
+            # or changing the generic CLI default.
             "minimum_child_budget_tokens": max(1, rollout_budget // 2),
             "arc_mcp_context_path": str(context_path),
             "arc_state_path": str(state_path),
@@ -375,6 +386,9 @@ class ArcAgiBenchmarkDriver:
                     "tool_timeout_sec": self.config.mcp_tool_timeout_sec,
                 }
             },
+            mcp_budget_reconcile_tools=tuple(
+                ("arc_agi", tool_name) for tool_name in ARC_TOOL_NAMES
+            ),
         )
 
     def collect_outcome(
@@ -442,6 +456,11 @@ class ArcAgiBenchmarkDriver:
             instance_uuid,
             item_ref,
         )
+        credited_tokens = _safe_win_credit(
+            context.get("budget_ledger_events"),
+            instance_uuid,
+            item_ref,
+        )
         safe = {
             "fitness_pending": False,
             "completion_policy": "official_state_win",
@@ -455,6 +474,12 @@ class ArcAgiBenchmarkDriver:
             "operation": snapshot.operation,
             "closed": snapshot.closed,
             "scorecard_available": scorecard_available,
+            "reward": 1.0 if snapshot.state == "WIN" else 0.0,
+            "reward_credit_claimed": credited_tokens > 0,
+            "credited_tokens": credited_tokens,
+            "configured_solve_reward_token_credit_tokens": (
+                self.config.solve_reward_token_credit_tokens
+            ),
             **metrics,
             **accounting,
         }
@@ -552,6 +577,14 @@ class ArcAgiBenchmarkDriver:
             "total_solved_item_ids": total_solved,
             "solved_count": len(won_ids),
             "reward_total": float(sum(outcome.reward for outcome in outcomes)),
+            "credited_rollout_count": sum(
+                bool(outcome.metadata.get("reward_credit_claimed"))
+                for outcome in outcomes
+            ),
+            "solve_reward_credit_tokens_total": sum(
+                _safe_int(outcome.metadata.get("credited_tokens"))
+                for outcome in outcomes
+            ),
             "fitness_pending": False,
             "completion_policy": "official_state_win",
         }
@@ -770,6 +803,39 @@ def _safe_command_accounting(
             command: commands.get(command, 0) for command in ARC_TOOL_NAMES
         },
     }
+
+
+def _safe_win_credit(
+    events_path: Any,
+    instance_uuid: str,
+    item_ref: BenchmarkItemRef,
+) -> int:
+    if not isinstance(events_path, str):
+        return 0
+    try:
+        lines = Path(events_path).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return 0
+    total = 0
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if (
+            not isinstance(event, dict)
+            or event.get("event_type") != "solve_reward_credit"
+            or event.get("instance_uuid") != instance_uuid
+        ):
+            continue
+        metadata = event.get("metadata")
+        if (
+            isinstance(metadata, dict)
+            and metadata.get("benchmark") == "arc-agi"
+            and metadata.get("benchmark_item") == item_ref.to_metadata()
+        ):
+            total += _safe_int(event.get("amount_tokens"))
+    return total
 
 
 def _safe_int(value: Any) -> int:
