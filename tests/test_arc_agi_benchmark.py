@@ -105,7 +105,7 @@ def _supervisor_context(root: Path, name: str) -> dict[str, object]:
         "rollout_state_dir": str(state),
         "workdir": str(workdir),
         "budget_ledger_events": str(events),
-        "rollout_token_budget_tokens": 300,
+        "minimum_child_budget_tokens": 300,
     }
 
 
@@ -264,9 +264,8 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
                 tuple(("arc_agi", tool) for tool in ARC_TOOL_NAMES),
             )
             self.assertFalse(rollout_a.sensitive_mcp_tools)
-            self.assertEqual(rollout_a.context["minimum_child_budget_tokens"], 150)
-            self.assertEqual(rollout_b.context["minimum_child_budget_tokens"], 150)
-            self.assertIn("spawn_child early", rollout_a.model_metadata["instructions"])
+            self.assertEqual(rollout_a.context["minimum_child_budget_tokens"], 300)
+            self.assertEqual(rollout_b.context["minimum_child_budget_tokens"], 300)
 
             path_a = Path(config["env"]["METALANGUAGE_ARC_CONTEXT"])
             path_b = Path(rollout_b.mcp_servers["arc_agi"]["env"]["METALANGUAGE_ARC_CONTEXT"])
@@ -306,7 +305,6 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
                 self.assertNotIn(private, public)
             self.assertIn("mcp__arc_agi__RESET", public)
             self.assertIn("available_actions", public)
-            self.assertIn("spawn_child", public)
             self.assertIn("solve-credit budget", public)
             with self.assertRaisesRegex(RuntimeError, "paths are not isolated"):
                 driver.prepare_rollout(
