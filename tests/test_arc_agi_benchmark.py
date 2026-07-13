@@ -27,7 +27,7 @@ from utils.benchmark_driver import (
     BenchmarkOutcome,
     active_benchmark_item,
 )
-from utils.budget_ledger import append_budget_event
+from utils.budget_ledger import append_budget_event, read_budget_status
 
 
 def _records(count: int = 6) -> list[dict[str, object]]:
@@ -131,6 +131,7 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
                     state_path=root / "arc-benchmark-state.json",
                     seed=17,
                     problem_pool_size=cap,
+                    solve_reward_token_credit_tokens=50,
                     render_scale=2,
                 ),
                 records_loader=lambda: _records(),
@@ -190,6 +191,7 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
                 benchmark="arc-agi",
                 seed=23,
                 problem_pool_size=4,
+                solve_reward_token_credit_tokens=75,
             )
             queue = root / "must-not-exist/problem_queue.json"
             task_store = root / "must-not-exist/task_store"
@@ -205,6 +207,7 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
             self.assertIsInstance(driver, ArcAgiBenchmarkDriver)
             self.assertEqual(driver.config.seed, 23)
             self.assertEqual(driver.config.problem_pool_size, 4)
+            self.assertEqual(driver.config.solve_reward_token_credit_tokens, 75)
             self.assertFalse(queue.parent.exists())
             self.assertFalse(task_store.exists())
             self.assertFalse(dataset_cache.exists())
@@ -256,7 +259,10 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
             self.assertEqual(config["tool_timeout_sec"], 60)
             self.assertEqual(set(config["env"]), {"METALANGUAGE_ARC_CONTEXT"})
             self.assertNotIn(config["env"]["METALANGUAGE_ARC_CONTEXT"], config["args"])
-            self.assertFalse(rollout_a.mcp_budget_reconcile_tools)
+            self.assertEqual(
+                rollout_a.mcp_budget_reconcile_tools,
+                tuple(("arc_agi", tool) for tool in ARC_TOOL_NAMES),
+            )
             self.assertFalse(rollout_a.sensitive_mcp_tools)
             self.assertEqual(rollout_a.context["minimum_child_budget_tokens"], 150)
             self.assertEqual(rollout_b.context["minimum_child_budget_tokens"], 150)
@@ -270,6 +276,7 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
             private_payload = json.loads(path_a.read_text())
             self.assertEqual(private_payload["version"], DRIVER_CONTEXT_VERSION)
             self.assertEqual(private_payload["instance_uuid"], "rollout-a")
+            self.assertEqual(private_payload["solve_reward_token_credit_tokens"], 50)
             self.assertEqual(
                 set(private_payload["benchmark_items"]),
                 set(private_payload["allowed_game_ids"]),
@@ -300,7 +307,7 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
             self.assertIn("mcp__arc_agi__RESET", public)
             self.assertIn("available_actions", public)
             self.assertIn("spawn_child", public)
-            self.assertIn("no budget credit", public)
+            self.assertIn("solve-credit budget", public)
             with self.assertRaisesRegex(RuntimeError, "paths are not isolated"):
                 driver.prepare_rollout(
                     batch,
@@ -308,6 +315,114 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
                     context={**context_a, "instance_uuid": "rollout-c"},
                 )
             self.assertTrue(path_a.is_file())
+            driver.close()
+
+    def test_win_credit_is_immediate_once_and_rollout_local(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            driver, _ = self._driver(root)
+            batch = driver.prepare_batch(4, root / "shared")
+            rollouts = [
+                driver.prepare_rollout(
+                    batch,
+                    backend="codex",
+                    context=_supervisor_context(root, instance),
+                )
+                for instance in ("winner-a", "winner-b")
+            ]
+            selected_game = load_context(
+                Path(
+                    rollouts[0].mcp_servers["arc_agi"]["env"][
+                        "METALANGUAGE_ARC_CONTEXT"
+                    ]
+                )
+            ).allowed_game_ids[0]
+
+            for rollout in rollouts:
+                events_path = Path(rollout.context["budget_ledger_events"])
+                instance_uuid = str(rollout.context["instance_uuid"])
+                append_budget_event(
+                    events_path,
+                    event_type="instance_created",
+                    instance_uuid=instance_uuid,
+                    metadata={"rollout_token_budget_tokens": 300},
+                )
+                next_step = 0
+
+                def result(operation: str, state: str) -> ArcAgiCommandResult:
+                    nonlocal next_step
+                    step_index = next_step
+                    next_step += 1
+                    return ArcAgiCommandResult(
+                        {},
+                        {
+                            "game_id": selected_game,
+                            "state": state,
+                            "levels_completed": 1 if state == "WIN" else 0,
+                            "win_levels": 1,
+                            "step_index": step_index,
+                            "operation": operation,
+                        },
+                        (),
+                    )
+
+                def initialize(
+                    state_path: str | Path,
+                    *_args: object,
+                    **_kwargs: object,
+                ) -> ArcAgiCommandResult:
+                    path = Path(state_path)
+                    path.write_text("{}", encoding="utf-8")
+                    path.chmod(0o600)
+                    return result("reset", "NOT_FINISHED")
+
+                action_states = iter(("GAME_OVER", "WIN", "WIN"))
+                service = ArcCommandService(
+                    load_context(
+                        Path(
+                            rollout.mcp_servers["arc_agi"]["env"][
+                                "METALANGUAGE_ARC_CONTEXT"
+                            ]
+                        )
+                    ),
+                    initialize=initialize,
+                    step=lambda *_args, **_kwargs: result(
+                        "action1", next(action_states)
+                    ),
+                    selected_game=lambda _path: selected_game,
+                )
+                service.reset(selected_game)
+                service.action("ACTION1")
+                self.assertEqual(
+                    read_budget_status(events_path, instance_uuid)[
+                        "tokens_transferred_in"
+                    ],
+                    0,
+                )
+                service.action("ACTION1")
+                credited = read_budget_status(events_path, instance_uuid)
+                self.assertEqual(credited["tokens_transferred_in"], 50)
+                self.assertEqual(credited["effective_rollout_token_budget_tokens"], 350)
+                self.assertEqual(credited["tokens_remaining"], 350)
+                service.action("ACTION1")
+                self.assertEqual(
+                    read_budget_status(events_path, instance_uuid)[
+                        "tokens_transferred_in"
+                    ],
+                    50,
+                )
+                events = [
+                    json.loads(line) for line in events_path.read_text().splitlines()
+                ]
+                credits = [
+                    event
+                    for event in events
+                    if event["event_type"] == "solve_reward_credit"
+                ]
+                self.assertEqual(len(credits), 1)
+                self.assertEqual(credits[0]["amount_tokens"], 50)
+                self.assertNotIn("guid", json.dumps(credits))
+                self.assertNotIn("card", json.dumps(credits))
             driver.close()
 
     def test_reset_selection_event_is_idempotent_and_drives_spawn_provenance(self) -> None:
@@ -732,17 +847,35 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
                     "state": "WIN",
                 }
             )
+            append_budget_event(
+                Path(rollout_b.context["budget_ledger_events"]),
+                event_type="solve_reward_credit",
+                instance_uuid="b",
+                amount_tokens=50,
+                metadata={
+                    "benchmark": "arc-agi",
+                    "benchmark_item": selected_ref.to_metadata(),
+                    "game_id": selected_game,
+                    "item_id": selected_ref.item_id,
+                    "reward": 1.0,
+                    "completion_policy": "official_state_win",
+                },
+            )
             closed_outcome = driver.collect_outcome(
                 batch, instance_uuid="b", context=rollout_b.context
             )
             self.assertTrue(closed_outcome.metadata["closed"])
             self.assertEqual(closed_outcome.metadata["state"], "WIN")
             self.assertFalse(closed_outcome.metadata["scorecard_available"])
+            self.assertTrue(closed_outcome.metadata["reward_credit_claimed"])
+            self.assertEqual(closed_outcome.metadata["credited_tokens"], 50)
 
             summary = driver.finalize_batch(batch, [outcome_a, closed_outcome])
             self.assertEqual(summary["attempted_count"], 2)
             self.assertEqual(summary["selected_item_count"], 1)
             self.assertEqual(summary["solved_count"], 1)
+            self.assertEqual(summary["credited_rollout_count"], 1)
+            self.assertEqual(summary["solve_reward_credit_tokens_total"], 50)
             self.assertEqual(summary["reward_total"], 1)
             self.assertEqual(summary["total_actions"], 3)
             self.assertEqual(summary["total_accounted_actions"], 6)
