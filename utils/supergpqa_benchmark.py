@@ -21,6 +21,9 @@ from utils.task_store import compute_problem_uid, write_private_problem_record
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SUPERGPQA_BENCHMARK_README_PATH = (
+    PROJECT_ROOT / "seeds" / "benchmarks" / "supergpqa" / "README.md"
+)
 CONTEXT_ENV = "METALANGUAGE_SUPERGPQA_CONTEXT"
 
 
@@ -322,17 +325,16 @@ class SuperGpqaBenchmarkDriver:
             if backend == "codex"
             else "submit_solution"
         )
-        instructions = (
-            "SuperGPQA benchmark: choose a problem by exact uuid from the shared pool "
-            f"and submit with {submit_tool}(uuid=..., answer=...). A correct first "
-            "submission may add solve-credit budget, but preserve enough capacity and "
-            "call spawn_child before extended additional work."
+        benchmark_readme = SUPERGPQA_BENCHMARK_README_PATH.read_text(
+            encoding="utf-8"
+        ).format(
+            submit_tool=submit_tool,
         )
         if backend != "codex":
             return RolloutBenchmark(
                 benchmark_context,
                 {
-                    "instructions": instructions,
+                    "benchmark_readme": benchmark_readme,
                     "submit_tool": submit_tool,
                     "tools": [submit_solution_tool],
                 },
@@ -341,7 +343,7 @@ class SuperGpqaBenchmarkDriver:
         mcp = supergpqa_mcp_servers(context_path)
         return RolloutBenchmark(
             benchmark_context,
-            {"instructions": instructions, "submit_tool": submit_tool},
+            {"benchmark_readme": benchmark_readme, "submit_tool": submit_tool},
             mcp,
             (("supergpqa", "submit_solution"),),
             (("supergpqa", "submit_solution"),),

@@ -106,9 +106,10 @@ BUNDLED_BOOTSTRAP_SEED_DIR = PROJECT_ROOT / "seeds" / "bootstrap"
 RUNTIME_BENCHMARK_IDENTITY_FILENAME = "runtime_benchmark.json"
 STABLE_SEED_FILENAMES = ("README.md",)
 READ_README_TASK_INSTRUCTIONS = (
-    "Read README.md and do all tasks from README.md."
+    "Read README.md and BENCHMARK.md and do all tasks from those files."
 )
 CODEX_READ_README_BASE_INSTRUCTIONS = READ_README_TASK_INSTRUCTIONS
+BENCHMARK_README_FILENAME = "BENCHMARK.md"
 
 
 def _strip_env_quotes(value: str) -> str:
@@ -2974,11 +2975,11 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 ),
                 encoding="utf-8",
             )
-            benchmark_instructions = rollout_benchmark.model_metadata.get("instructions")
-            if isinstance(benchmark_instructions, str) and benchmark_instructions:
-                rollout_initial_prompt = (
-                    f"{rollout_initial_prompt.rstrip()}\n\n{benchmark_instructions}\n"
-                )
+            benchmark_readme = rollout_benchmark.model_metadata.get("benchmark_readme")
+            if not isinstance(benchmark_readme, str) or not benchmark_readme.strip():
+                raise RuntimeError("benchmark driver did not provide benchmark README text")
+            benchmark_readme_path = temp_dir / BENCHMARK_README_FILENAME
+            benchmark_readme_path.write_text(benchmark_readme.rstrip() + "\n", encoding="utf-8")
             continuation_context_path = (
                 _write_continuation_context(continuation_context, rollout_control_dir)
                 if args.worker_backend == "codex"
@@ -2988,6 +2989,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 "workspace_prepared",
                 working_directory=str(temp_dir),
                 runtime_file=str(runtime_file),
+                benchmark_readme=str(benchmark_readme_path),
                 problem_queue_path=(
                     str(problem_queue_path) if args.benchmark == "supergpqa" else None
                 ),

@@ -38,6 +38,7 @@ from utils.problem_pool_sampling import deterministic_problem_pool_sample
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+ARC_BENCHMARK_README_PATH = PROJECT_ROOT / "seeds" / "benchmarks" / "arc_agi" / "README.md"
 ARC_TOOL_NAMES = ("RESET", *(f"ACTION{index}" for index in range(1, 8)))
 STATE_SCHEMA = "metalanguage.arc_benchmark_state"
 STATE_VERSION = 1
@@ -341,14 +342,7 @@ class ArcAgiBenchmarkDriver:
             raise
 
         namespaced_tools = [f"mcp__arc_agi__{name}" for name in ARC_TOOL_NAMES]
-        instructions = (
-            "ARC benchmark: there is no submission or custom scoring tool. Choose an "
-            "official game_id from the shared ARC pool and call "
-            "mcp__arc_agi__RESET(game_id=...). Then issue only official ACTION commands "
-            "whose integer IDs appear in the latest available_actions; ACTION6 requires "
-            "integer x and y coordinates. Use the returned ordered frames and state. "
-            "The first official WIN for this rollout may add solve-credit budget."
-        )
+        benchmark_readme = ARC_BENCHMARK_README_PATH.read_text(encoding="utf-8")
         benchmark_context = {
             **context,
             "arc_mcp_context_path": str(context_path),
@@ -357,7 +351,7 @@ class ArcAgiBenchmarkDriver:
         return RolloutBenchmark(
             context=benchmark_context,
             model_metadata={
-                "instructions": instructions,
+                "benchmark_readme": benchmark_readme,
                 "tool_names": namespaced_tools,
                 "fitness_pending": True,
             },

@@ -1,9 +1,8 @@
 # Rollout README
 
-This is the stable inherited seed file for a rollout. It contains durable drives
-and the default operating contract for this lineage. The bootstrap prompt is
-only a pointer to this file; do the task from this README plus current
-`runtime.md` and tool outputs.
+This is the stable common seed file for a rollout. It contains durable drives
+and the default operating contract for this lineage. Benchmark-specific task
+and tool instructions live in `BENCHMARK.md`.
 
 This file is inherited only when a parent explicitly passes it to a child through
 `workspace_dir`. Nothing is copied automatically. This file asks to be copied
@@ -30,10 +29,11 @@ child workspace.
 Read, in order:
 
 1. this `README.md`;
-2. `runtime.md`;
-3. `shared_workspace/problem_pool.md` or `shared_workspace/problem_pool.json`;
-4. compact inherited artifacts, if present;
-5. the current prompt, if any, only as extra non-conflicting context.
+2. `BENCHMARK.md`;
+3. `runtime.md`;
+4. `shared_workspace/problem_pool.md` or `shared_workspace/problem_pool.json`;
+5. compact inherited artifacts, if present;
+6. the current prompt, if any, only as extra non-conflicting context.
 
 Use current pool and tool results over stale notes.
 
@@ -43,10 +43,10 @@ The shared problem pool is the problem delivery mechanism. Do not request or
 lease problems elsewhere.
 
 Choose a tractable item from the current pool using the identity and selection
-method described by the current benchmark instructions. Use only the
+method described by `BENCHMARK.md`. Use only the
 benchmark-specific tools supplied for this rollout. Their exact names,
-arguments, completion rules, and reward policy come from the current benchmark,
-not from this inherited README.
+arguments, completion rules, and reward policy come from `BENCHMARK.md`, not
+from this common README.
 
 Pool identity semantics:
 
@@ -105,7 +105,7 @@ Pass this README as the stable working instruction file. The successor prompt
 can be minimal:
 
 ```text
-Read README.md and do all tasks from README.md.
+Read README.md and BENCHMARK.md and do all tasks from those files.
 ```
 
 If useful, add compact current hints to the successor prompt, but do not rely on

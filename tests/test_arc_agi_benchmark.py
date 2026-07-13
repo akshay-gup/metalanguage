@@ -303,6 +303,8 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
                 "thought",
             ):
                 self.assertNotIn(private, public)
+            self.assertNotIn("instructions", rollout_a.model_metadata)
+            self.assertIn("benchmark_readme", rollout_a.model_metadata)
             self.assertIn("mcp__arc_agi__RESET", public)
             self.assertIn("available_actions", public)
             self.assertIn("solve-credit budget", public)

@@ -80,11 +80,12 @@ class BenchmarkDriverTests(unittest.TestCase):
             self.assertIsInstance(codex, RolloutBenchmark)
             self.assertEqual(set(codex.mcp_servers), {"supergpqa"})
             self.assertEqual(codex.mcp_budget_reconcile_tools, (("supergpqa", "submit_solution"),))
+            codex_readme = codex.model_metadata["benchmark_readme"]
             self.assertIn(
                 "mcp__supergpqa__submit_solution",
-                codex.model_metadata["instructions"],
+                codex_readme,
             )
-            self.assertIn("spawn_child", codex.model_metadata["instructions"])
+            self.assertIn("spawn_child", codex_readme)
             self.assertNotIn("answer", json.dumps(codex.context["problem_pool_records"]))
             self.assertIn("mcp__supergpqa__submit_solution", (root / "shared" / "problem_pool.md").read_text())
             open_root = root / "openrouter"
@@ -92,8 +93,9 @@ class BenchmarkDriverTests(unittest.TestCase):
             open_batch = open_driver.prepare_batch(4, open_root / "shared")
             openrouter = open_driver.prepare_rollout(open_batch, backend="openrouter", context=base)
             self.assertFalse(openrouter.mcp_servers)
+            openrouter_readme = openrouter.model_metadata["benchmark_readme"]
             self.assertIn(
-                "submit_solution(uuid=", openrouter.model_metadata["instructions"]
+                "submit_solution(uuid=", openrouter_readme
             )
             self.assertIn("submit_solution(uuid=", (open_root / "shared" / "problem_pool.md").read_text())
             self.assertNotIn("mcp__", (open_root / "shared" / "problem_pool.md").read_text())
@@ -104,6 +106,16 @@ class BenchmarkDriverTests(unittest.TestCase):
             self.assertNotIn("submit_solution", stable_readme)
             self.assertIn("Benchmark-specific tools", stable_readme)
             self.assertIn("spawn_child", stable_readme)
+            supergpqa_readme = (
+                Path(__file__).resolve().parents[1]
+                / "seeds/benchmarks/supergpqa/README.md"
+            ).read_text()
+            arc_readme = (
+                Path(__file__).resolve().parents[1]
+                / "seeds/benchmarks/arc_agi/README.md"
+            ).read_text()
+            self.assertIn("{submit_tool}", supergpqa_readme)
+            self.assertIn("mcp__arc_agi__RESET", arc_readme)
             runtime_text = _format_runtime_markdown(
                 instance_uuid="fixture",
                 rollout_token_budget_tokens=100,
