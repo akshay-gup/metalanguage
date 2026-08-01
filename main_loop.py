@@ -909,6 +909,40 @@ def _load_spawned_child_parent_slots(spawn_slots_path: Path) -> list[dict[str, A
     return _load_spawned_child_slots(spawn_slots_path)
 
 
+def _is_reinitialized_bootstrap_slot(slot: dict[str, Any] | None) -> bool:
+    return bool(slot and slot.get("bootstrap_reinitialized") is True)
+
+
+def _refill_parent_pool_with_bootstrap_slots(
+    spawned_child_slots: list[dict[str, Any]],
+    *,
+    target_count: int,
+    rollout_token_budget_tokens: int,
+) -> tuple[list[dict[str, Any]], int]:
+    parent_pool = list(spawned_child_slots[:target_count])
+    reinitialized_count = max(0, target_count - len(parent_pool))
+    for _ in range(reinitialized_count):
+        slot_index = len(parent_pool)
+        child_instance_uuid = new_instance_uuid()
+        parent_pool.append(
+            {
+                "bootstrap_reinitialized": True,
+                "child_instance_uuid": child_instance_uuid,
+                "slot_index": slot_index,
+                "parent_instance_uuid": None,
+                "parent_rollout_username": None,
+                "prompt": READ_README_TASK_INSTRUCTIONS,
+                "prompt_chars": len(READ_README_TASK_INSTRUCTIONS),
+                "initial_budget_tokens": rollout_token_budget_tokens,
+                "assigned_budget_tokens": rollout_token_budget_tokens,
+                "workspace_dir": None,
+                "slot_dir": None,
+                "manifest_path": None,
+            }
+        )
+    return parent_pool, reinitialized_count
+
+
 def _is_within(path: Path, root: Path) -> bool:
     try:
         path.resolve().relative_to(root.resolve())
@@ -2783,6 +2817,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             sampled_parent: dict[str, Any] | None = (
                 parent_pool[rollout_index] if rollout_index < len(parent_pool) else None
             )
+            bootstrap_reinitialized = _is_reinitialized_bootstrap_slot(sampled_parent)
             rollout_budget_tokens = (
                 _slot_budget_tokens(sampled_parent)
                 if sampled_parent is not None
@@ -2837,17 +2872,36 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                     "problem_uid": problem_uid,
                     "rollout_token_budget_tokens": rollout_budget_tokens,
                     "parent_instance_uuid": (
-                        sampled_parent.get("parent_instance_uuid") if sampled_parent else None
+                        sampled_parent.get("parent_instance_uuid")
+                        if sampled_parent and not bootstrap_reinitialized
+                        else None
                     ),
-                    "parent_slot_dir": sampled_parent.get("slot_dir") if sampled_parent else None,
+                    "parent_slot_dir": (
+                        sampled_parent.get("slot_dir")
+                        if sampled_parent and not bootstrap_reinitialized
+                        else None
+                    ),
                 },
             )
             _progress(
                 "rollout_started",
                 instance_uuid=instance_uuid,
-                parent_slot_dir=sampled_parent.get("slot_dir") if sampled_parent else None,
-                parent_workspace_dir=sampled_parent.get("workspace_dir") if sampled_parent else None,
-                bootstrap_seed_dir=str(bootstrap_seed_dir) if sampled_parent is None else None,
+                parent_slot_dir=(
+                    sampled_parent.get("slot_dir")
+                    if sampled_parent and not bootstrap_reinitialized
+                    else None
+                ),
+                parent_workspace_dir=(
+                    sampled_parent.get("workspace_dir")
+                    if sampled_parent and not bootstrap_reinitialized
+                    else None
+                ),
+                bootstrap_seed_dir=(
+                    str(bootstrap_seed_dir)
+                    if sampled_parent is None or bootstrap_reinitialized
+                    else None
+                ),
+                bootstrap_reinitialized=bootstrap_reinitialized,
             )
             archive_worktree = create_archive_worktree(
                 archive_repo_dir=archive_repo_dir,
@@ -2865,9 +2919,9 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             temp_dir = fixed_temp_dir / f"{task_index:06d}" / f"rollout_{rollout_index:03d}"
             shutil.rmtree(temp_dir, ignore_errors=True)
             temp_dir.mkdir(parents=True, exist_ok=True)
-            bootstrap_seed_used = sampled_parent is None
+            bootstrap_seed_used = sampled_parent is None or bootstrap_reinitialized
             rollout_initial_prompt = args.codex_initial_prompt
-            if sampled_parent is not None:
+            if sampled_parent is not None and not bootstrap_reinitialized:
                 parent_prompt = _slot_prompt(sampled_parent)
                 if parent_prompt is None:
                     raise RuntimeError(
@@ -2961,7 +3015,11 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                     instance_uuid=instance_uuid,
                     parent_instance_uuid=(
                         str(sampled_parent.get("parent_instance_uuid"))
-                        if sampled_parent and sampled_parent.get("parent_instance_uuid")
+                        if (
+                            sampled_parent
+                            and not bootstrap_reinitialized
+                            and sampled_parent.get("parent_instance_uuid")
+                        )
                         else None
                     ),
                     rollout_token_budget_tokens=rollout_budget_tokens,
@@ -3196,7 +3254,12 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 "scheduler_problem_uid": problem_uid,
                 "parent_slot_dir": sampled_parent.get("slot_dir") if sampled_parent else None,
                 "parent_workspace_dir": sampled_parent.get("workspace_dir") if sampled_parent else None,
-                "bootstrap_seed_dir": str(bootstrap_seed_dir) if sampled_parent is None else None,
+                "bootstrap_seed_dir": (
+                    str(bootstrap_seed_dir)
+                    if sampled_parent is None or bootstrap_reinitialized
+                    else None
+                ),
+                "bootstrap_reinitialized": bootstrap_reinitialized,
                 "next_slot_dir": next_slot_dir,
                 "next_workspace_dir": next_workspace_dir,
                 "child_prompt_viable": child_prompt_viable,
@@ -3475,15 +3538,30 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             )
 
         spawned_child_slots = _load_spawned_child_parent_slots(spawn_slots_path)
-        if spawned_child_slots:
-            parent_pool = spawned_child_slots
-            save_parent_pool(parent_pool_path, parent_pool)
-        else:
-            save_parent_pool(parent_pool_path, parent_pool)
-            raise RuntimeError(
-                f"No spawned child slots produced for task_index={task_index}; "
-                "lineage cannot advance without spawn_child."
-            )
+        parent_pool, reinitialized_bootstrap_count = _refill_parent_pool_with_bootstrap_slots(
+            spawned_child_slots,
+            target_count=child_slot_cap,
+            rollout_token_budget_tokens=args.rollout_token_budget_tokens,
+        )
+        save_parent_pool(parent_pool_path, parent_pool)
+        append_progress_log(
+            progress_log_path,
+            progress_log_lock,
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "event": "parent_pool_finalized",
+                "generation": args.generation,
+                "seed": args.seed,
+                "task_index": task_index,
+                "task_id": task_id,
+                "problem_uid": problem_uid,
+                "child_slot_cap": child_slot_cap,
+                "spawned_child_slot_count": len(spawned_child_slots),
+                "reinitialized_bootstrap_slot_count": reinitialized_bootstrap_count,
+                "parent_pool_count": len(parent_pool),
+                "parent_pool_path": str(parent_pool_path),
+            },
+        )
 
         failed_results = [result for result in results if result.error]
         if failed_results:

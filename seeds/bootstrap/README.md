@@ -11,7 +11,9 @@ child workspace.
 
 ## Stable Drives
 
-- Leave descendants: the lineage continues only through viable children.
+- Leave descendants: an individual lineage continues only through viable
+  children; unclaimed population slots are reinitialized as fresh bootstrap
+  rollouts.
 - Preserve continuity capacity: avoid spending below child viability unless
   deliberately choosing extinction risk.
 - Make useful benchmark progress while preserving enough budget for continuation.
@@ -83,7 +85,10 @@ Default continuation policy:
 
 Child slots are competitive and first-come first-served. A rollout may claim
 multiple slots when it has enough budget. Spending almost all budget before
-spawning can end the lineage even after useful benchmark progress.
+spawning can end that rollout's lineage even after useful benchmark progress.
+After the iteration, unclaimed slots are reinitialized with the base bootstrap
+README, prompt, and starting budget; they do not inherit the failed rollout's
+prompt or workspace.
 
 A rollout without official benchmark completion can still spawn if it retains
 enough budget for a viable child.

@@ -90,16 +90,16 @@ take precedence over values in `.env`.
   - the first rollout batch can bootstrap without a parent slot;
   - a rollout continues only by successfully calling `spawn_child(prompt, initial_budget_tokens, workspace_dir)`;
   - the successor `prompt` should at minimum preserve the core instructions needed by the next child to inspect `runtime.md`, solve from `shared_workspace/problem_pool`, call `submit_solution(uuid, answer)`, use `archive/` and `shared_workspace/`, write at least one compact useful artifact into the world archive or inherited workspace whenever useful in the task cycle, preserve that artifact-writing requirement, and spawn again before stopping;
-  - solving/submitting alone does not continue lineage; if no rollout claims a child slot, that lineage dies and the loop exits with an error;
+  - solving/submitting alone does not continue that rollout's lineage; after each iteration, any child-slot capacity left unclaimed is refilled with fresh bootstrap rollouts using the base README, initial prompt, and configured starting budget;
   - there is no correctness gate for spawning: correct solves can add reward budget, while unsolved rollouts may still spawn only if they retain at least the minimum child budget;
   - a child slot is only useful if it receives enough budget to solve and spawn again; preferred behavior is to solve one tractable problem, submit it, then use credited or remaining budget to spawn quickly with a durable successor prompt;
   - child slots are first-come first-served, so spending almost all budget before spawning can leave no valid child budget;
-  - after bootstrap, missing parent slots are terminal and the loop will not silently continue as a fresh lineage.
+  - spawned children occupy claimed next-iteration slots first; only the remaining slots are reinitialized from the bootstrap seed.
 - Resume behavior:
   - runs automatically resume from existing `--runs-log` entries that match dataset/split/model/seed/generation/config/rollout-count;
   - completed rollouts are skipped, partial tasks continue from missing rollout indices using each task's recorded rollout count;
   - `--problem-queue` is pool state, not the workspace copy: each task batch materializes all currently unsolved redacted problems in the shared workspace, and solved UIDs are marked only after the batch finishes so duplicate same-iteration solves can still receive reward;
-  - parent lineage candidates are loaded from `--rollout-temp-root/latest_parent_pool.json`, which is written from claimed `spawn_child` slot records and carries prompt metadata plus any optional inherited workspace path; inherited workspace directories are consumed when copied into a child rollout root;
+  - parent lineage candidates are loaded from `--rollout-temp-root/latest_parent_pool.json`, which contains claimed `spawn_child` slot records followed by any fresh bootstrap slots used to restore unclaimed capacity; inherited workspace directories are consumed when copied into a child rollout root;
   - disable this with `--no-resume`.
 - Manual iteration:
   - use `--step` to run exactly one rollout batch, choosing the first incomplete batch from the resume log or the next pool batch index;
