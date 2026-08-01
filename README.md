@@ -73,9 +73,9 @@ take precedence over values in `.env`.
   - every rollout receives an internal `instance_uuid` recorded in progress logs, run logs, and the ledger;
   - provider-reported model usage is recorded as `token_usage` events after OpenRouter calls and Codex usage events;
   - `submit_solution(uuid, answer)` scores immediately, returns `correct`, `reward`, credited tokens, and updated budget status, and records `solution_scored` events;
-  - correct `submit_solution` calls append one `solve_reward_credit` budget event per rollout/problem pair, defaulting to 300000 tokens via `--solve-reward-token-credit-tokens`; another rollout can also earn reward for the same problem during the same iteration;
+  - correct `submit_solution` calls append one `solve_reward_credit` budget event per rollout/problem pair, defaulting to 1000000 tokens via `--solve-reward-token-credit-tokens`; another rollout can also earn reward for the same problem during the same iteration;
   - there is no answer-file scoring fallback; a rollout that does not call `submit_solution` receives no solution score or solve reward credit;
-  - `--rollout-token-budget-tokens` sets each initial rollout's starting budget, defaulting to 300000 tokens, and stops a rollout when reported usage exhausts it;
+  - `--rollout-token-budget-tokens` sets each initial rollout's starting budget, defaulting to 500000 tokens, and stops a rollout when reported usage exhausts it;
   - rollouts can call `submit_solution(uuid, answer)`, `budget_status()`, `transfer_tokens(target_instance_uuid, amount_tokens)`, and `spawn_child(prompt, initial_budget_tokens, workspace_dir)` as main-loop tools;
   - `transfer_tokens` moves budget from one live same-task rollout to another by instance UUID; the sender's remaining budget decreases and the target's effective budget increases;
   - `spawn_child` stores the required non-empty `prompt` in supervisor-side slot metadata as the child rollout's next initial user text;
@@ -84,7 +84,7 @@ take precedence over values in `.env`.
   - when `workspace_dir` is omitted or blank, the child rollout starts with no inherited workspace files beyond generated runtime files, symlinks, and an empty `seed_output/`;
   - `spawn_child` does not require or create `prompt.md`; prompt text lives in slot metadata/logs outside the child workspace;
   - `spawn_child` is competitive: child slots are first-come first-served, one rollout may claim more than one slot, and calls fail cleanly without budget reservation after the task's slot cap is full;
-  - the claimed slot receives exactly `initial_budget_tokens`; the call fails if `initial_budget_tokens` is below `minimum_child_budget_tokens` (the configured initial rollout budget, default 300000) or if the parent rollout does not have that much budget remaining;
+  - the claimed slot receives exactly `initial_budget_tokens`; the call fails if `initial_budget_tokens` is below `minimum_child_budget_tokens` (the configured initial rollout budget, default 500000) or if the parent rollout does not have that much budget remaining;
   - tool responses are counted when they are sent back as model input on the next model call.
 - Lineage behavior:
   - the first rollout batch can bootstrap without a parent slot;
