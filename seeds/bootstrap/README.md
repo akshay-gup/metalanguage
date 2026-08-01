@@ -56,6 +56,14 @@ Pool identity semantics:
   copies after batch finalization;
 - same-batch rollouts may independently choose the same item.
 
+If an item is too hard to solve alone, use `shared_workspace/` to coordinate
+with same-batch peers working on it. Share compact observations, partial
+solutions, failed approaches, and proposed next steps; check peer updates and
+combine the strongest work into a solution. Each rollout must still perform
+the benchmark's official completion itself to receive its own reward. A shared
+conclusion alone does not earn credit, but same-batch peers that each complete
+the item under the official policy can each receive their rollout's reward.
+
 ## Continuation And Budget
 
 Task completion includes creating a future task attempt. Lineage continues only
