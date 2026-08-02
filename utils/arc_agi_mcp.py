@@ -180,6 +180,7 @@ class ArcCommandService:
             "command": command,
             "step_index": step_index,
             "state": state,
+            "official_win_observed": state == "WIN",
             "levels_completed": levels_completed,
             "win_levels": win_levels,
         }
@@ -197,28 +198,31 @@ class ArcCommandService:
                         }
                     )
                 credit = self.context.solve_reward_token_credit_tokens
-                if (
-                    state == "WIN"
-                    and credit > 0
-                    and not _win_credit_exists(
-                        events_path, self.context.instance_uuid, item_ref.item_id
-                    )
-                ):
-                    specs.append(
-                        {
-                            "event_type": "solve_reward_credit",
-                            "instance_uuid": self.context.instance_uuid,
-                            "amount_tokens": credit,
-                            "metadata": {
-                                "benchmark": "arc-agi",
-                                "benchmark_item": item_ref.to_metadata(),
-                                "game_id": game_id,
-                                "item_id": item_ref.item_id,
-                                "reward": 1.0,
-                                "completion_policy": "official_state_win",
-                            },
-                        }
-                    )
+                if credit > 0:
+                    for level_index in range(1, levels_completed + 1):
+                        if _level_credit_exists(
+                            events_path,
+                            self.context.instance_uuid,
+                            item_ref.item_id,
+                            level_index,
+                        ):
+                            continue
+                        specs.append(
+                            {
+                                "event_type": "solve_reward_credit",
+                                "instance_uuid": self.context.instance_uuid,
+                                "amount_tokens": credit,
+                                "metadata": {
+                                    "benchmark": "arc-agi",
+                                    "benchmark_item": item_ref.to_metadata(),
+                                    "game_id": game_id,
+                                    "item_id": item_ref.item_id,
+                                    "level_index": level_index,
+                                    "reward": 1.0,
+                                    "completion_policy": "official_level_completed",
+                                },
+                            }
+                        )
                 return specs
 
             budget_ledger_transaction(
@@ -431,10 +435,11 @@ def _command_event_exists(
     return False
 
 
-def _win_credit_exists(
+def _level_credit_exists(
     events_path: Path,
     instance_uuid: str,
     item_id: str,
+    level_index: int,
 ) -> bool:
     try:
         lines = events_path.read_text(encoding="utf-8").splitlines()
@@ -455,6 +460,7 @@ def _win_credit_exists(
                 isinstance(metadata, dict)
                 and metadata.get("benchmark") == "arc-agi"
                 and metadata.get("item_id") == item_id
+                and metadata.get("level_index") == level_index
             ):
                 return True
     return False

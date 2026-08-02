@@ -438,17 +438,22 @@ class ArcAgiBenchmarkDriver:
             instance_uuid,
             item_ref,
         )
-        credited_tokens = _safe_win_credit(
+        credited_tokens = _safe_arc_credit(
             context.get("budget_ledger_events"),
             instance_uuid,
             item_ref,
         )
+        official_win_observed = (
+            snapshot.state == "WIN" or accounting["official_win_observed"]
+        )
+        accounting["official_win_observed"] = official_win_observed
         safe = {
             "fitness_pending": False,
-            "completion_policy": "official_state_win",
+            "completion_policy": "official_command_win_observed",
             "attempted": True,
             "game_id": item.game_id,
             "state": snapshot.state,
+            "official_win_observed": official_win_observed,
             "levels_completed": snapshot.levels_completed,
             "win_levels": snapshot.win_levels,
             "available_actions": list(snapshot.available_actions),
@@ -456,7 +461,7 @@ class ArcAgiBenchmarkDriver:
             "operation": snapshot.operation,
             "closed": snapshot.closed,
             "scorecard_available": scorecard_available,
-            "reward": 1.0 if snapshot.state == "WIN" else 0.0,
+            "reward": 1.0 if official_win_observed else 0.0,
             "reward_credit_claimed": credited_tokens > 0,
             "credited_tokens": credited_tokens,
             "configured_solve_reward_token_credit_tokens": (
@@ -470,7 +475,7 @@ class ArcAgiBenchmarkDriver:
             and metrics["scorecard_total_actions"]
             == accounting["accounted_action_count"]
         )
-        solved = snapshot.state == "WIN"
+        solved = official_win_observed
         return BenchmarkOutcome(
             instance_uuid=instance_uuid,
             attempted=True,
@@ -507,7 +512,7 @@ class ArcAgiBenchmarkDriver:
             for outcome in outcomes
             if outcome.solved
             and outcome.item_id in state.by_uuid
-            and outcome.metadata.get("state") == "WIN"
+            and outcome.metadata.get("official_win_observed") is True
         }
         with self._state_lock():
             persisted = self._load_state_locked()
@@ -568,7 +573,7 @@ class ArcAgiBenchmarkDriver:
                 for outcome in outcomes
             ),
             "fitness_pending": False,
-            "completion_policy": "official_state_win",
+            "completion_policy": "official_command_win_observed",
         }
         self.finalization_summary = summary
         if self.config.audit_path is not None:
@@ -766,6 +771,7 @@ def _safe_command_accounting(
                 metadata = event.get("metadata")
                 if (
                     isinstance(metadata, dict)
+                    and metadata.get("benchmark") == "arc-agi"
                     and metadata.get("benchmark_item") == item_ref.to_metadata()
                 ):
                     events.append(metadata)
@@ -776,6 +782,11 @@ def _safe_command_accounting(
     )
     return {
         "action_accounting_source": "benchmark_command_completed",
+        "official_win_observed": any(
+            metadata.get("official_win_observed") is True
+            or metadata.get("state") == "WIN"
+            for metadata in events
+        ),
         "accounted_command_count": sum(commands.values()),
         "accounted_action_count": sum(
             count for command, count in commands.items() if command != "RESET"
@@ -787,7 +798,7 @@ def _safe_command_accounting(
     }
 
 
-def _safe_win_credit(
+def _safe_arc_credit(
     events_path: Any,
     instance_uuid: str,
     item_ref: BenchmarkItemRef,

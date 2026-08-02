@@ -317,7 +317,7 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
             self.assertTrue(path_a.is_file())
             driver.close()
 
-    def test_win_credit_is_immediate_once_and_rollout_local(self) -> None:
+    def test_level_credits_are_immediate_once_and_rollout_local(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             driver, _ = self._driver(root)
@@ -349,7 +349,11 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
                 )
                 next_step = 0
 
-                def result(operation: str, state: str) -> ArcAgiCommandResult:
+                def result(
+                    operation: str,
+                    state: str,
+                    levels_completed: int = 0,
+                ) -> ArcAgiCommandResult:
                     nonlocal next_step
                     step_index = next_step
                     next_step += 1
@@ -358,8 +362,8 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
                         {
                             "game_id": selected_game,
                             "state": state,
-                            "levels_completed": 1 if state == "WIN" else 0,
-                            "win_levels": 1,
+                            "levels_completed": levels_completed,
+                            "win_levels": 2,
                             "step_index": step_index,
                             "operation": operation,
                         },
@@ -376,7 +380,9 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
                     path.chmod(0o600)
                     return result("reset", "NOT_FINISHED")
 
-                action_states = iter(("GAME_OVER", "WIN", "WIN"))
+                action_results = iter(
+                    (("NOT_FINISHED", 1), ("WIN", 2), ("WIN", 2))
+                )
                 service = ArcCommandService(
                     load_context(
                         Path(
@@ -387,7 +393,7 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
                     ),
                     initialize=initialize,
                     step=lambda *_args, **_kwargs: result(
-                        "action1", next(action_states)
+                        "action1", *next(action_results)
                     ),
                     selected_game=lambda _path: selected_game,
                 )
@@ -397,19 +403,19 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
                     read_budget_status(events_path, instance_uuid)[
                         "tokens_transferred_in"
                     ],
-                    0,
+                    50,
                 )
                 service.action("ACTION1")
                 credited = read_budget_status(events_path, instance_uuid)
-                self.assertEqual(credited["tokens_transferred_in"], 50)
-                self.assertEqual(credited["effective_rollout_token_budget_tokens"], 350)
-                self.assertEqual(credited["tokens_remaining"], 350)
+                self.assertEqual(credited["tokens_transferred_in"], 100)
+                self.assertEqual(credited["effective_rollout_token_budget_tokens"], 400)
+                self.assertEqual(credited["tokens_remaining"], 400)
                 service.action("ACTION1")
                 self.assertEqual(
                     read_budget_status(events_path, instance_uuid)[
                         "tokens_transferred_in"
                     ],
-                    50,
+                    100,
                 )
                 events = [
                     json.loads(line) for line in events_path.read_text().splitlines()
@@ -419,8 +425,11 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
                     for event in events
                     if event["event_type"] == "solve_reward_credit"
                 ]
-                self.assertEqual(len(credits), 1)
-                self.assertEqual(credits[0]["amount_tokens"], 50)
+                self.assertEqual(len(credits), 2)
+                self.assertEqual([event["amount_tokens"] for event in credits], [50, 50])
+                self.assertEqual(
+                    [event["metadata"]["level_index"] for event in credits], [1, 2]
+                )
                 self.assertNotIn("guid", json.dumps(credits))
                 self.assertNotIn("card", json.dumps(credits))
             driver.close()
@@ -811,7 +820,11 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
                             "game_id": selected_game,
                             "command": "ACTION1",
                             "step_index": step_index,
-                            "state": "NOT_FINISHED",
+                            "state": (
+                                "WIN"
+                                if rollout is rollout_b and step_index == 2
+                                else "NOT_FINISHED"
+                            ),
                             "levels_completed": 2,
                             "win_levels": 4,
                         },
@@ -844,7 +857,7 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
                 **{
                     **snapshots[str(path_b)].__dict__,
                     "closed": True,
-                    "state": "WIN",
+                    "state": "NOT_FINISHED",
                 }
             )
             append_budget_event(
@@ -858,14 +871,17 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
                     "game_id": selected_game,
                     "item_id": selected_ref.item_id,
                     "reward": 1.0,
-                    "completion_policy": "official_state_win",
+                    "level_index": 4,
+                    "completion_policy": "official_level_completed",
                 },
             )
             closed_outcome = driver.collect_outcome(
                 batch, instance_uuid="b", context=rollout_b.context
             )
             self.assertTrue(closed_outcome.metadata["closed"])
-            self.assertEqual(closed_outcome.metadata["state"], "WIN")
+            self.assertEqual(closed_outcome.metadata["state"], "NOT_FINISHED")
+            self.assertTrue(closed_outcome.metadata["official_win_observed"])
+            self.assertTrue(closed_outcome.solved)
             self.assertFalse(closed_outcome.metadata["scorecard_available"])
             self.assertTrue(closed_outcome.metadata["reward_credit_claimed"])
             self.assertEqual(closed_outcome.metadata["credited_tokens"], 50)
