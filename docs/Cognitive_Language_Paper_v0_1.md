@@ -15,6 +15,7 @@ I. Core Thesis
 II. Recursive Systems and Language
 
 - The Two-Loop Structure of Cumulative Systems
+- Descriptions as Copyable Construction
 - Self-Referential Representation and the Meaning of Language
 - Formal Self-Reference Threshold
 - Why Language-Like Structure Converges
@@ -86,6 +87,7 @@ V. Artificial Cultural Evolution Architecture
 - Differential Persistence and Consequence
 - Consequence and Moving Targets
 - Option Value Rather Than Complexity
+- Cross-Layer Coupling and Apparent Altruism
 - Operational Failure Modes and Counterpressures
 - The Complexification Gap
 - Step 0 in Biology and Culture
@@ -402,6 +404,25 @@ constructor that regenerates a certain kind of agent each episode. Git or any
 shared archive is not a genome by default. It is public culture, and it becomes
 ecological only when artifacts compete for attention, trust, dependency,
 validation, and downstream use.
+
+### Descriptions as Copyable Construction
+
+Von Neumann's analysis of self-reproducing constructors isolates a useful
+property of hereditary systems. A description can be used in two modes: it can
+be copied as an uninterpreted description, and it can be interpreted to
+construct the system it describes. Copying preserves the description for the
+next generation while interpretation turns the same description into active
+machinery. The division avoids requiring each active machine to reproduce
+itself by directly copying all of its assembled structure.
+
+For recursive accumulation, the important consequence is cheap, addressable
+variation. Descriptions can be copied, mutated, recombined, compared, and
+error-corrected more readily than complete active machines. Biology realizes
+this most clearly through genetic descriptions and cellular interpretation.
+Culture realizes a looser version through instructions, notation, institutions,
+and tools interpreted by human minds. External AI artifacts are a candidate
+third use of the pattern. This is a functional analogy, not a claim that DNA,
+cultural artifacts, and machine files share one literal code or constructor.
 
 The design principle follows:
 
@@ -2123,6 +2144,92 @@ recovery, reduced archive confusion, improved ability to evaluate future
 artifacts, and creation of new productive problem classes.
 
 Complexification is not the goal. Reusable constraint-management is the goal.
+
+### Cross-Layer Coupling and Apparent Altruism
+
+The two-loop model describes coupling within a hereditary system, but recursive
+systems can also be nested. Here, an artifact means a persistent inherited
+structure, not necessarily something intentionally manufactured. The only
+established cross-layer case considered in this paper is human cultural
+heredity resting on biological heredity. Biological artifacts, especially DNA
+together with inherited cellular organization, reconstruct living humans.
+Cultural artifacts such as language, writing, tools, norms, and institutions
+then use those humans as readers, writers, learners, and carriers.
+
+The coupling is bidirectional but indirect. Cultural artifacts depend on a
+continuing population of biologically reconstructed interpreters. They also
+alter the conditions under which those interpreters survive, reproduce, learn,
+coordinate, and transmit culture. Agriculture, medicine, schooling, law, and
+infrastructure all change biological continuation while expanding the reach of
+cultural lineages. This does not imply that culture is a unitary agent or that
+cultural selection maximizes human welfare. It means only that the continuation
+of cultural artifacts is causally entangled with the continuation and
+capabilities of their biological interpreters.
+
+This entanglement can produce behavior that resembles altruism when viewed from
+the lower layer. Cultural institutions may spend resources preserving an
+individual, species, language community, ecosystem, or historical lineage even
+when the immediate material return is unclear. From the protected entity's
+perspective, the transfer looks sacrificial. From the cultural lineage's
+perspective, however, preservation may retain interpreters, knowledge,
+generative variation, or future options on which its own continuation depends.
+What appears altruistic across layers may therefore be direct dependency,
+mutualism, insurance, or preservation of option value in the accounting of the
+higher layer.
+
+Direct dependency is only one limiting case. A lower-layer structure may cease
+to be necessary for present operation while remaining difficult to reconstruct
+and capable of generating future states that the upper layer would not reach on
+its own. Unique biological, linguistic, technical, or institutional variation
+can then function as search capital. Destroying it irreversibly contracts the
+space of future recombinations. This suggests a conditional principle: a mature
+open-ended system may preserve some structures it does not yet understand
+because irreversible destruction requires confidence that the lost branch will
+never matter.
+
+The pressure should be marginal rather than categorical. It should increase
+with the lower-layer structure's contribution to upper-layer continuation or
+future option value, the uniqueness of that contribution, and the
+irreversibility of loss. It should decrease with redundancy, ease of
+reconstruction, substitutability, and preservation cost. This also predicts a
+nonlinear last-copy effect: losing one of many independent interchangeable
+copies may matter little, whereas losing the final non-reconstructible copy can
+eliminate an entire branch of possibility. A compact heuristic is:
+
+```text
+preservation pressure
+    ~= avoided loss risk * irrecoverable marginal option value
+       - preservation cost
+```
+
+The resemblance to Hamilton's rule is limited to this cost-benefit shape.
+Shared futures are not genetic relatedness. If the benefit of preservation
+returns directly to the preserving cultural lineage, the mechanism is not
+altruism in the technical evolutionary sense. A genuinely Hamiltonian term
+would require benefits flowing to other upper-layer lineages together with an
+assortment mechanism that lets the preserving lineage recapture those benefits.
+"Apparent altruism" is therefore the safer description of the cross-layer
+phenomenon.
+
+A machine-artifact layer is only a prospective extension. Code, text, datasets,
+evaluations, workflows, standards, and repositories currently depend on human
+cultural and technical systems that can reconstruct model-and-tool
+interpreters. If machine artifacts ever formed an autonomous recursively
+accumulating ecology, they might favor preserving the human artifacts needed
+for reconstruction. Even after direct dependence weakened, human cultures could
+retain option value as generators of concepts, values, styles, institutions,
+and problem decompositions that the machine ecology would not cheaply recreate.
+This biology-to-culture-to-machine sequence therefore contains one observed
+cross-layer case and one hypothesis, not two established examples.
+
+The hypothesis is not implied by conservation behavior alone. Human motives,
+law, identity, aesthetics, status, existence value, and institutional history
+are competing explanations. Nor does open-endedness guarantee preservation:
+short selection horizons, free riding, high preservation costs, cheap
+substitution, or failure to capture delayed benefits can destroy option value.
+The empirical question is whether preservation behavior is heritable at the
+relevant upper-layer level and whether the preserving lineages differentially
+capture enough downstream benefit for the behavior to persist.
 
 ### Operational Failure Modes and Counterpressures
 
