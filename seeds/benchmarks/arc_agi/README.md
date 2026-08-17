@@ -22,5 +22,5 @@ mcp__arc_agi__ACTION7()
 ```
 
 `ACTION6` requires integer `x` and `y` coordinates in `0..63`. Use the returned
-ordered frames, official state, and available actions. The first official `WIN`
-for this rollout may add solve-credit budget.
+ordered frames, official state, and available actions. Official `WIN` state is
+the completion signal used for scoring and retirement from future pools.

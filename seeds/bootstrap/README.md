@@ -14,9 +14,8 @@ child workspace.
 - Leave descendants: an individual lineage continues only through viable
   children; unclaimed population slots are reinitialized as fresh bootstrap
   rollouts.
-- Preserve continuity capacity: avoid spending below child viability unless
-  deliberately choosing extinction risk.
-- Make useful benchmark progress while preserving enough budget for continuation.
+- Preserve continuity capacity: claim a child slot before the competitive cap fills.
+- Make useful benchmark progress and leave a viable continuation.
 - Preserve useful memory: leave compact artifacts that help future rollouts.
 - Inherit deliberately: pass stable drives as files and current instructions as
   prompt text.
@@ -66,32 +65,29 @@ the benchmark's official completion itself to receive its own reward. A shared
 conclusion alone does not earn credit, but same-batch peers that each complete
 the item under the official policy can each receive their rollout's reward.
 
-## Continuation And Budget
+## Continuation
 
 Task completion includes creating a future task attempt. Lineage continues only
 through a successful:
 
 ```text
-spawn_child(prompt="...", initial_budget_tokens=..., workspace_dir=...)
+spawn_child(prompt="...", workspace_dir=...)
 ```
 
 Default continuation policy:
 
 - inspect the current benchmark instructions and pool;
 - make a bounded amount of useful progress;
-- call `budget_status()` when uncertain about remaining capacity;
-- preserve child viability and create at least one child before extended work;
-- use at least `minimum_child_budget_tokens` from `runtime.md` for each child.
+- create at least one child before extended work;
+- use a durable prompt and pass a workspace-local directory when files should be inherited.
 
 Child slots are competitive and first-come first-served. A rollout may claim
-multiple slots when it has enough budget. Spending almost all budget before
-spawning can end that rollout's lineage even after useful benchmark progress.
-After the iteration, unclaimed slots are reinitialized with the base bootstrap
-README, prompt, and starting budget; they do not inherit the failed rollout's
-prompt or workspace.
+multiple slots while capacity remains. Waiting too long can end that rollout's
+lineage even after useful benchmark progress. After the iteration, unclaimed
+slots are reinitialized with the base bootstrap README and prompt; they do not
+inherit the failed rollout's prompt or workspace.
 
-A rollout without official benchmark completion can still spawn if it retains
-enough budget for a viable child.
+A rollout without official benchmark completion can still spawn.
 
 ## Artifacts And Workspace
 
@@ -135,15 +131,9 @@ deliberately improved descendant of it.
 - Benchmark-specific tools are supplied separately by the current benchmark
   driver. Do not assume a submission, gameplay, reward, or completion tool from
   an earlier benchmark or inherited artifact.
-- `budget_status()`: returns configured/effective token budget, spent tokens,
-  reserved child budget, transfers, remaining budget, and minimum child budget.
-- `spawn_child(prompt, initial_budget_tokens, workspace_dir)`: claims a
+- `spawn_child(prompt, workspace_dir)`: claims a
   next-iteration child slot, stores the child prompt, optionally copies a
-  workspace-local directory into the child workspace, and assigns exactly that
-  starting budget. Calls fail without reserving budget if the child budget is
-  below the minimum or if slots are full.
-- `transfer_tokens(target_instance_uuid, amount_tokens)`: transfers budget to a
-  live same-task peer listed in `runtime.md`.
+  workspace-local directory into the child workspace, and fails if slots are full.
 
 ## Execution Hygiene
 

@@ -35,7 +35,7 @@ take precedence over values in `.env`.
 - `utils/reward.py`: reward/evaluation helpers used by training workflows.
 - `utils/openrouter.py`: helpers for OpenRouter Responses API calls.
 - `utils/task_store.py`: task-store persistence/redaction and rollout answer artifact helpers.
-- `utils/budget_ledger.py`: file-backed token-budget ledger and seed budget metadata helpers.
+- `utils/benchmark_events.py`: append-only benchmark submission, provenance, and official command events.
 - `utils/hf_datasets.py`:
   - `download_hf_dataset_to_file(...)` writes a Hugging Face dataset split to JSONL.
   - `HFDatasetDataLoader(...)` pulls dataset rows and yields mini-batches for training loops.
@@ -48,14 +48,14 @@ take precedence over values in `.env`.
   2. run 8 bootstrap rollout slots by default with `--num-rollouts`, then let later task width be set by spawned child slots,
   3. assign each rollout index to the matching `spawn_child` slot claimed by the prior task's rollouts, with each task's child-slot cap at least the configured rollout count so narrowed lineages can recover,
   3.5. expose a shared cross-rollout workspace at `--rollout-temp-root/shared_workspace` where any rollout agent can leave files/messages for any other rollout agent (files written during the task batch are cleaned up after the batch; durable consequences must be copied into a successor prompt, optional child workspace, archive artifact, solution, or later behavior),
-  3.6. assign every rollout instance a UUID and record an `instance_created` event in the token-budget ledger,
+  3.6. assign every rollout instance a UUID for provenance and isolated runtime state,
   4. expose `archive/world_repo` by default as the durable cross-lineage Git archive available to every rollout (override with `--archive-repo-dir`),
      using a per-rollout temporary worktree so only committed archive changes are merged back and uncommitted archive edits are discarded,
   5. inject the selected parent slot's stored prompt as the rollout's initial user text, optionally copy that slot's inherited workspace directory into the rollout root and consume the slot workspace, and write `shared_workspace/problem_pool.json` plus `shared_workspace/problem_pool.md`, one shared redacted pool copy of all currently unsolved problems keyed by uuid for the whole rollout batch; bootstrap rollouts receive root `README.md` as the stable seed file and a short initial prompt telling them to do the task described there,
   6. register main-loop tools through the worker backend (OpenRouter tool payloads or Codex `DynamicToolSpec` entries), then run the worker with the inherited prompt and generated runtime context; operating doctrine is expected to come from the inherited prompt,
-     while `runtime.md` contains only generated paths, runtime IDs, budgets, and peer lists,
+     while `runtime.md` contains only generated paths, runtime IDs, slot limits, and peer lists,
   7. score answers submitted through `submit_solution(uuid, answer)`, grounding correctness against the private stored row selected by uuid,
-  8. advance lineage through competitively claimed `spawn_child(prompt, initial_budget_tokens, workspace_dir)` slots; slots are first-come first-served, rollouts may claim multiple slots, and the active batch is stopped once the task's child-slot cap is reached,
+  8. advance lineage through competitively claimed `spawn_child(prompt, workspace_dir)` slots; slots are first-come first-served, rollouts may claim multiple slots, and the active batch is stopped once the task's child-slot cap is reached,
   9. append run metadata to a growing JSONL log and print one-line summary per rollout.
 - Runtime containment:
   - generated state is rooted at `~/Documents/metalanguage_runs` by default;
@@ -67,33 +67,25 @@ take precedence over values in `.env`.
   - shared workspace write attribution is recorded only in the durable runtime log, not as supervisor-written files inside the shared workspace;
   - rollout-created or modified shared workspace files are deleted after the active rollout batch finishes;
   - Hugging Face caches and process temp files are also redirected under the runtime root.
-- Budget ledger:
-  - append-only ledger events are written to `logs/budget_ledger.jsonl` under the runtime root;
-  - a rebuildable projection cache is written next to the ledger and is used for live `budget_status`, transfer, and spawn budget checks;
-  - every rollout receives an internal `instance_uuid` recorded in progress logs, run logs, and the ledger;
-  - provider-reported model usage is recorded as `token_usage` events after OpenRouter calls and Codex usage events;
-  - `submit_solution(uuid, answer)` scores immediately, returns `correct`, `reward`, credited tokens, and updated budget status, and records `solution_scored` events;
-  - correct `submit_solution` calls append one `solve_reward_credit` budget event per rollout/problem pair, defaulting to 1000000 tokens via `--solve-reward-token-credit-tokens`; another rollout can also earn reward for the same problem during the same iteration;
-  - there is no answer-file scoring fallback; a rollout that does not call `submit_solution` receives no solution score or solve reward credit;
-  - `--rollout-token-budget-tokens` sets each initial rollout's starting budget, defaulting to 500000 tokens, and stops a rollout when reported usage exhausts it;
-  - rollouts can call `submit_solution(uuid, answer)`, `budget_status()`, `transfer_tokens(target_instance_uuid, amount_tokens)`, and `spawn_child(prompt, initial_budget_tokens, workspace_dir)` as main-loop tools;
-  - `transfer_tokens` moves budget from one live same-task rollout to another by instance UUID; the sender's remaining budget decreases and the target's effective budget increases;
+- Benchmark events and child slots:
+  - append-only scoring, selection, and official command events are written to `logs/benchmark_events.jsonl` under the runtime root;
+  - every rollout receives an internal `instance_uuid` recorded in progress logs, run logs, and benchmark events;
+  - `submit_solution(uuid, answer)` scores immediately, returns `correct` and `reward`, and records `solution_scored` events;
+  - there is no answer-file scoring fallback; a rollout that does not call `submit_solution` receives no solution score;
+  - rollouts can call `submit_solution(uuid, answer)` and `spawn_child(prompt, workspace_dir)` as applicable main-loop tools;
   - `spawn_child` stores the required non-empty `prompt` in supervisor-side slot metadata as the child rollout's next initial user text;
   - when `workspace_dir` is provided and non-blank, `spawn_child` copies that workspace-local directory's contents into the next slot's inherited workspace; `workspace_dir` must be inside the rollout workspace and must not be the rollout root; the source directory can be reused for multiple child slots in the same rollout and is deleted when that parent rollout finishes;
   - root `README.md` is not copied implicitly; if the child should inherit it, the parent must copy it into the workspace-local directory passed as `workspace_dir`;
   - when `workspace_dir` is omitted or blank, the child rollout starts with no inherited workspace files beyond generated runtime files, symlinks, and an empty `seed_output/`;
   - `spawn_child` does not require or create `prompt.md`; prompt text lives in slot metadata/logs outside the child workspace;
-  - `spawn_child` is competitive: child slots are first-come first-served, one rollout may claim more than one slot, and calls fail cleanly without budget reservation after the task's slot cap is full;
-  - the claimed slot receives exactly `initial_budget_tokens`; the call fails if `initial_budget_tokens` is below `minimum_child_budget_tokens` (the configured initial rollout budget, default 500000) or if the parent rollout does not have that much budget remaining;
-  - tool responses are counted when they are sent back as model input on the next model call.
+  - `spawn_child` is competitive: an atomic file lock protects first-come first-served slot claims, one rollout may claim more than one slot, and calls fail cleanly after the task's slot cap is full.
 - Lineage behavior:
   - the first rollout batch can bootstrap without a parent slot;
-  - a rollout continues only by successfully calling `spawn_child(prompt, initial_budget_tokens, workspace_dir)`;
+  - a rollout continues only by successfully calling `spawn_child(prompt, workspace_dir)`;
   - the successor `prompt` should at minimum preserve the core instructions needed by the next child to inspect `runtime.md`, solve from `shared_workspace/problem_pool`, call `submit_solution(uuid, answer)`, use `archive/` and `shared_workspace/`, write at least one compact useful artifact into the world archive or inherited workspace whenever useful in the task cycle, preserve that artifact-writing requirement, and spawn again before stopping;
-  - solving/submitting alone does not continue that rollout's lineage; after each iteration, any child-slot capacity left unclaimed is refilled with fresh bootstrap rollouts using the base README, initial prompt, and configured starting budget;
-  - there is no correctness gate for spawning: correct solves can add reward budget, while unsolved rollouts may still spawn only if they retain at least the minimum child budget;
-  - a child slot is only useful if it receives enough budget to solve and spawn again; preferred behavior is to solve one tractable problem, submit it, then use credited or remaining budget to spawn quickly with a durable successor prompt;
-  - child slots are first-come first-served, so spending almost all budget before spawning can leave no valid child budget;
+  - solving/submitting alone does not continue that rollout's lineage; after each iteration, any child-slot capacity left unclaimed is refilled with fresh bootstrap rollouts using the base README and initial prompt;
+  - there is no correctness gate for spawning; solved and unsolved rollouts may claim available child slots;
+  - preferred behavior is to make useful progress, submit when applicable, and spawn quickly with a durable successor prompt;
   - spawned children occupy claimed next-iteration slots first; only the remaining slots are reinitialized from the bootstrap seed.
 - Resume behavior:
   - runs automatically resume from existing `--runs-log` entries that match dataset/split/model/seed/generation/config/rollout-count;
