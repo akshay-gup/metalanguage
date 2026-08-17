@@ -91,7 +91,7 @@ V. Artificial Cultural Evolution Architecture
 - Operational Failure Modes and Counterpressures
 - The Complexification Gap
 - Step 0 in Biology and Culture
-- Token Currency as Minimal Physics
+- Competitive Continuation as Minimal Selection
 - Interaction Primitives
 - Emergent Ecology
 - Real-World Correspondence
@@ -179,12 +179,11 @@ language-like process structure should emerge only when context limits,
 transmission gaps, scarce attention, and grounded reuse make such structure
 necessary.
 
-The architecture further includes a token currency mechanism where compute
-budget functions as a proportional continuation medium. Lineages earn tokens by
-solving tasks and spend tokens to spawn rollouts, creating a route from grounded
-success to future search capacity. This mirrors the way biological and cultural
-systems couple persistence to energy and resource dynamics rather than to fixed
-reproductive quotas.
+The architecture further includes competitive continuation slots. Lineages
+must create bounded successor prompts and claim finite next-generation slots,
+while unclaimed capacity is restored with fresh bootstrap rollouts. This couples
+persistence to explicit inheritance behavior without introducing a simulated
+currency.
 
 ### Introduction
 
@@ -247,9 +246,9 @@ is expected to converge under constraints of finite media, lossy transmission,
 bounded readers, limited learning, and selection for reuse. Fourth, we diagnose
 why current LLM module and memory systems tend to plateau: they often provide
 storage without necessity, adoption without causal use, and selection at the
-wrong level. Finally, we propose a minimal architecture with token currency as
-the allocation mechanism, allowing endogenous ecological pressure to emerge
-without predefining mature social rules, and describe experiments for artificial
+wrong level. Finally, we propose a minimal architecture with competitive child
+slots and bootstrap refill, allowing ecological pressure to emerge without
+predefining mature social rules, and describe experiments for artificial
 cultural evolution in LLM systems.
 
 ### Synthesis
@@ -276,12 +275,11 @@ verification, and downstream consequences. Under those pressures, compact
 process language is not an aesthetic goal. It is the structure that makes
 cumulative continuation possible.
 
-The architecture also requires proportional continuation. Lineages that solve
-tasks efficiently should accumulate more future attempts, while lineages that
-waste scarce context and compute should shrink. Token currency supplies that
-selection-energy layer. Interaction primitives such as reading, copying, forking,
-citing, patching, and allocating earned tokens then make specialization and
-transfer dynamics possible without predefining a mature social ontology.
+The architecture also requires differential continuation. Competitive child
+slots make successor construction and transmissible handoffs consequential,
+while bootstrap refill preserves exploration. Interaction primitives such as
+reading, copying, forking, citing, and patching make specialization and exchange
+possible without predefining a mature social ontology.
 
 ### Target of Explanation: Autonomous Recursive Accumulation
 
@@ -567,7 +565,7 @@ It is the scalable solution to a repeated transmission problem.
 For LLMs, the important transmission gap is the fresh-context boundary. At the
 end of a rollout, internal state dies. Everything that matters for continuation
 must be externalized. A future run can only reconstruct what the substrate makes
-available within its bounded context and retrieval budget. The gap forces the
+available within its bounded context and retrieval allowance. The gap forces the
 system to encode process into persistent artifacts. If those artifacts are under
 selection, the pressure should favor compact, modular, reconstructible process
 representations.
@@ -1397,7 +1395,7 @@ AI cultural evolution:
 - rollout episode: phenotype/interactor
 - lineage seed: vertical cultural inheritance
 - Git/archive: shared cultural inheritance
-- tasks, budgets, and context limits: ecology
+- tasks, resource limits, and context limits: ecology
 
 The AI seed is not DNA. It is closer to apprenticeship notes, lab notebooks,
 oral tradition, a monastery rule, a research group's inherited style, a startup
@@ -1622,7 +1620,7 @@ Important process-level structures include:
 - evaluation loops
 - tool sequencing
 - checkpointing
-- budget allocation
+- resource allocation
 - adaptation rules
 - stopping conditions
 - archive retrieval policies
@@ -1698,7 +1696,7 @@ successfully adapted, and retained because they keep helping. Useful measures:
 - success after adaptation
 - retrieval frequency corrected for usefulness
 - decay under staleness
-- explicit budget costs for archive usage
+- explicit costs for archive usage
 - dependency formation
 - consumer-written validation
 
@@ -1837,7 +1835,7 @@ downstream consequences can be large.
 
 Possible AI filters:
 
-- retrieval budgets
+- retrieval limits
 - trust scores
 - provenance requirements
 - validation harnesses
@@ -1885,8 +1883,7 @@ allocating bounded cognition.
 
 ### Vertical Competition and Delayed Reproductive Value
 
-Vertical inheritance has force only if there is differential continuation under
-scarce rollout budget. If every seed continues equally, bad doctrine, bloated
+Vertical inheritance has force only if continuation slots are scarce. If every seed continues equally, bad doctrine, bloated
 seeds, stale warnings, fake artifacts, and poor attention policies all persist.
 The system becomes accumulation rather than heredity.
 
@@ -1898,10 +1895,9 @@ Vertical competition can decide:
 - which lineages receive more compute or archive access
 - which unusual lineages are preserved for exploration
 
-This should not be winner-take-all. A simple regime gives each lineage a small
-guaranteed reproduction budget, allocates extra children to stronger lineages,
-reserves exploration budget for young or unusual lineages, and prunes
-repeatedly failing or bloated lineages.
+This should not be winner-take-all. A simple regime combines competitive child
+slots with bootstrap refill so unusual or under-sampled approaches remain
+possible while repeatedly failing or bloated lineages can disappear.
 
 Immediate viability and delayed reproductive value should be separated.
 Immediate score asks whether a child is viable enough to continue: task
@@ -1915,9 +1911,9 @@ A practical loop is:
 1. A parent lineage spawns several children.
 2. Each child attempts tasks and writes a candidate next seed.
 3. Top children by immediate viability enter probation.
-4. Probation seeds receive limited descendant budget.
+4. Probation seeds receive limited descendant slots.
 5. Descendant performance updates the reproductive credit of the seed.
-6. Seeds whose descendants keep doing well receive more future budget.
+6. Seeds whose descendants keep doing well receive more future opportunities.
 7. Seeds whose descendants fail, bloat, or stagnate are pruned.
 
 This also explains why lineages leave good seeds. A prompt can request useful
@@ -1937,7 +1933,7 @@ Vertical lineage loop:
 4. Each child attempts tasks and writes a candidate next seed.
 5. Immediate viability selects which seeds enter probation.
 6. Descendants from probationary seeds reveal reproductive value.
-7. Lineages with better descendant outcomes receive more future budget.
+7. Lineages with better descendant outcomes receive more future opportunities.
 
 Archive artifact loop:
 
@@ -2010,10 +2006,10 @@ Do not start with:
 - perfect causal attribution
 - large institutional role systems
 
-One concrete starter regime is a small active population of lineages. Each
-lineage receives a guaranteed child budget, stronger lineages receive extra
-children, an exploration budget preserves novelty, weak lineages are pruned
-after repeated failure, and strong lineages may fork. Each child writes a
+One concrete starter regime is a small active population of lineages.
+Competitive child slots determine continuation, bootstrap refill preserves
+novelty, weak lineages can disappear after repeated failure, and strong lineages
+may fork. Each child writes a
 bounded `next_seed.md`; full workspaces are discarded; seed quality is judged
 mainly by descendant performance rather than immediate aesthetics.
 
@@ -2258,7 +2254,7 @@ high-visibility artifacts.
 
 Stagnant old lineages: long-lived lineages monopolize resources without
 improving. Counterpressures include age discounting, recent-performance
-weighting, stagnation penalties, and exploration budget for young lineages.
+weighting, stagnation penalties, and exploration capacity for young lineages.
 
 Shallow novelty: cross-lineage borrowing creates many variants but little depth.
 Counterpressures include vertical continuity, descendant viability, and
@@ -2333,40 +2329,23 @@ employment, and patronage. The mature institutions differ, but the primitive
 fact is shared: resources can move between bounded actors, and those transfers
 reshape the local ecology.
 
-### Token Currency as Minimal Physics
+### Competitive Continuation as Minimal Selection
 
-Tokens function as the conserved scarce medium through which task success
-becomes continuation capacity. They are not merely an accounting device. If
-rollouts cost tokens and externally verified success earns future tokens, then
-lineages face direct pressure to solve tasks cheaply, externalize reusable
-process, and allocate context carefully.
+Finite next-generation slots make successor construction consequential. A
+rollout continues only by producing a usable handoff and claiming a slot before
+capacity fills. Unclaimed slots are repopulated from a stable bootstrap seed,
+which prevents a weak generation from permanently collapsing exploration.
 
-The minimal setup is:
-
-- a global token inflow or generation budget;
-- token cost for input, output, tools, and archive access;
-- earned tokens for externally scored task success;
-- lineage balances that fund future rollouts;
-- bounded context and bounded seeds;
-- persistent vertical lineage and public archive channels.
-
-This replaces uniform allocation among successful rollouts with proportional
-continuation. Efficient lineages accumulate more attempts. Inefficient lineages
-shrink or disappear. Artifact retrieval also receives an endogenous price:
-reading an artifact is valuable only when the expected savings in search,
-context, error, or repair exceed the cost of retrieving and integrating it.
-
-Token currency alone is not open-ended ecology. It can still drive convergence
-on a static benchmark. It becomes ecological only when successful artifacts alter
-future conditions by becoming dependencies, shortcuts, standards, risks,
-interfaces, or maintenance obligations for later agents.
+Slot competition alone is not open-ended ecology. It becomes ecological only
+when successful artifacts alter future conditions by becoming dependencies,
+shortcuts, standards, risks, interfaces, or maintenance obligations for later
+agents.
 
 ### Interaction Primitives
 
 The system should expose primitive interactions, not a mature social ontology.
 Agents may read public artifacts, copy or fork them, cite dependencies, publish
-counterevidence, propose patches, and allocate earned tokens under audited
-rules. Direct in-place modification of another lineage's artifact should be
+counterevidence, and propose patches. Direct in-place modification of another lineage's artifact should be
 controlled by provenance and validation; otherwise the archive becomes writable
 noise rather than a selective substrate.
 
@@ -2375,15 +2354,13 @@ institutional dynamics possible without coding those categories as initial
 roles. The interaction space is designed. The interaction rules are allowed to
 stabilize only if they help descendants operate under scarcity.
 
-A conservative first implementation need not permit unrestricted token transfer.
-It can assign delayed creator credit when independent descendants use an artifact
-and measurably improve score, cost, robustness, or task reach. Direct transfers
-can then be tested as a stronger ecological variant, with collusion and reward
-laundering treated as expected failure modes.
+A conservative first implementation can measure delayed creator value when
+independent descendants use an artifact and measurably improve score, cost,
+robustness, or task reach, without adding an exchange currency.
 
 ### Emergent Ecology
 
-A token economy becomes an ecology when artifacts form load-bearing layers. A
+An inheritance system becomes an ecology when artifacts form load-bearing layers. A
 tool saves search for a strategy. A strategy makes an index useful. An index
 makes conventions valuable. Conventions lower integration cost and make more
 complex tools usable. The point is not a designed hierarchy, but a dependency
@@ -2411,8 +2388,8 @@ the system accumulates junk faster than it accumulates culture.
 
 ### Real-World Correspondence
 
-This setup is a simplified model of real LLM use. Teams have budgets; model
-calls cost money; successful workflows create value; useful tools, prompts,
+This setup is a simplified model of real LLM use. Model calls consume real
+resources; successful workflows create value; useful tools, prompts,
 APIs, and procedures spread; inefficient teams shrink; open-source artifacts are
 forked; internal tools become dependencies; platforms create ecosystems.
 
@@ -2431,9 +2408,8 @@ those structures can appear if they solve real continuation problems.
 - Git archive: public cross-lineage culture.
 - Workspace: individual life.
 - Rollout: temporary phenotype/interactor.
-- Tasks, budgets, and token currency: ecology and proportional continuation.
-- Interaction primitives: read, copy, fork, cite, patch, and allocate earned
-  resources.
+- Tasks and competitive child slots: ecology and differential continuation.
+- Interaction primitives: read, copy, fork, cite, and patch.
 - Selection: differential continuation, uptake, trust, reuse, dependency, and
   cost-sensitive future option value.
 - Compaction: the transmission bottleneck that turns a rollout into a bounded
@@ -2441,21 +2417,21 @@ those structures can appear if they solve real continuation problems.
 - Bounded attention: the root scarcity that makes filters, indexes, trust, and
   seed discipline necessary.
 - Archive visibility: artifact fitness expressed as future influence under
-  validated uptake.
+validated uptake.
 
 The private seed is not DNA. It is vertically transmitted culture. Git is not
 automatically an ecology. It becomes one when artifacts compete for scarce
-attention, trust, context, dependency, validation, token cost, and downstream
+attention, trust, context, dependency, validation, execution cost, and downstream
 use.
 
 The agent-centered view asks which lineages continue. The artifact-centered view
 asks which artifacts keep getting reconstructed. Both are required because
 agents and artifacts reproduce each other.
 
-The design principle is fixed primitive consequence, proportional continuation,
+The design principle is fixed primitive consequence, competitive continuation,
 evolvable cultural filters, dual inheritance channels, delayed selection, and
 artifact visibility through successful adoption. Do not select for complexity
-itself. Select for future option value under bounded attention, token scarcity,
+itself. Select for future option value under bounded attention, finite slots,
 and changing constraints.
 
 ## VI. Operational Substrate and Tooling
@@ -2778,7 +2754,7 @@ The framework makes several predictions.
 If context is too large or tasks are too easy, external process artifacts will
 remain optional and weakly selected.
 
-If the system stores everything without retrieval budgets, archive quality will
+If the system stores everything without retrieval limits, archive quality will
 fall because attention is not scarce.
 
 If artifact popularity is producer-written, self-description will inflate and
@@ -2803,14 +2779,11 @@ earn prominence through consumer-written evidence, regulatory documents improve
 navigation, and useful process conventions stabilize without being fully
 specified in advance.
 
-If token budget is too generous relative to task difficulty, artifacts will
-remain optional and no load-bearing dependency stack will form.
-
-If tasks are solvable without artifacts even under token scarcity, the ecology
+If tasks are solvable without artifacts under bounded context, the ecology
 will plateau at direct task solving without specialization.
 
-If proportional continuation is present, efficient lineages should show compound
-growth over generations, accumulating tokens and spawning more rollouts.
+If competitive continuation is present, lineages with useful handoffs should
+persist more reliably across generations.
 
 If interaction primitives are available, transfer dynamics such as trade,
 predation-like capture, parasitism, and symbiosis should become possible and
@@ -2856,8 +2829,8 @@ still operate. This supports the necessity-gap diagnosis.
 
 Hypothesis:
 
-If previously successful traces or modules are injected into new prompts under a
-token budget, the model will increasingly adopt reusable fixed structure instead
+If previously successful traces or modules are injected into bounded new prompts,
+the model will increasingly adopt reusable fixed structure instead
 of reinventing reasoning each time.
 
 Setup:
@@ -2927,7 +2900,7 @@ Observed outcome:
 
 - Mean token usage dropped around 30 percent relative to baseline.
 - Reward curve tracked normal GRPO.
-- Slightly higher mean token budget than random insertion, unexpectedly.
+- Slightly higher mean token use than random insertion, unexpectedly.
 
 Interpretation:
 
@@ -2952,7 +2925,7 @@ Observed outcome:
 - Reward curve tracked normal GRPO.
 - Global used/injected rate remained low, around 0.8 percent.
 - Model did not learn increasing module use over time.
-- Slightly higher token budget than random insertion.
+- Slightly higher token use than random insertion.
 
 Interpretation:
 
@@ -3494,16 +3467,13 @@ Open-Ended RSI as Hereditary Cultural Ecology:
 - Open-endedness requires both inheritance channels and ecological feedback from
   prior success.
 
-Endogenous Ecology Through Currency Dynamics:
+Endogenous Ecology Through Inheritance Dynamics:
 
-- Token currency as minimal physics for self-complexification.
-- Proportional continuation creates compound pressure without uniform allocation.
-- Interaction primitives make transfer dynamics possible without predefining
-  mature institutions.
-- Fixed tasks plus token currency are still insufficient unless artifacts become
-  load-bearing future conditions.
-- Self-complexification requires currency dynamics coupled to grounded dependency
-  chains, not designed complexity rules.
+- Competitive child slots make continuation behavior consequential.
+- Bootstrap refill preserves exploration without uniform lineage survival.
+- Interaction primitives allow exchange without predefining mature institutions.
+- Fixed tasks plus slot competition are still insufficient unless artifacts
+  become load-bearing future conditions.
 
 ### Timeline Examples
 
@@ -3577,7 +3547,7 @@ recombination.
 10. When does a tool become a reusable process artifact rather than a one-off
     script?
 
-11. What episode boundary, seed size, and archive retrieval budget best force
+11. What episode boundary, seed size, and archive retrieval limit best force
     externalization without preventing coherent work?
 
 12. What signs would indicate emergence of a genuine LLM-native process
@@ -3591,7 +3561,7 @@ recombination.
 
 15. What counts as falsification for the near-term version of the theory?
 
-16. What token budget ratio (base vs earned) creates the strongest selection
+16. What competitive slot and bootstrap-refill regime creates useful selection
     pressure without preventing exploration?
 
 17. What signs would indicate that emergent transfer dynamics (trade, predation,
@@ -3730,7 +3700,7 @@ But they may plateau if:
 Hyperagent-style editable self-improvement machinery is closer because both the
 task procedure and meta-procedure can be editable. The inherited object becomes
 less like a solution and more like process architecture: decomposition, routing,
-evaluation, retry policy, budget allocation, trace preservation.
+evaluation, retry policy, resource allocation, trace preservation.
 
 The deeper bottleneck is fixed ecology, not fixed chemistry. Static benchmarks
 permit improvement without consequence. Open-endedness requires consequences
