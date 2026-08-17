@@ -57,7 +57,7 @@ class BenchmarkItemRef:
 def active_benchmark_item(context: dict[str, Any]) -> BenchmarkItemRef | None:
     """Return the latest generic item projection without benchmark knowledge."""
 
-    events_path = context.get("budget_ledger_events")
+    events_path = context.get("benchmark_events_path")
     instance_uuid = context.get("instance_uuid")
     if isinstance(events_path, str) and isinstance(instance_uuid, str):
         try:
@@ -100,7 +100,6 @@ class RolloutBenchmark:
     context: dict[str, Any]
     model_metadata: dict[str, Any]
     mcp_servers: dict[str, Any] = field(default_factory=dict)
-    mcp_budget_reconcile_tools: tuple[tuple[str, str], ...] = ()
     sensitive_mcp_tools: tuple[tuple[str, str], ...] = ()
 
 

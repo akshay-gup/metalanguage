@@ -18,7 +18,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUNNER_CRATE_DIR = PROJECT_ROOT / "crates" / "metalanguage-codex-runner"
 RUNNER_MANIFEST = RUNNER_CRATE_DIR / "Cargo.toml"
 ProgressCallback = Callable[[str, Any], None]
-TokenUsageCallback = Callable[[dict[str, int], int], None]
 
 
 def runner_binary_path(*, release: bool = False) -> Path:
@@ -193,13 +192,9 @@ def run_codex_rollout(
     sandbox_mode: str = "workspace-write",
     initial_user_text: str = "Read README.md.",
     base_instructions: str | None = None,
-    rollout_token_budget_tokens: int | None = None,
-    instance_uuid: str | None = None,
     spawn_child_handler_context_path: Path | None = None,
     benchmark_mcp_servers: dict[str, Any] | None = None,
-    mcp_budget_reconcile_tools: tuple[tuple[str, str], ...] = (),
     sensitive_mcp_tools: tuple[tuple[str, str], ...] = (),
-    token_usage_callback: TokenUsageCallback | None = None,
     stop_requested: Callable[[], bool] | None = None,
     progress_callback: Callable[..., None] | None = None,
 ) -> dict[str, Any]:
@@ -235,10 +230,6 @@ def run_codex_rollout(
         "workspace_roots": workspace_roots,
         "additional_writable_roots": additional_writable_roots,
     }
-    if rollout_token_budget_tokens is not None:
-        request["rollout_token_budget_tokens"] = rollout_token_budget_tokens
-    if instance_uuid is not None:
-        request["instance_uuid"] = instance_uuid
     if spawn_child_handler_context_path is not None:
         request["spawn_child_handler_command"] = [
             sys.executable,
@@ -248,11 +239,6 @@ def run_codex_rollout(
         ]
     if benchmark_mcp_servers:
         request["mcp_servers"] = benchmark_mcp_servers
-    if mcp_budget_reconcile_tools:
-        request["mcp_budget_reconcile_tools"] = [
-            {"server": server, "tool": tool}
-            for server, tool in mcp_budget_reconcile_tools
-        ]
     if sensitive_mcp_tools:
         request["sensitive_mcp_tools"] = [
             {"server": server, "tool": tool}
@@ -275,13 +261,6 @@ def run_codex_rollout(
         "session_id": "",
         "error_code": "",
         "error_message": "",
-        "tokens_spent": 0,
-        "tokens_reserved_for_children": 0,
-        "tokens_transferred_in": 0,
-        "tokens_transferred_out": 0,
-        "effective_rollout_token_budget_tokens": rollout_token_budget_tokens,
-        "codex_total_tokens_seen": 0,
-        "budget_exhausted": False,
     }
     request_path.write_text(json.dumps(request, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     os.chmod(request_path, 0o600)
@@ -320,7 +299,6 @@ def run_codex_rollout(
 
         deadline = started_at + timeout_seconds + 15
         timed_out = False
-        budget_exhausted = False
         cancelled = False
         cancel_reason: str | None = None
         while True:
@@ -333,16 +311,12 @@ def run_codex_rollout(
                             events_fh=events_fh,
                             progress_callback=progress_callback,
                             state=state,
-                            rollout_token_budget_tokens=rollout_token_budget_tokens,
-                            token_usage_callback=token_usage_callback,
                         )
                         if isinstance(event, dict) and event.get("event") == "thread_started":
                             thread_id = str(event.get("thread_id") or "") or thread_id
                             session_id = str(event.get("session_id") or "") or session_id
                         elif isinstance(event, dict) and event.get("event") == "turn_complete":
                             final_text = str(event.get("final_text") or "")
-                        if state.get("budget_exhausted"):
-                            budget_exhausted = True
                 break
             if _stop_requested():
                 cancelled = True
@@ -363,8 +337,6 @@ def run_codex_rollout(
                             events_fh=events_fh,
                             progress_callback=progress_callback,
                             state=state,
-                            rollout_token_budget_tokens=rollout_token_budget_tokens,
-                            token_usage_callback=token_usage_callback,
                         )
                 break
             if time.monotonic() > deadline:
@@ -379,8 +351,6 @@ def run_codex_rollout(
                             events_fh=events_fh,
                             progress_callback=progress_callback,
                             state=state,
-                            rollout_token_budget_tokens=rollout_token_budget_tokens,
-                            token_usage_callback=token_usage_callback,
                         )
                 break
 
@@ -395,8 +365,6 @@ def run_codex_rollout(
                 events_fh=events_fh,
                 progress_callback=progress_callback,
                 state=state,
-                rollout_token_budget_tokens=rollout_token_budget_tokens,
-                token_usage_callback=token_usage_callback,
             )
             if isinstance(event, dict):
                 if event.get("event") == "thread_started":
@@ -404,20 +372,12 @@ def run_codex_rollout(
                     session_id = str(event.get("session_id") or "") or session_id
                 elif event.get("event") == "turn_complete":
                     final_text = str(event.get("final_text") or "")
-            if state.get("budget_exhausted"):
-                budget_exhausted = True
 
         return_code = proc.wait()
     thread_id = thread_id or state.get("thread_id") or None
     session_id = session_id or state.get("session_id") or None
     final_text = final_text or state.get("final_text", "")
 
-    tokens_spent = int(state.get("tokens_spent") or 0)
-    tokens_reserved_for_children = int(state.get("tokens_reserved_for_children") or 0)
-    tokens_transferred_in = int(state.get("tokens_transferred_in") or 0)
-    tokens_transferred_out = int(state.get("tokens_transferred_out") or 0)
-    effective_budget = state.get("effective_rollout_token_budget_tokens")
-    charged_tokens = tokens_spent + tokens_reserved_for_children + tokens_transferred_out
     if cancelled:
         return {
             "final_text": final_text,
@@ -427,31 +387,6 @@ def run_codex_rollout(
             "error_message": "Codex rollout stopped because the child slot cap is full.",
             "thread_id": thread_id,
             "session_id": session_id,
-            "tokens_spent": tokens_spent,
-            "tokens_reserved_for_children": tokens_reserved_for_children,
-            "tokens_transferred_in": tokens_transferred_in,
-            "tokens_transferred_out": tokens_transferred_out,
-            "rollout_token_budget_tokens": rollout_token_budget_tokens,
-            "effective_rollout_token_budget_tokens": effective_budget,
-            "request_path": str(request_path),
-            "stderr_path": str(stderr_path),
-            "events_path": str(stdout_events_path),
-        }
-    if budget_exhausted:
-        return {
-            "final_text": final_text,
-            "status": "budget_exhausted",
-            "stop_reason": "token_budget_exhausted",
-            "error_code": "token_budget_exhausted",
-            "error_message": f"Token budget exhausted: {charged_tokens}/{effective_budget}.",
-            "thread_id": thread_id,
-            "session_id": session_id,
-            "tokens_spent": tokens_spent,
-            "tokens_reserved_for_children": tokens_reserved_for_children,
-            "tokens_transferred_in": tokens_transferred_in,
-            "tokens_transferred_out": tokens_transferred_out,
-            "rollout_token_budget_tokens": rollout_token_budget_tokens,
-            "effective_rollout_token_budget_tokens": effective_budget,
             "request_path": str(request_path),
             "stderr_path": str(stderr_path),
             "events_path": str(stdout_events_path),
@@ -465,31 +400,6 @@ def run_codex_rollout(
             "error_message": f"Codex runner exceeded {timeout_seconds} seconds.",
             "thread_id": thread_id,
             "session_id": session_id,
-            "tokens_spent": tokens_spent,
-            "tokens_reserved_for_children": tokens_reserved_for_children,
-            "tokens_transferred_in": tokens_transferred_in,
-            "tokens_transferred_out": tokens_transferred_out,
-            "rollout_token_budget_tokens": rollout_token_budget_tokens,
-            "effective_rollout_token_budget_tokens": effective_budget,
-            "request_path": str(request_path),
-            "stderr_path": str(stderr_path),
-            "events_path": str(stdout_events_path),
-        }
-    if rollout_token_budget_tokens is not None and tokens_spent <= 0:
-        return {
-            "final_text": final_text,
-            "status": "budget_tracking_error",
-            "stop_reason": "missing_token_usage",
-            "error_code": "missing_token_usage",
-            "error_message": "Codex runner did not emit token usage for budget enforcement.",
-            "thread_id": thread_id,
-            "session_id": session_id,
-            "tokens_spent": tokens_spent,
-            "tokens_reserved_for_children": tokens_reserved_for_children,
-            "tokens_transferred_in": tokens_transferred_in,
-            "tokens_transferred_out": tokens_transferred_out,
-            "rollout_token_budget_tokens": rollout_token_budget_tokens,
-            "effective_rollout_token_budget_tokens": effective_budget,
             "request_path": str(request_path),
             "stderr_path": str(stderr_path),
             "events_path": str(stdout_events_path),
@@ -504,12 +414,6 @@ def run_codex_rollout(
             "error_message": f"{runner_error}; see {stderr_path}",
             "thread_id": thread_id,
             "session_id": session_id,
-            "tokens_spent": tokens_spent,
-            "tokens_reserved_for_children": tokens_reserved_for_children,
-            "tokens_transferred_in": tokens_transferred_in,
-            "tokens_transferred_out": tokens_transferred_out,
-            "rollout_token_budget_tokens": rollout_token_budget_tokens,
-            "effective_rollout_token_budget_tokens": effective_budget,
             "request_path": str(request_path),
             "stderr_path": str(stderr_path),
             "events_path": str(stdout_events_path),
@@ -522,12 +426,6 @@ def run_codex_rollout(
         "error_message": None,
         "thread_id": thread_id,
         "session_id": session_id,
-        "tokens_spent": tokens_spent,
-        "tokens_reserved_for_children": tokens_reserved_for_children,
-        "tokens_transferred_in": tokens_transferred_in,
-        "tokens_transferred_out": tokens_transferred_out,
-        "rollout_token_budget_tokens": rollout_token_budget_tokens,
-        "effective_rollout_token_budget_tokens": effective_budget,
         "request_path": str(request_path),
         "stderr_path": str(stderr_path),
         "events_path": str(stdout_events_path),
@@ -540,8 +438,6 @@ def _handle_runner_line(
     events_fh: Any,
     progress_callback: Callable[..., None] | None,
     state: dict[str, Any],
-    rollout_token_budget_tokens: int | None,
-    token_usage_callback: TokenUsageCallback | None,
 ) -> dict[str, Any] | None:
     line = raw_line.strip()
     if not line:
@@ -558,51 +454,16 @@ def _handle_runner_line(
     if not isinstance(event, dict):
         return None
     name = event.get("event")
-    token_usage = _record_codex_token_usage(
-        event,
-        state=state,
-        token_usage_callback=token_usage_callback,
-    )
     if name == "thread_started":
         state["thread_id"] = str(event.get("thread_id") or "")
         state["session_id"] = str(event.get("session_id") or "")
-    elif name in {"token_usage", "tool_end"}:
-        reserved = _token_int(event.get("tokens_reserved_for_children"))
-        if reserved > int(state.get("tokens_reserved_for_children") or 0):
-            state["tokens_reserved_for_children"] = reserved
-        transferred_in = _token_int(event.get("tokens_transferred_in"))
-        if transferred_in > int(state.get("tokens_transferred_in") or 0):
-            state["tokens_transferred_in"] = transferred_in
-        transferred_out = _token_int(event.get("tokens_transferred_out"))
-        if transferred_out > int(state.get("tokens_transferred_out") or 0):
-            state["tokens_transferred_out"] = transferred_out
-        effective_budget = _token_int(event.get("effective_rollout_token_budget_tokens"))
-        if effective_budget > 0:
-            state["effective_rollout_token_budget_tokens"] = effective_budget
     elif name in {"agent_message", "turn_complete"}:
         text = str(event.get("final_text") or event.get("text") or "")
         if text:
             state["final_text"] = text
     elif name == "error":
-        reserved = _token_int(event.get("tokens_reserved_for_children"))
-        if reserved > int(state.get("tokens_reserved_for_children") or 0):
-            state["tokens_reserved_for_children"] = reserved
-        transferred_in = _token_int(event.get("tokens_transferred_in"))
-        if transferred_in > int(state.get("tokens_transferred_in") or 0):
-            state["tokens_transferred_in"] = transferred_in
-        transferred_out = _token_int(event.get("tokens_transferred_out"))
-        if transferred_out > int(state.get("tokens_transferred_out") or 0):
-            state["tokens_transferred_out"] = transferred_out
-        effective_budget = _token_int(event.get("effective_rollout_token_budget_tokens"))
-        if effective_budget > 0:
-            state["effective_rollout_token_budget_tokens"] = effective_budget
         state["error_code"] = str(event.get("error_code") or "")
         state["error_message"] = str(event.get("error_message") or "")
-        if state["error_code"] == "token_budget_exhausted":
-            event_tokens_spent = _token_int(event.get("tokens_spent"))
-            if event_tokens_spent > int(state.get("tokens_spent") or 0):
-                state["tokens_spent"] = event_tokens_spent
-            state["budget_exhausted"] = True
 
     if progress_callback is not None:
         if name == "thread_started":
@@ -640,16 +501,6 @@ def _handle_runner_line(
                 tool_call_count=None,
                 response_status="completed",
             )
-        elif name == "token_usage" and token_usage is not None:
-            progress_callback(
-                "worker_token_usage",
-                token_usage=token_usage,
-                tokens_spent=state.get("tokens_spent"),
-                tokens_reserved_for_children=state.get("tokens_reserved_for_children"),
-                tokens_transferred_in=state.get("tokens_transferred_in"),
-                tokens_transferred_out=state.get("tokens_transferred_out"),
-                rollout_token_budget_tokens=rollout_token_budget_tokens,
-            )
         elif name == "error":
             progress_callback(
                 "worker_error",
@@ -657,69 +508,3 @@ def _handle_runner_line(
                 error_message=event.get("error_message"),
             )
     return event
-
-
-def _record_codex_token_usage(
-    event: dict[str, Any],
-    *,
-    state: dict[str, Any],
-    token_usage_callback: TokenUsageCallback | None,
-) -> dict[str, int] | None:
-    if event.get("event") != "token_usage":
-        return None
-    current_spent = int(state.get("tokens_spent") or 0)
-    event_tokens_spent = _token_int(event.get("tokens_spent"))
-    total_usage = event.get("total")
-    if isinstance(total_usage, dict):
-        total_seen = _token_int(total_usage.get("total_tokens"))
-        previous_seen = int(state.get("codex_total_tokens_seen") or 0)
-        if total_seen > 0 and total_seen <= previous_seen:
-            if event_tokens_spent > current_spent:
-                state["tokens_spent"] = event_tokens_spent
-            return None
-        if total_seen > 0:
-            state["codex_total_tokens_seen"] = total_seen
-
-    if event_tokens_spent > 0 and event_tokens_spent <= current_spent:
-        return None
-
-    usage = _codex_usage_fields(event.get("last"))
-    if usage is None:
-        if event_tokens_spent > current_spent:
-            state["tokens_spent"] = event_tokens_spent
-        return None
-    tokens_spent = max(current_spent + usage["total_tokens"], event_tokens_spent)
-    state["tokens_spent"] = tokens_spent
-    if token_usage_callback is not None:
-        token_usage_callback(usage, tokens_spent)
-    return usage
-
-
-def _codex_usage_fields(raw_usage: Any) -> dict[str, int] | None:
-    if not isinstance(raw_usage, dict):
-        return None
-    usage = {
-        "input_tokens": _token_int(raw_usage.get("input_tokens")),
-        "cached_input_tokens": _token_int(raw_usage.get("cached_input_tokens")),
-        "output_tokens": _token_int(raw_usage.get("output_tokens")),
-        "reasoning_output_tokens": _token_int(raw_usage.get("reasoning_output_tokens")),
-        "total_tokens": _token_int(raw_usage.get("total_tokens")),
-    }
-    if usage["total_tokens"] <= 0:
-        usage["total_tokens"] = usage["input_tokens"] + usage["output_tokens"]
-    if usage["total_tokens"] <= 0:
-        return None
-    if (
-        usage["input_tokens"] <= 0
-        and usage["output_tokens"] <= 0
-        and usage["reasoning_output_tokens"] <= 0
-    ):
-        return None
-    return usage
-
-
-def _token_int(value: Any) -> int:
-    try:
-        return max(0, int(value or 0))
-    except (TypeError, ValueError):
-        return 0

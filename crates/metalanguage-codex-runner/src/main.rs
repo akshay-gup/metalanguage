@@ -65,11 +65,8 @@ struct RunnerRequest {
     sandbox_mode: Option<String>,
     workspace_roots: Option<Vec<PathBuf>>,
     additional_writable_roots: Option<Vec<PathBuf>>,
-    rollout_token_budget_tokens: Option<i64>,
-    instance_uuid: Option<String>,
     spawn_child_handler_command: Option<Vec<String>>,
     mcp_servers: Option<HashMap<String, Value>>,
-    mcp_budget_reconcile_tools: Option<Vec<McpToolSelector>>,
     sensitive_mcp_tools: Option<Vec<McpToolSelector>>,
 }
 
@@ -78,80 +75,6 @@ struct RunnerRequest {
 struct McpToolSelector {
     server: String,
     tool: String,
-}
-
-#[derive(Debug)]
-struct BudgetState {
-    rollout_token_budget_tokens: Option<i64>,
-    tokens_spent: i64,
-    reserved_child_tokens: i64,
-    transferred_in_tokens: i64,
-    transferred_out_tokens: i64,
-}
-
-impl BudgetState {
-    fn effective_rollout_token_budget_tokens(&self) -> Option<i64> {
-        self.rollout_token_budget_tokens
-            .map(|budget| budget + self.transferred_in_tokens)
-    }
-
-    fn tokens_remaining(&self) -> Option<i64> {
-        self.effective_rollout_token_budget_tokens().map(|budget| {
-            (budget - self.tokens_spent - self.reserved_child_tokens - self.transferred_out_tokens)
-                .max(0)
-        })
-    }
-
-    fn exhausted(&self) -> bool {
-        self.effective_rollout_token_budget_tokens()
-            .is_some_and(|budget| {
-                self.tokens_spent + self.reserved_child_tokens + self.transferred_out_tokens
-                    >= budget
-            })
-    }
-
-    fn snapshot(&self) -> Value {
-        json!({
-            "budget_configured": self.rollout_token_budget_tokens.is_some(),
-            "rollout_token_budget_tokens": self.rollout_token_budget_tokens,
-            "effective_rollout_token_budget_tokens": self.effective_rollout_token_budget_tokens(),
-            "tokens_spent": self.tokens_spent,
-            "tokens_reserved_for_children": self.reserved_child_tokens,
-            "tokens_transferred_in": self.transferred_in_tokens,
-            "tokens_transferred_out": self.transferred_out_tokens,
-            "tokens_remaining": self.tokens_remaining(),
-        })
-    }
-
-    fn apply_snapshot(&mut self, snapshot: &Value) {
-        if let Some(value) = snapshot
-            .get("rollout_token_budget_tokens")
-            .and_then(Value::as_i64)
-        {
-            self.rollout_token_budget_tokens = Some(value);
-        }
-        if let Some(value) = snapshot.get("tokens_spent").and_then(Value::as_i64) {
-            self.tokens_spent = self.tokens_spent.max(value);
-        }
-        if let Some(value) = snapshot
-            .get("tokens_reserved_for_children")
-            .and_then(Value::as_i64)
-        {
-            self.reserved_child_tokens = value;
-        }
-        if let Some(value) = snapshot
-            .get("tokens_transferred_in")
-            .and_then(Value::as_i64)
-        {
-            self.transferred_in_tokens = value;
-        }
-        if let Some(value) = snapshot
-            .get("tokens_transferred_out")
-            .and_then(Value::as_i64)
-        {
-            self.transferred_out_tokens = value;
-        }
-    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -261,14 +184,6 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
                 .context("parse per-rollout MCP server configuration")
         })
         .collect::<anyhow::Result<HashMap<_, _>>>()?;
-    let reconcile_tools = validate_mcp_tool_selectors(
-        request
-            .mcp_budget_reconcile_tools
-            .clone()
-            .unwrap_or_default(),
-        &mcp_servers,
-        "mcp_budget_reconcile_tools",
-    )?;
     let sensitive_tools = validate_mcp_tool_selectors(
         request.sensitive_mcp_tools.clone().unwrap_or_default(),
         &mcp_servers,
@@ -350,8 +265,6 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
             .collect::<Vec<_>>(),
     }))?;
 
-    let rollout_token_budget_tokens = request.rollout_token_budget_tokens;
-    let instance_uuid = request.instance_uuid.clone();
     let spawn_child_handler_command = request.spawn_child_handler_command.clone();
     let prompt = request
         .initial_user_text
@@ -360,10 +273,7 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
         &thread,
         &thread_id.to_string(),
         prompt,
-        rollout_token_budget_tokens,
-        instance_uuid,
         spawn_child_handler_command,
-        reconcile_tools,
         sensitive_tools,
     )
     .await;
@@ -391,10 +301,7 @@ async fn run_turn(
     thread: &codex_core_api::CodexThread,
     thread_id: &str,
     prompt: String,
-    rollout_token_budget_tokens: Option<i64>,
-    instance_uuid: Option<String>,
     spawn_child_handler_command: Option<Vec<String>>,
-    reconcile_tools: Vec<McpToolSelector>,
     sensitive_tools: Vec<McpToolSelector>,
 ) -> anyhow::Result<()> {
     thread
@@ -413,13 +320,6 @@ async fn run_turn(
 
     let mut current_turn_id: Option<String> = None;
     let mut final_text = String::new();
-    let mut budget_state = BudgetState {
-        rollout_token_budget_tokens,
-        tokens_spent: 0,
-        reserved_child_tokens: 0,
-        transferred_in_tokens: 0,
-        transferred_out_tokens: 0,
-    };
     loop {
         let event = thread.next_event().await.context("read Codex event")?;
         match &event.msg {
@@ -430,68 +330,6 @@ async fn run_turn(
                     "turn_id": event.turn_id,
                     "model_context_window": event.model_context_window,
                 }))?;
-            }
-            EventMsg::TokenCount(event) => {
-                let info = event.info.as_ref();
-                if let Some(info) = info {
-                    let total_tokens = info.total_token_usage.total_tokens.max(0);
-                    if total_tokens > 0 {
-                        budget_state.tokens_spent = budget_state.tokens_spent.max(total_tokens);
-                    } else {
-                        budget_state.tokens_spent += info.last_token_usage.total_tokens.max(0);
-                    }
-                }
-                let _ = refresh_budget_status_from_handler(
-                    &mut budget_state,
-                    spawn_child_handler_command.as_deref(),
-                );
-                let tokens_remaining = budget_state.tokens_remaining();
-                let budget_exhausted = budget_state.exhausted();
-                emit(json!({
-                    "event": "token_usage",
-                    "turn_id": current_turn_id.as_deref(),
-                    "last": info.map(|info| &info.last_token_usage),
-                    "total": info.map(|info| &info.total_token_usage),
-                    "model_context_window": info.and_then(|info| info.model_context_window),
-                    "tokens_spent": budget_state.tokens_spent,
-                    "tokens_reserved_for_children": budget_state.reserved_child_tokens,
-                    "tokens_transferred_in": budget_state.transferred_in_tokens,
-                    "tokens_transferred_out": budget_state.transferred_out_tokens,
-                    "tokens_remaining": tokens_remaining,
-                    "rollout_token_budget_tokens": budget_state.rollout_token_budget_tokens,
-                    "effective_rollout_token_budget_tokens": budget_state.effective_rollout_token_budget_tokens(),
-                    "budget_exhausted": budget_exhausted,
-                }))?;
-                if budget_exhausted {
-                    let budget = budget_state
-                        .effective_rollout_token_budget_tokens()
-                        .unwrap_or_default();
-                    emit(json!({
-                        "event": "error",
-                        "error_code": "token_budget_exhausted",
-                        "error_message": format!(
-                            "Token budget exhausted: {}/{}.",
-                            budget_state.tokens_spent
-                                + budget_state.reserved_child_tokens
-                                + budget_state.transferred_out_tokens,
-                            budget
-                        ),
-                        "tokens_spent": budget_state.tokens_spent,
-                        "tokens_reserved_for_children": budget_state.reserved_child_tokens,
-                        "tokens_transferred_in": budget_state.transferred_in_tokens,
-                        "tokens_transferred_out": budget_state.transferred_out_tokens,
-                        "rollout_token_budget_tokens": budget_state.rollout_token_budget_tokens,
-                        "effective_rollout_token_budget_tokens": budget,
-                    }))?;
-                    let _ = thread.submit(Op::Interrupt).await;
-                    bail!(
-                        "token budget exhausted: {}/{}",
-                        budget_state.tokens_spent
-                            + budget_state.reserved_child_tokens
-                            + budget_state.transferred_out_tokens,
-                        budget
-                    );
-                }
             }
             EventMsg::AgentMessageContentDelta(event) => {
                 emit(json!({
@@ -599,24 +437,12 @@ async fn run_turn(
                 }))?;
             }
             EventMsg::McpToolCallEnd(event) => {
-                let budget_reconciled = reconcile_budget_after_mcp_tool(
-                    &event.invocation.server,
-                    &event.invocation.tool,
-                    &reconcile_tools,
-                    &mut budget_state,
-                    spawn_child_handler_command.as_deref(),
-                )
-                .map_err(|message| anyhow!(message))?;
                 emit(json!({
                     "event": "tool_end",
                     "tool": event.invocation.tool,
                     "namespace": format!("mcp__{}", event.invocation.server),
                     "call_id": event.call_id,
                     "success": event.is_success(),
-                    "budget_reconciled": budget_reconciled,
-                    "tokens_transferred_in": budget_state.transferred_in_tokens,
-                    "effective_rollout_token_budget_tokens": budget_state.effective_rollout_token_budget_tokens(),
-                    "tokens_remaining": budget_state.tokens_remaining(),
                 }))?;
             }
             EventMsg::ItemCompleted(event) => {
@@ -694,8 +520,6 @@ async fn run_turn(
                 }))?;
                 let response = handle_metalanguage_dynamic_tool(
                     request,
-                    &mut budget_state,
-                    instance_uuid.as_deref(),
                     spawn_child_handler_command.as_deref(),
                 );
                 emit(json!({
@@ -705,11 +529,6 @@ async fn run_turn(
                     "call_id": request.call_id,
                     "turn_id": request.turn_id,
                     "success": response.success,
-                    "tokens_reserved_for_children": budget_state.reserved_child_tokens,
-                    "tokens_transferred_in": budget_state.transferred_in_tokens,
-                    "tokens_transferred_out": budget_state.transferred_out_tokens,
-                    "effective_rollout_token_budget_tokens": budget_state.effective_rollout_token_budget_tokens(),
-                    "tokens_remaining": budget_state.tokens_remaining(),
                 }))?;
                 thread
                     .submit(Op::DynamicToolResponse {
@@ -718,36 +537,6 @@ async fn run_turn(
                     })
                     .await
                     .context("submit dynamic tool response")?;
-                if budget_state.exhausted() {
-                    let budget = budget_state
-                        .effective_rollout_token_budget_tokens()
-                        .unwrap_or_default();
-                    emit(json!({
-                        "event": "error",
-                        "error_code": "token_budget_exhausted",
-                        "error_message": format!(
-                            "Token budget exhausted: {}/{}.",
-                            budget_state.tokens_spent
-                                + budget_state.reserved_child_tokens
-                                + budget_state.transferred_out_tokens,
-                            budget
-                        ),
-                        "tokens_spent": budget_state.tokens_spent,
-                        "tokens_reserved_for_children": budget_state.reserved_child_tokens,
-                        "tokens_transferred_in": budget_state.transferred_in_tokens,
-                        "tokens_transferred_out": budget_state.transferred_out_tokens,
-                        "rollout_token_budget_tokens": budget_state.rollout_token_budget_tokens,
-                        "effective_rollout_token_budget_tokens": budget,
-                    }))?;
-                    let _ = thread.submit(Op::Interrupt).await;
-                    bail!(
-                        "token budget exhausted: {}/{}",
-                        budget_state.tokens_spent
-                            + budget_state.reserved_child_tokens
-                            + budget_state.transferred_out_tokens,
-                        budget
-                    );
-                }
             }
             _ => {}
         }
@@ -766,27 +555,11 @@ fn bail_with_event(code: &str) -> anyhow::Result<()> {
 fn metalanguage_dynamic_tools() -> Vec<DynamicToolSpec> {
     vec![
         DynamicToolSpec::Function(DynamicToolFunctionSpec {
-            name: "budget_status".to_string(),
-            description: concat!(
-                "Return this rollout's token budget, spent tokens, reserved child ",
-                "budget, remaining budget, and minimum_child_budget_tokens."
-            )
-            .to_string(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {},
-                "required": [],
-                "additionalProperties": false,
-            }),
-            defer_loading: false,
-        }),
-        DynamicToolSpec::Function(DynamicToolFunctionSpec {
             name: "spawn_child".to_string(),
             description: concat!(
                 "Claim a next-iteration rollout slot by passing the child's inherited ",
                 "prompt, optionally copying a workspace-local directory into the child ",
-                "workspace, and reserving exactly initial_budget_tokens from this rollout. ",
-                "initial_budget_tokens must be at least minimum_child_budget_tokens from runtime.md."
+                "workspace. Slots are first-come first-served."
             )
             .to_string(),
             input_schema: json!({
@@ -799,37 +572,9 @@ fn metalanguage_dynamic_tools() -> Vec<DynamicToolSpec> {
                     "workspace_dir": {
                         "type": "string",
                         "description": "Optional workspace-local directory whose contents should be copied into the child slot's inherited workspace. Nothing is copied implicitly; include README.md here if the child should inherit it. The same source can be reused for multiple child slots in this rollout and is consumed when the parent rollout finishes. Leave blank or omit for no inherited workspace files."
-                    },
-                    "initial_budget_tokens": {
-                        "type": "integer",
-                        "description": "Token budget to reserve from this rollout and assign exactly to the claimed slot. Must be at least minimum_child_budget_tokens from runtime.md."
                     }
                 },
-                "required": ["prompt", "initial_budget_tokens"],
-                "additionalProperties": false,
-            }),
-            defer_loading: false,
-        }),
-        DynamicToolSpec::Function(DynamicToolFunctionSpec {
-            name: "transfer_tokens".to_string(),
-            description: concat!(
-                "Transfer part of this rollout's remaining token budget to a live ",
-                "peer rollout in the same task. The target receives exactly amount_tokens."
-            )
-            .to_string(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "target_instance_uuid": {
-                        "type": "string",
-                        "description": "Instance UUID of a live peer rollout listed in runtime.md."
-                    },
-                    "amount_tokens": {
-                        "type": "integer",
-                        "description": "Positive token budget amount to transfer."
-                    }
-                },
-                "required": ["target_instance_uuid", "amount_tokens"],
+                "required": ["prompt"],
                 "additionalProperties": false,
             }),
             defer_loading: false,
@@ -854,8 +599,6 @@ fn logged_tool_arguments(sensitive: bool, arguments: Option<&Value>) -> Value {
 
 fn handle_metalanguage_dynamic_tool(
     request: &DynamicToolCallRequest,
-    budget_state: &mut BudgetState,
-    instance_uuid: Option<&str>,
     spawn_child_handler_command: Option<&[String]>,
 ) -> DynamicToolResponse {
     if request.namespace.is_some() {
@@ -866,21 +609,7 @@ fn handle_metalanguage_dynamic_tool(
     }
 
     match request.tool.as_str() {
-        "budget_status" => {
-            handle_budget_status_tool(request, budget_state, spawn_child_handler_command)
-        }
-        "spawn_child" => handle_spawn_child_tool(
-            request,
-            budget_state,
-            instance_uuid,
-            spawn_child_handler_command,
-        ),
-        "transfer_tokens" => handle_transfer_tokens_tool(
-            request,
-            budget_state,
-            instance_uuid,
-            spawn_child_handler_command,
-        ),
+        "spawn_child" => handle_spawn_child_tool(request, spawn_child_handler_command),
         other => dynamic_tool_json_response(
             false,
             json!({"error": "unsupported dynamic tool", "tool": other}),
@@ -888,101 +617,8 @@ fn handle_metalanguage_dynamic_tool(
     }
 }
 
-fn handle_budget_status_tool(
-    request: &DynamicToolCallRequest,
-    budget_state: &mut BudgetState,
-    spawn_child_handler_command: Option<&[String]>,
-) -> DynamicToolResponse {
-    let Some(command) = spawn_child_handler_command else {
-        return dynamic_tool_json_response(true, budget_state.snapshot());
-    };
-    if command.is_empty() {
-        return dynamic_tool_json_response(
-            false,
-            json!({"error": "budget_status handler command is empty"}),
-        );
-    }
-    let handler_payload = json!({
-        "tool": request.tool,
-        "namespace": request.namespace,
-        "call_id": request.call_id,
-        "arguments": request.arguments,
-    });
-    let output = match run_spawn_child_handler(command, &handler_payload) {
-        Ok(value) => value,
-        Err(message) => return dynamic_tool_json_response(false, json!({"error": message})),
-    };
-    apply_budget_status_from_tool_output(budget_state, &output);
-    let success = output
-        .get("success")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
-    if success {
-        dynamic_tool_json_response(true, budget_state.snapshot())
-    } else {
-        dynamic_tool_json_response(false, output)
-    }
-}
-
-fn handle_transfer_tokens_tool(
-    request: &DynamicToolCallRequest,
-    budget_state: &mut BudgetState,
-    instance_uuid: Option<&str>,
-    spawn_child_handler_command: Option<&[String]>,
-) -> DynamicToolResponse {
-    let Some(command) = spawn_child_handler_command else {
-        return dynamic_tool_json_response(
-            false,
-            json!({"error": "transfer_tokens handler command is not configured"}),
-        );
-    };
-    if command.is_empty() {
-        return dynamic_tool_json_response(
-            false,
-            json!({"error": "transfer_tokens handler command is empty"}),
-        );
-    }
-    let (target_instance_uuid, amount_tokens) = match parse_transfer_tokens_args(&request.arguments)
-    {
-        Ok(parsed) => parsed,
-        Err(message) => return dynamic_tool_json_response(false, json!({"error": message})),
-    };
-
-    let handler_payload = json!({
-        "tool": request.tool,
-        "namespace": request.namespace,
-        "call_id": request.call_id,
-        "arguments": request.arguments,
-        "source_budget": {
-            "instance_uuid": instance_uuid,
-            "rollout_token_budget_tokens": budget_state.rollout_token_budget_tokens,
-            "effective_rollout_token_budget_tokens": budget_state.effective_rollout_token_budget_tokens(),
-            "tokens_spent": budget_state.tokens_spent,
-            "tokens_reserved_for_children": budget_state.reserved_child_tokens,
-            "tokens_transferred_in": budget_state.transferred_in_tokens,
-            "tokens_transferred_out": budget_state.transferred_out_tokens,
-            "requested_transfer_tokens": amount_tokens,
-            "tokens_remaining_after_transfer": budget_state.tokens_remaining(),
-        },
-        "target_instance_uuid": target_instance_uuid,
-    });
-
-    let output = match run_spawn_child_handler(command, &handler_payload) {
-        Ok(value) => value,
-        Err(message) => return dynamic_tool_json_response(false, json!({"error": message})),
-    };
-    apply_budget_status_from_tool_output(budget_state, &output);
-    let success = output
-        .get("success")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    dynamic_tool_json_response(success, output)
-}
-
 fn handle_spawn_child_tool(
     request: &DynamicToolCallRequest,
-    budget_state: &mut BudgetState,
-    instance_uuid: Option<&str>,
     spawn_child_handler_command: Option<&[String]>,
 ) -> DynamicToolResponse {
     let Some(command) = spawn_child_handler_command else {
@@ -997,90 +633,26 @@ fn handle_spawn_child_tool(
             json!({"error": "spawn_child handler command is empty"}),
         );
     }
-    let (_prompt, child_budget) = match parse_spawn_child_args(&request.arguments) {
-        Ok(parsed) => parsed,
-        Err(message) => return dynamic_tool_json_response(false, json!({"error": message})),
-    };
+    if let Err(message) = parse_spawn_child_args(&request.arguments) {
+        return dynamic_tool_json_response(false, json!({"error": message}));
+    }
 
     let handler_payload = json!({
         "tool": request.tool,
         "namespace": request.namespace,
         "call_id": request.call_id,
         "arguments": request.arguments,
-        "parent_budget": {
-            "instance_uuid": instance_uuid,
-            "rollout_token_budget_tokens": budget_state.rollout_token_budget_tokens,
-            "effective_rollout_token_budget_tokens": budget_state.effective_rollout_token_budget_tokens(),
-            "tokens_spent": budget_state.tokens_spent,
-            "tokens_reserved_for_children": budget_state.reserved_child_tokens,
-            "requested_child_budget_tokens": child_budget,
-            "tokens_remaining_after_reservation": budget_state.tokens_remaining(),
-        },
     });
 
     let output = match run_spawn_child_handler(command, &handler_payload) {
         Ok(value) => value,
         Err(message) => return dynamic_tool_json_response(false, json!({"error": message})),
     };
-    apply_budget_status_from_tool_output(budget_state, &output);
     let success = output
         .get("success")
         .and_then(Value::as_bool)
         .unwrap_or(false);
     dynamic_tool_json_response(success, output)
-}
-
-fn apply_budget_status_from_tool_output(budget_state: &mut BudgetState, output: &Value) {
-    if let Some(status) = output.get("budget_status_after") {
-        budget_state.apply_snapshot(status);
-        return;
-    }
-    if let Some(status) = output.get("budget_status") {
-        budget_state.apply_snapshot(status);
-        return;
-    }
-    budget_state.apply_snapshot(output);
-}
-
-fn refresh_budget_status_from_handler(
-    budget_state: &mut BudgetState,
-    spawn_child_handler_command: Option<&[String]>,
-) -> Result<(), String> {
-    let Some(command) = spawn_child_handler_command else {
-        return Ok(());
-    };
-    if command.is_empty() {
-        return Ok(());
-    }
-    let output = run_spawn_child_handler(
-        command,
-        &json!({
-            "tool": "budget_status",
-            "arguments": {},
-        }),
-    )?;
-    apply_budget_status_from_tool_output(budget_state, &output);
-    Ok(())
-}
-
-fn reconcile_budget_after_mcp_tool(
-    server: &str,
-    tool: &str,
-    reconcile_tools: &[McpToolSelector],
-    budget_state: &mut BudgetState,
-    spawn_child_handler_command: Option<&[String]>,
-) -> Result<bool, String> {
-    if !tool_is_selected(reconcile_tools, server, tool) {
-        return Ok(false);
-    }
-    let Some(command) = spawn_child_handler_command else {
-        return Err("budget handler command is required after configured MCP tool".to_string());
-    };
-    if command.is_empty() {
-        return Err("budget handler command is empty after configured MCP tool".to_string());
-    }
-    refresh_budget_status_from_handler(budget_state, Some(command))?;
-    Ok(true)
 }
 
 fn tool_is_selected(selectors: &[McpToolSelector], server: &str, tool: &str) -> bool {
@@ -1109,10 +681,13 @@ fn validate_mcp_tool_selectors(
     Ok(selectors)
 }
 
-fn parse_spawn_child_args(arguments: &Value) -> Result<(String, i64), String> {
+fn parse_spawn_child_args(arguments: &Value) -> Result<String, String> {
     let Some(args) = arguments.as_object() else {
         return Err("spawn_child arguments must be an object".to_string());
     };
+    if args.keys().any(|key| key != "prompt" && key != "workspace_dir") {
+        return Err("spawn_child accepts only prompt and optional workspace_dir".to_string());
+    }
     let prompt = args
         .get("prompt")
         .and_then(Value::as_str)
@@ -1121,49 +696,12 @@ fn parse_spawn_child_args(arguments: &Value) -> Result<(String, i64), String> {
     if prompt.trim().is_empty() {
         return Err("prompt must be non-empty".to_string());
     }
-    if let Some(workspace_dir) = args
-        .get("workspace_dir")
-        .or_else(|| args.get("workspaceDir"))
-    {
+    if let Some(workspace_dir) = args.get("workspace_dir") {
         if !workspace_dir.is_null() && !workspace_dir.is_string() {
             return Err("workspace_dir must be a string when provided".to_string());
         }
     }
-    let budget_value = args
-        .get("initial_budget_tokens")
-        .or_else(|| args.get("initialBudgetTokens"));
-    let child_budget = budget_value
-        .and_then(Value::as_i64)
-        .ok_or_else(|| "spawn_child requires integer initial_budget_tokens".to_string())?;
-    if child_budget <= 0 {
-        return Err("initial_budget_tokens must be > 0".to_string());
-    }
-    Ok((prompt, child_budget))
-}
-
-fn parse_transfer_tokens_args(arguments: &Value) -> Result<(String, i64), String> {
-    let Some(args) = arguments.as_object() else {
-        return Err("transfer_tokens arguments must be an object".to_string());
-    };
-    let target_instance_uuid = args
-        .get("target_instance_uuid")
-        .or_else(|| args.get("targetInstanceUuid"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| "transfer_tokens requires string target_instance_uuid".to_string())?
-        .to_string();
-    if target_instance_uuid.trim().is_empty() {
-        return Err("target_instance_uuid must be non-empty".to_string());
-    }
-    let amount_value = args
-        .get("amount_tokens")
-        .or_else(|| args.get("amountTokens"));
-    let amount_tokens = amount_value
-        .and_then(Value::as_i64)
-        .ok_or_else(|| "transfer_tokens requires integer amount_tokens".to_string())?;
-    if amount_tokens <= 0 {
-        return Err("amount_tokens must be > 0".to_string());
-    }
-    Ok((target_instance_uuid, amount_tokens))
+    Ok(prompt)
 }
 
 fn run_spawn_child_handler(command: &[String], payload: &Value) -> Result<Value, String> {
@@ -1246,10 +784,7 @@ mod tests {
             .into_iter()
             .map(|tool| dynamic_tool_name(&tool).to_string())
             .collect::<Vec<_>>();
-        assert_eq!(
-            names,
-            vec!["budget_status", "spawn_child", "transfer_tokens"]
-        );
+        assert_eq!(names, vec!["spawn_child"]);
         assert!(!names.contains(&"submit_solution".to_string()));
     }
 
@@ -1261,45 +796,6 @@ mod tests {
         );
         assert_eq!(logged, json!({"redacted": true}));
         assert!(!logged.to_string().contains("private-answer"));
-    }
-
-    #[test]
-    fn configured_mcp_completion_reconciles_budget_immediately() {
-        let mut budget = BudgetState {
-            rollout_token_budget_tokens: Some(100),
-            tokens_spent: 10,
-            reserved_child_tokens: 0,
-            transferred_in_tokens: 0,
-            transferred_out_tokens: 0,
-        };
-        let command = vec![
-            "sh".to_string(),
-            "-c".to_string(),
-            concat!(
-                "cat >/dev/null; printf '%s\\n' '",
-                "{\"success\":true,\"rollout_token_budget_tokens\":100,",
-                "\"tokens_spent\":10,\"tokens_reserved_for_children\":0,",
-                "\"tokens_transferred_in\":50,\"tokens_transferred_out\":0}'"
-            )
-            .to_string(),
-        ];
-
-        let reconciled = reconcile_budget_after_mcp_tool(
-            "benchmark",
-            "score",
-            &[McpToolSelector {
-                server: "benchmark".to_string(),
-                tool: "score".to_string(),
-            }],
-            &mut budget,
-            Some(&command),
-        )
-        .expect("reconcile budget");
-
-        assert!(reconciled);
-        assert_eq!(budget.transferred_in_tokens, 50);
-        assert_eq!(budget.effective_rollout_token_budget_tokens(), Some(150));
-        assert_eq!(budget.tokens_remaining(), Some(140));
     }
 
     #[test]

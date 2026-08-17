@@ -25,7 +25,7 @@ from utils.benchmark_driver import (
     RolloutBenchmark,
     active_benchmark_item,
 )
-from utils.budget_ledger import append_budget_event
+from utils.benchmark_events import append_benchmark_event
 from utils.supergpqa_benchmark import SuperGpqaBenchmarkDriver, SuperGpqaConfig
 from utils.supergpqa_submit import submit_solution
 
@@ -50,7 +50,6 @@ class BenchmarkDriverTests(unittest.TestCase):
                 difficulty_filter=None,
                 start_task_index=0,
                 problem_pool_size=cap,
-                solve_reward_token_credit_tokens=50,
                 queue_path=root / "queue.json",
                 task_store_dir=root / "private",
                 dataset_cache_dir=root / "cache",
@@ -74,12 +73,11 @@ class BenchmarkDriverTests(unittest.TestCase):
 
             base = {
                 "continuation_context_path": str(root / "private-context.json"),
-                "budget_ledger_events": str(root / "ledger.jsonl"),
+                "benchmark_events_path": str(root / "benchmark-events.jsonl"),
             }
             codex = driver.prepare_rollout(first, backend="codex", context=base)
             self.assertIsInstance(codex, RolloutBenchmark)
             self.assertEqual(set(codex.mcp_servers), {"supergpqa"})
-            self.assertEqual(codex.mcp_budget_reconcile_tools, (("supergpqa", "submit_solution"),))
             codex_readme = codex.model_metadata["benchmark_readme"]
             self.assertIn(
                 "mcp__supergpqa__submit_solution",
@@ -118,26 +116,23 @@ class BenchmarkDriverTests(unittest.TestCase):
             self.assertIn("mcp__arc_agi__RESET", arc_readme)
             runtime_text = _format_runtime_markdown(
                 instance_uuid="fixture",
-                rollout_token_budget_tokens=100,
                 configured_problem_pool_size=None,
             )
-            self.assertNotIn("credited", runtime_text)
             self.assertNotIn("solved uuids", runtime_text)
             self.assertIn("benchmark-specific", runtime_text)
 
-    def test_outcomes_duplicate_credit_finalization_and_idempotent_close(self) -> None:
+    def test_outcomes_scoring_finalization_and_idempotent_close(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             driver = self.make_driver(root, cap=None)
             batch = driver.prepare_batch(0, root / "shared")
             record = batch.private[0]
-            ledger = root / "ledger.jsonl"
+            events_path = root / "benchmark-events.jsonl"
             instance = "instance"
-            append_budget_event(ledger, event_type="instance_created", instance_uuid=instance, metadata={"rollout_token_budget_tokens": 100})
+            events_path.touch()
             context = {
                 "instance_uuid": instance,
-                "budget_ledger_events": str(ledger),
-                "solve_reward_token_credit_tokens": 50,
+                "benchmark_events_path": str(events_path),
                 "generation": 0,
                 "seed": 17,
                 "task_index": 0,
@@ -157,14 +152,14 @@ class BenchmarkDriverTests(unittest.TestCase):
             correct = submit_solution(context=context, args={"uuid": record.problem_uid, "answer": "B"})
             duplicate = submit_solution(context=context, args={"uuid": record.problem_uid, "answer": "B"})
             self.assertFalse(wrong["correct"])
-            self.assertEqual(correct["credited_tokens"], 50)
-            self.assertEqual(duplicate["credited_tokens"], 0)
+            self.assertTrue(correct["correct"])
+            self.assertTrue(duplicate["correct"])
             item_ref = active_benchmark_item(context)
             self.assertEqual(
                 item_ref,
                 BenchmarkItemRef(record.problem_uid, record.task_id, record.task_index, 0),
             )
-            event_text = ledger.read_text(encoding="utf-8")
+            event_text = events_path.read_text(encoding="utf-8")
             generic_projection = item_ref.to_metadata() if item_ref is not None else {}
             self.assertNotIn("answer", json.dumps(generic_projection))
             self.assertNotIn(str(record.private_problem_path), json.dumps(generic_projection))
@@ -172,7 +167,6 @@ class BenchmarkDriverTests(unittest.TestCase):
             outcome = driver.collect_outcome(batch, instance_uuid=instance, context=context)
             self.assertIsInstance(outcome, BenchmarkOutcome)
             self.assertTrue(outcome.solved)
-            self.assertEqual(outcome.metadata["credit_tokens"], 50)
             final = driver.finalize_batch(batch, [outcome])
             self.assertEqual(final["solved_item_ids"], [record.problem_uid])
             resumed = self.make_driver(root, cap=None).prepare_batch(1, root / "shared2")
@@ -188,10 +182,10 @@ class BenchmarkDriverTests(unittest.TestCase):
             driver = self.make_driver(root)
             batch = driver.prepare_batch(2, root / "shared")
             record = batch.private[0]
-            ledger = root / "ledger.jsonl"
+            events_path = root / "benchmark-events.jsonl"
             instance = "historical-instance"
-            append_budget_event(
-                ledger,
+            append_benchmark_event(
+                events_path,
                 event_type="solution_scored",
                 instance_uuid=instance,
                 metadata={
@@ -207,7 +201,7 @@ class BenchmarkDriverTests(unittest.TestCase):
                 backend="codex",
                 context={
                     "continuation_context_path": str(root / "context.json"),
-                    "budget_ledger_events": str(ledger),
+                    "benchmark_events_path": str(events_path),
                     "instance_uuid": instance,
                 },
             )
@@ -225,7 +219,6 @@ class BenchmarkDriverTests(unittest.TestCase):
                 "spawn_slots_path": str(root / "slots.json"),
                 "spawn_slots_dir": str(root / "slots"),
                 "child_slot_cap": 2,
-                "minimum_child_budget_tokens": 10,
                 "active_benchmark_item": BenchmarkItemRef(
                     "arc-instance-42", "arc-task", 7, 9
                 ).to_metadata(),
@@ -239,8 +232,6 @@ class BenchmarkDriverTests(unittest.TestCase):
                 child_instance_uuid="future-child",
                 child_prompt="continue",
                 source_workspace_dir=None,
-                initial_budget_tokens=10,
-                parent_budget={"remaining_tokens": 100},
             )
             self.assertTrue(claimed["slot_claimed"])
             manifest = json.loads(

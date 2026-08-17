@@ -201,25 +201,12 @@ bash_tool: dict[str, Any] = {
 }
 
 
-budget_status_tool: dict[str, Any] = {
-    "type": "function",
-    "name": "budget_status",
-    "description": "Return this rollout's token budget, spent tokens, reserved/spent continuation budget, transfers, remaining budget, and minimum_child_budget_tokens.",
-    "strict": None,
-    "parameters": {
-        "type": "object",
-        "properties": {},
-        "required": [],
-    },
-}
-
-
 submit_solution_tool: dict[str, Any] = {
     "type": "function",
     "name": "submit_solution",
     "description": (
         "Submit a problem uuid from the shared workspace problem pool and its answer for immediate scoring. The response "
-        "returns correct/incorrect, reward, credited tokens, and updated budget."
+        "returns correct/incorrect and the benchmark reward."
     ),
     "strict": None,
     "parameters": {
@@ -239,43 +226,14 @@ submit_solution_tool: dict[str, Any] = {
 }
 
 
-transfer_tokens_tool: dict[str, Any] = {
-    "type": "function",
-    "name": "transfer_tokens",
-    "description": (
-        "Move token budget from this rollout to a live same-task peer. "
-        "The target's budget increases by exactly amount_tokens."
-    ),
-    "strict": None,
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "target_instance_uuid": {
-                "type": "string",
-                "description": "Instance UUID of a live peer rollout listed in runtime.md.",
-            },
-            "amount_tokens": {
-                "type": "integer",
-                "description": "Positive token budget amount to transfer.",
-            },
-        },
-        "required": ["target_instance_uuid", "amount_tokens"],
-    },
-}
-
-
 spawn_child_tool: dict[str, Any] = {
     "type": "function",
     "name": "spawn_child",
     "description": (
         "Competitively claim a next-iteration rollout slot by passing the child's "
         "inherited prompt, optionally copying a workspace-local directory into "
-        "the child workspace, and reserving exactly initial_budget_tokens from "
-        "this rollout. "
-        "initial_budget_tokens must be at least the runtime "
-        "minimum_child_budget_tokens. Slots are first-come first-served; one "
-        "rollout may claim multiple slots, and calls fail without reserving "
-        "budget after the task slot cap is full."
+        "the child workspace. Slots are first-come first-served; one rollout "
+        "may claim multiple slots, and calls fail after the task slot cap is full."
     ),
     "strict": None,
     "parameters": {
@@ -289,11 +247,8 @@ spawn_child_tool: dict[str, Any] = {
                 "type": "string",
                 "description": "Optional workspace-local directory whose contents should be copied into the child slot's inherited workspace. Nothing is copied implicitly; include README.md here if the child should inherit it. The same source can be reused for multiple child slots in this rollout and is consumed when the parent rollout finishes. Leave blank or omit for no inherited workspace files.",
             },
-            "initial_budget_tokens": {
-                "type": "integer",
-                "description": "Token budget to reserve from this rollout and assign exactly to the claimed slot. Must be at least minimum_child_budget_tokens from runtime.md.",
-            },
         },
-        "required": ["prompt", "initial_budget_tokens"],
+        "required": ["prompt"],
+        "additionalProperties": False,
     },
 }

@@ -27,7 +27,7 @@ from utils.benchmark_driver import (
     BenchmarkOutcome,
     active_benchmark_item,
 )
-from utils.budget_ledger import append_budget_event, read_budget_status
+from utils.benchmark_events import append_benchmark_event
 
 
 def _records(count: int = 6) -> list[dict[str, object]]:
@@ -96,7 +96,7 @@ def _supervisor_context(root: Path, name: str) -> dict[str, object]:
     for directory in (control, state, workdir):
         directory.mkdir(parents=True, mode=0o700)
         directory.chmod(0o700)
-    events = root / name / "budget_ledger.jsonl"
+    events = root / name / "benchmark_events.jsonl"
     events.touch(mode=0o600)
     events.chmod(0o600)
     return {
@@ -104,8 +104,7 @@ def _supervisor_context(root: Path, name: str) -> dict[str, object]:
         "continuation_context_path": str(control / "continuation_context.json"),
         "rollout_state_dir": str(state),
         "workdir": str(workdir),
-        "budget_ledger_events": str(events),
-        "minimum_child_budget_tokens": 300,
+        "benchmark_events_path": str(events),
     }
 
 
@@ -131,7 +130,6 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
                     state_path=root / "arc-benchmark-state.json",
                     seed=17,
                     problem_pool_size=cap,
-                    solve_reward_token_credit_tokens=50,
                     render_scale=2,
                 ),
                 records_loader=lambda: _records(),
@@ -191,7 +189,6 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
                 benchmark="arc-agi",
                 seed=23,
                 problem_pool_size=4,
-                solve_reward_token_credit_tokens=75,
             )
             queue = root / "must-not-exist/problem_queue.json"
             task_store = root / "must-not-exist/task_store"
@@ -207,7 +204,6 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
             self.assertIsInstance(driver, ArcAgiBenchmarkDriver)
             self.assertEqual(driver.config.seed, 23)
             self.assertEqual(driver.config.problem_pool_size, 4)
-            self.assertEqual(driver.config.solve_reward_token_credit_tokens, 75)
             self.assertFalse(queue.parent.exists())
             self.assertFalse(task_store.exists())
             self.assertFalse(dataset_cache.exists())
@@ -259,13 +255,7 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
             self.assertEqual(config["tool_timeout_sec"], 60)
             self.assertEqual(set(config["env"]), {"METALANGUAGE_ARC_CONTEXT"})
             self.assertNotIn(config["env"]["METALANGUAGE_ARC_CONTEXT"], config["args"])
-            self.assertEqual(
-                rollout_a.mcp_budget_reconcile_tools,
-                tuple(("arc_agi", tool) for tool in ARC_TOOL_NAMES),
-            )
             self.assertFalse(rollout_a.sensitive_mcp_tools)
-            self.assertEqual(rollout_a.context["minimum_child_budget_tokens"], 300)
-            self.assertEqual(rollout_b.context["minimum_child_budget_tokens"], 300)
 
             path_a = Path(config["env"]["METALANGUAGE_ARC_CONTEXT"])
             path_b = Path(rollout_b.mcp_servers["arc_agi"]["env"]["METALANGUAGE_ARC_CONTEXT"])
@@ -275,7 +265,6 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
             private_payload = json.loads(path_a.read_text())
             self.assertEqual(private_payload["version"], DRIVER_CONTEXT_VERSION)
             self.assertEqual(private_payload["instance_uuid"], "rollout-a")
-            self.assertEqual(private_payload["solve_reward_token_credit_tokens"], 50)
             self.assertEqual(
                 set(private_payload["benchmark_items"]),
                 set(private_payload["allowed_game_ids"]),
@@ -294,7 +283,7 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
             for private in (
                 str(path_a),
                 str(loaded_a.state_path),
-                str(context_a["budget_ledger_events"]),
+                str(context_a["benchmark_events_path"]),
                 loaded_a.base_url,
                 "guid",
                 "card_id",
@@ -307,7 +296,6 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
             self.assertIn("benchmark_readme", rollout_a.model_metadata)
             self.assertIn("mcp__arc_agi__RESET", public)
             self.assertIn("available_actions", public)
-            self.assertIn("solve-credit budget", public)
             with self.assertRaisesRegex(RuntimeError, "paths are not isolated"):
                 driver.prepare_rollout(
                     batch,
@@ -317,7 +305,7 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
             self.assertTrue(path_a.is_file())
             driver.close()
 
-    def test_level_credits_are_immediate_once_and_rollout_local(self) -> None:
+    def test_command_events_are_immediate_and_rollout_local(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             driver, _ = self._driver(root)
@@ -339,14 +327,8 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
             ).allowed_game_ids[0]
 
             for rollout in rollouts:
-                events_path = Path(rollout.context["budget_ledger_events"])
+                events_path = Path(rollout.context["benchmark_events_path"])
                 instance_uuid = str(rollout.context["instance_uuid"])
-                append_budget_event(
-                    events_path,
-                    event_type="instance_created",
-                    instance_uuid=instance_uuid,
-                    metadata={"rollout_token_budget_tokens": 300},
-                )
                 next_step = 0
 
                 def result(
@@ -399,39 +381,20 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
                 )
                 service.reset(selected_game)
                 service.action("ACTION1")
-                self.assertEqual(
-                    read_budget_status(events_path, instance_uuid)[
-                        "tokens_transferred_in"
-                    ],
-                    50,
-                )
                 service.action("ACTION1")
-                credited = read_budget_status(events_path, instance_uuid)
-                self.assertEqual(credited["tokens_transferred_in"], 100)
-                self.assertEqual(credited["effective_rollout_token_budget_tokens"], 400)
-                self.assertEqual(credited["tokens_remaining"], 400)
                 service.action("ACTION1")
-                self.assertEqual(
-                    read_budget_status(events_path, instance_uuid)[
-                        "tokens_transferred_in"
-                    ],
-                    100,
-                )
                 events = [
                     json.loads(line) for line in events_path.read_text().splitlines()
                 ]
-                credits = [
+                commands = [
                     event
                     for event in events
-                    if event["event_type"] == "solve_reward_credit"
+                    if event["event_type"] == "benchmark_command_completed"
+                    and event["instance_uuid"] == instance_uuid
                 ]
-                self.assertEqual(len(credits), 2)
-                self.assertEqual([event["amount_tokens"] for event in credits], [50, 50])
-                self.assertEqual(
-                    [event["metadata"]["level_index"] for event in credits], [1, 2]
-                )
-                self.assertNotIn("guid", json.dumps(credits))
-                self.assertNotIn("card", json.dumps(credits))
+                self.assertEqual(len(commands), 4)
+                self.assertNotIn("guid", json.dumps(commands))
+                self.assertNotIn("card", json.dumps(commands))
             driver.close()
 
     def test_reset_selection_event_is_idempotent_and_drives_spawn_provenance(self) -> None:
@@ -443,8 +406,8 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
                 _supervisor_context(root, "selection-a"),
                 _supervisor_context(root, "selection-b"),
             ]
-            contexts[1]["budget_ledger_events"] = contexts[0][
-                "budget_ledger_events"
+            contexts[1]["benchmark_events_path"] = contexts[0][
+                "benchmark_events_path"
             ]
             rollouts = [
                 driver.prepare_rollout(batch, backend="codex", context=context)
@@ -517,9 +480,9 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
             def fail_selection(*args: object, **kwargs: object):
                 if kwargs.get("event_type") == "benchmark_item_selected":
                     raise OSError("fixture")
-                return append_budget_event(*args, **kwargs)
+                return append_benchmark_event(*args, **kwargs)
 
-            with patch("utils.arc_agi_mcp.append_budget_event", side_effect=fail_selection):
+            with patch("utils.arc_agi_mcp.append_benchmark_event", side_effect=fail_selection):
                 with self.assertRaisesRegex(Exception, "provenance"):
                     services[0].reset(selected_game)
             services[0].reset(selected_game)
@@ -536,7 +499,7 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
 
             expected_refs: list[BenchmarkItemRef] = []
             for rollout in rollouts:
-                events_path = Path(rollout.context["budget_ledger_events"])
+                events_path = Path(rollout.context["benchmark_events_path"])
                 events = [json.loads(line) for line in events_path.read_text().splitlines()]
                 selected_events = [
                     event
@@ -577,15 +540,12 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
                 "spawn_slots_path": str(root / "spawn-slots.json"),
                 "spawn_slots_dir": str(root / "spawn-slots"),
                 "child_slot_cap": 1,
-                "minimum_child_budget_tokens": 10,
             }
             claimed = _claim_spawn_slot(
                 context=spawn_context,
                 child_instance_uuid="arc-child",
                 child_prompt="continue",
                 source_workspace_dir=None,
-                initial_budget_tokens=10,
-                parent_budget={"remaining_tokens": 100},
             )
             self.assertTrue(claimed["slot_claimed"])
             manifest = json.loads(
@@ -810,8 +770,8 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
                     guid="private-guid",
                 )
                 for step_index in range(1, 4):
-                    append_budget_event(
-                        Path(rollout.context["budget_ledger_events"]),
+                    append_benchmark_event(
+                        Path(rollout.context["benchmark_events_path"]),
                         event_type="benchmark_command_completed",
                         instance_uuid=str(rollout.context["instance_uuid"]),
                         metadata={
@@ -860,21 +820,6 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
                     "state": "NOT_FINISHED",
                 }
             )
-            append_budget_event(
-                Path(rollout_b.context["budget_ledger_events"]),
-                event_type="solve_reward_credit",
-                instance_uuid="b",
-                amount_tokens=50,
-                metadata={
-                    "benchmark": "arc-agi",
-                    "benchmark_item": selected_ref.to_metadata(),
-                    "game_id": selected_game,
-                    "item_id": selected_ref.item_id,
-                    "reward": 1.0,
-                    "level_index": 4,
-                    "completion_policy": "official_level_completed",
-                },
-            )
             closed_outcome = driver.collect_outcome(
                 batch, instance_uuid="b", context=rollout_b.context
             )
@@ -883,15 +828,11 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
             self.assertTrue(closed_outcome.metadata["official_win_observed"])
             self.assertTrue(closed_outcome.solved)
             self.assertFalse(closed_outcome.metadata["scorecard_available"])
-            self.assertTrue(closed_outcome.metadata["reward_credit_claimed"])
-            self.assertEqual(closed_outcome.metadata["credited_tokens"], 50)
 
             summary = driver.finalize_batch(batch, [outcome_a, closed_outcome])
             self.assertEqual(summary["attempted_count"], 2)
             self.assertEqual(summary["selected_item_count"], 1)
             self.assertEqual(summary["solved_count"], 1)
-            self.assertEqual(summary["credited_rollout_count"], 1)
-            self.assertEqual(summary["solve_reward_credit_tokens_total"], 50)
             self.assertEqual(summary["reward_total"], 1)
             self.assertEqual(summary["total_actions"], 3)
             self.assertEqual(summary["total_accounted_actions"], 6)

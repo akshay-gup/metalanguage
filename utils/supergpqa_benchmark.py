@@ -16,7 +16,7 @@ from utils.benchmark_driver import BenchmarkItemRef, BenchmarkOutcome, PreparedB
 from utils.hf_datasets import HFDatasetDataLoader
 from utils.openrouter import submit_solution_tool
 from utils.problem_pool_sampling import deterministic_problem_pool_sample
-from utils.supergpqa_submit import latest_solution_scored_event, solution_scored_events, solve_reward_credit_total, submit_solution
+from utils.supergpqa_submit import latest_solution_scored_event, solution_scored_events, submit_solution
 from utils.task_store import compute_problem_uid, write_private_problem_record
 
 
@@ -64,7 +64,6 @@ class SuperGpqaConfig:
     difficulty_filter: tuple[str, ...] | None
     start_task_index: int
     problem_pool_size: int | None
-    solve_reward_token_credit_tokens: int
     queue_path: Path
     task_store_dir: Path
     dataset_cache_dir: Path
@@ -309,10 +308,9 @@ class SuperGpqaBenchmarkDriver:
             "problem_pool_count": len(records),
             "task_store_dir": str(self.config.task_store_dir),
             "dataset_cache_dir": str(self.config.dataset_cache_dir),
-            "solve_reward_token_credit_tokens": self.config.solve_reward_token_credit_tokens,
         }
         latest = latest_solution_scored_event(
-            Path(str(context["budget_ledger_events"])),
+            Path(str(context["benchmark_events_path"])),
             str(context.get("instance_uuid") or ""),
         )
         historical_ref = _item_ref_from_solution_metadata(
@@ -346,7 +344,6 @@ class SuperGpqaBenchmarkDriver:
             {"benchmark_readme": benchmark_readme, "submit_tool": submit_tool},
             mcp,
             (("supergpqa", "submit_solution"),),
-            (("supergpqa", "submit_solution"),),
         )
 
     def handle_tool(self, rollout: RolloutBenchmark, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
@@ -355,7 +352,7 @@ class SuperGpqaBenchmarkDriver:
         return submit_solution(context=rollout.context, args=arguments)
 
     def collect_outcome(self, batch: PreparedBatch, *, instance_uuid: str, context: dict[str, Any]) -> BenchmarkOutcome:
-        events = solution_scored_events(Path(str(context["budget_ledger_events"])), instance_uuid)
+        events = solution_scored_events(Path(str(context["benchmark_events_path"])), instance_uuid)
         if not events:
             return BenchmarkOutcome(
                 instance_uuid,
@@ -375,7 +372,6 @@ class SuperGpqaBenchmarkDriver:
                     "solved_problem_count": 0,
                     "solved_problem_uids": [],
                     "solved_task_ids": [],
-                    "solve_reward_credit_tokens": 0,
                     "solution_feedback": None,
                     "private_problem_path": None,
                 },
@@ -385,7 +381,6 @@ class SuperGpqaBenchmarkDriver:
         solved_ids = list(dict.fromkeys(str(row["problem_uid"]) for row in rows if row.get("solved") and row.get("problem_uid")))
         solved_tasks = list(dict.fromkeys(str(row["task_id"]) for row in rows if row.get("solved") and row.get("task_id")))
         reward = sum(float(row.get("reward") or 0.0) for row in rows)
-        credit = solve_reward_credit_total(Path(str(context["budget_ledger_events"])), instance_uuid)
         feedback = {
             "correct": bool(latest.get("solved")),
             "solved": bool(solved_ids),
@@ -395,8 +390,6 @@ class SuperGpqaBenchmarkDriver:
             "solved_task_ids": solved_tasks,
             "reward": reward,
             "latest_reward": float(latest.get("reward") or 0.0),
-            "credited_tokens": int(latest.get("solve_reward_credit_tokens") or 0),
-            "total_credited_tokens": credit,
             "submitted_uuid": latest.get("submitted_uuid"),
         }
         item_ref = _item_ref_from_solution_metadata(latest)
@@ -413,7 +406,6 @@ class SuperGpqaBenchmarkDriver:
                 "solution_count": len(events),
                 "solved_item_ids": solved_ids,
                 "solved_task_ids": solved_tasks,
-                "credit_tokens": credit,
                 "feedback": feedback,
             },
             item_ref=item_ref,
@@ -425,7 +417,6 @@ class SuperGpqaBenchmarkDriver:
                 "solved_problem_count": len(solved_ids),
                 "solved_problem_uids": solved_ids,
                 "solved_task_ids": solved_tasks,
-                "solve_reward_credit_tokens": credit,
                 "solution_feedback": feedback,
                 "submitted_uuid": latest.get("submitted_uuid"),
                 "reported_problem_uid": None,

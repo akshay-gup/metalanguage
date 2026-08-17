@@ -50,7 +50,6 @@ class ArcAgiConfig:
     state_path: Path
     seed: int = 42
     problem_pool_size: int | None = None
-    solve_reward_token_credit_tokens: int = 0
     render_scale: int = 4
     server_readiness_timeout: float = 30.0
     mcp_startup_timeout_sec: int = 10
@@ -68,12 +67,6 @@ class ArcAgiConfig:
             or self.problem_pool_size <= 0
         ):
             raise ValueError("problem_pool_size must be a positive integer or None")
-        if (
-            isinstance(self.solve_reward_token_credit_tokens, bool)
-            or not isinstance(self.solve_reward_token_credit_tokens, int)
-            or self.solve_reward_token_credit_tokens < 0
-        ):
-            raise ValueError("solve_reward_token_credit_tokens must be a non-negative integer")
         if (
             isinstance(self.render_scale, bool)
             or not isinstance(self.render_scale, int)
@@ -267,7 +260,7 @@ class ArcAgiBenchmarkDriver:
         )
         workdir = _absolute_path(context.get("workdir"), "workdir")
         benchmark_events_path = _absolute_path(
-            context.get("budget_ledger_events"), "budget_ledger_events"
+            context.get("benchmark_events_path"), "benchmark_events_path"
         )
         control_root = continuation_path.parent
         raw_state_base = context.get("rollout_state_dir")
@@ -306,9 +299,6 @@ class ArcAgiBenchmarkDriver:
                 "rollout_root": str(rollout_root),
                 "artifact_root": str(artifact_root),
                 "render_scale": self.config.render_scale,
-                "solve_reward_token_credit_tokens": (
-                    self.config.solve_reward_token_credit_tokens
-                ),
                 "instance_uuid": instance_uuid,
                 "benchmark_events_path": str(benchmark_events_path),
                 "benchmark_items": {
@@ -368,9 +358,6 @@ class ArcAgiBenchmarkDriver:
                     "tool_timeout_sec": self.config.mcp_tool_timeout_sec,
                 }
             },
-            mcp_budget_reconcile_tools=tuple(
-                ("arc_agi", tool_name) for tool_name in ARC_TOOL_NAMES
-            ),
         )
 
     def collect_outcome(
@@ -434,12 +421,7 @@ class ArcAgiBenchmarkDriver:
             iteration_index=state.iteration_index,
         )
         accounting = _safe_command_accounting(
-            context.get("budget_ledger_events"),
-            instance_uuid,
-            item_ref,
-        )
-        credited_tokens = _safe_arc_credit(
-            context.get("budget_ledger_events"),
+            context.get("benchmark_events_path"),
             instance_uuid,
             item_ref,
         )
@@ -462,11 +444,6 @@ class ArcAgiBenchmarkDriver:
             "closed": snapshot.closed,
             "scorecard_available": scorecard_available,
             "reward": 1.0 if official_win_observed else 0.0,
-            "reward_credit_claimed": credited_tokens > 0,
-            "credited_tokens": credited_tokens,
-            "configured_solve_reward_token_credit_tokens": (
-                self.config.solve_reward_token_credit_tokens
-            ),
             **metrics,
             **accounting,
         }
@@ -564,14 +541,6 @@ class ArcAgiBenchmarkDriver:
             "total_solved_item_ids": total_solved,
             "solved_count": len(won_ids),
             "reward_total": float(sum(outcome.reward for outcome in outcomes)),
-            "credited_rollout_count": sum(
-                bool(outcome.metadata.get("reward_credit_claimed"))
-                for outcome in outcomes
-            ),
-            "solve_reward_credit_tokens_total": sum(
-                _safe_int(outcome.metadata.get("credited_tokens"))
-                for outcome in outcomes
-            ),
             "fitness_pending": False,
             "completion_policy": "official_command_win_observed",
         }
@@ -796,39 +765,6 @@ def _safe_command_accounting(
             command: commands.get(command, 0) for command in ARC_TOOL_NAMES
         },
     }
-
-
-def _safe_arc_credit(
-    events_path: Any,
-    instance_uuid: str,
-    item_ref: BenchmarkItemRef,
-) -> int:
-    if not isinstance(events_path, str):
-        return 0
-    try:
-        lines = Path(events_path).read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return 0
-    total = 0
-    for line in lines:
-        try:
-            event = json.loads(line)
-        except (TypeError, ValueError):
-            continue
-        if (
-            not isinstance(event, dict)
-            or event.get("event_type") != "solve_reward_credit"
-            or event.get("instance_uuid") != instance_uuid
-        ):
-            continue
-        metadata = event.get("metadata")
-        if (
-            isinstance(metadata, dict)
-            and metadata.get("benchmark") == "arc-agi"
-            and metadata.get("benchmark_item") == item_ref.to_metadata()
-        ):
-            total += _safe_int(event.get("amount_tokens"))
-    return total
 
 
 def _safe_int(value: Any) -> int:

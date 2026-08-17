@@ -12,7 +12,6 @@ from typing import Any
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-from utils.budget_ledger import append_budget_event
 from utils.supergpqa_benchmark import supergpqa_mcp_servers
 
 
@@ -33,21 +32,15 @@ def _fixture(root: Path, name: str, expected_answer: str = "B") -> tuple[Path, P
         ),
         encoding="utf-8",
     )
-    ledger_path = root / f"{name}-ledger.jsonl"
+    events_path = root / f"{name}-benchmark-events.jsonl"
+    events_path.touch()
     instance_uuid = f"instance-{name}"
-    append_budget_event(
-        ledger_path,
-        event_type="instance_created",
-        instance_uuid=instance_uuid,
-        metadata={"rollout_token_budget_tokens": 100},
-    )
     context_path = root / f"{name}-context.json"
     context_path.write_text(
         json.dumps(
             {
                 "instance_uuid": instance_uuid,
-                "budget_ledger_events": str(ledger_path),
-                "solve_reward_token_credit_tokens": 50,
+                "benchmark_events_path": str(events_path),
                 "generation": 0,
                 "seed": 42,
                 "task_index": 0,
@@ -66,7 +59,7 @@ def _fixture(root: Path, name: str, expected_answer: str = "B") -> tuple[Path, P
         ),
         encoding="utf-8",
     )
-    return context_path, ledger_path
+    return context_path, events_path
 
 
 def _server_parameters(context_path: Path) -> StdioServerParameters:
@@ -94,10 +87,10 @@ def _result_payload(result: Any) -> dict[str, Any]:
 
 
 class SuperGpqaMcpTests(unittest.IsolatedAsyncioTestCase):
-    async def test_protocol_scoring_duplicate_credit_and_secrecy(self) -> None:
+    async def test_protocol_scoring_and_secrecy(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            context_path, ledger_path = _fixture(root, "one")
+            context_path, events_path = _fixture(root, "one")
             async with stdio_client(_server_parameters(context_path)) as streams:
                 async with ClientSession(*streams) as session:
                     await session.initialize()
@@ -124,31 +117,21 @@ class SuperGpqaMcpTests(unittest.IsolatedAsyncioTestCase):
                     )
 
             self.assertFalse(incorrect["correct"])
-            self.assertEqual(incorrect["credited_tokens"], 0)
             self.assertTrue(correct["correct"])
-            self.assertEqual(correct["credited_tokens"], 50)
-            self.assertTrue(correct["reward_credit_claimed"])
-            self.assertEqual(correct["budget_status"]["tokens_transferred_in"], 50)
             self.assertTrue(duplicate["correct"])
-            self.assertEqual(duplicate["credited_tokens"], 0)
-            self.assertFalse(duplicate["reward_credit_claimed"])
-            self.assertEqual(duplicate["total_credited_tokens"], 50)
             public_text = json.dumps([incorrect, correct, duplicate], sort_keys=True)
             self.assertNotIn(str(context_path), public_text)
             self.assertNotIn(str(root / "one-private.json"), public_text)
-            events = [json.loads(line) for line in ledger_path.read_text().splitlines()]
+            events = [json.loads(line) for line in events_path.read_text().splitlines()]
             self.assertEqual(
                 sum(event["event_type"] == "solution_scored" for event in events), 3
-            )
-            self.assertEqual(
-                sum(event["event_type"] == "solve_reward_credit" for event in events), 1
             )
 
     async def test_two_server_processes_keep_contexts_isolated(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            context_a, ledger_a = _fixture(root, "a", "B")
-            context_b, ledger_b = _fixture(root, "b", "C")
+            context_a, events_a = _fixture(root, "a", "B")
+            context_b, events_b = _fixture(root, "b", "C")
             async with stdio_client(_server_parameters(context_a)) as streams_a:
                 async with ClientSession(*streams_a) as session_a:
                     await session_a.initialize()
@@ -167,10 +150,10 @@ class SuperGpqaMcpTests(unittest.IsolatedAsyncioTestCase):
                     )
             self.assertTrue(result_a["correct"])
             self.assertFalse(result_b["correct"])
-            self.assertIn("problem-a", ledger_a.read_text())
-            self.assertNotIn("problem-b", ledger_a.read_text())
-            self.assertIn("problem-b", ledger_b.read_text())
-            self.assertNotIn("problem-a", ledger_b.read_text())
+            self.assertIn("problem-a", events_a.read_text())
+            self.assertNotIn("problem-b", events_a.read_text())
+            self.assertIn("problem-b", events_b.read_text())
+            self.assertNotIn("problem-a", events_b.read_text())
 
     def test_runner_config_is_private_required_and_per_rollout(self) -> None:
         context = Path("/private/rollout/context.json")

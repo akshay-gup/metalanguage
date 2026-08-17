@@ -30,14 +30,17 @@ from utils.arc_agi_rollout import (
     step_arc_rollout_command,
 )
 from utils.benchmark_driver import BenchmarkItemRef
-from utils.budget_ledger import append_budget_event, budget_ledger_transaction
+from utils.benchmark_events import (
+    append_benchmark_event,
+    benchmark_event_transaction,
+)
 
 
 CONTEXT_ENV = "METALANGUAGE_ARC_CONTEXT"
 CONTEXT_SCHEMA = "metalanguage.arc_mcp_context"
 CONTEXT_VERSION = 1
 LEGACY_DRIVER_CONTEXT_VERSION = 2
-DRIVER_CONTEXT_VERSION = 3
+DRIVER_CONTEXT_VERSION = 4
 _CONTEXT_FIELDS_V1 = {
     "schema",
     "version",
@@ -54,7 +57,6 @@ _CONTEXT_FIELDS_V2 = _CONTEXT_FIELDS_V1 | {
     "benchmark_events_path",
     "benchmark_items",
 }
-_CONTEXT_FIELDS_V3 = _CONTEXT_FIELDS_V2 | {"solve_reward_token_credit_tokens"}
 
 mcp = FastMCP("ARC-AGI", json_response=True)
 
@@ -75,7 +77,6 @@ class ArcMcpContext:
     instance_uuid: str | None = field(default=None, repr=False)
     benchmark_events_path: Path | None = field(default=None, repr=False)
     benchmark_items: dict[str, BenchmarkItemRef] = field(default_factory=dict, repr=False)
-    solve_reward_token_credit_tokens: int = field(default=0, repr=False)
 
 
 class ArcCommandService:
@@ -185,51 +186,17 @@ class ArcCommandService:
             "win_levels": win_levels,
         }
         try:
-            def build_events(_status: dict[str, Any]) -> list[dict[str, Any]]:
-                specs: list[dict[str, Any]] = []
-                if not _command_event_exists(
-                    events_path, self.context.instance_uuid, step_index
-                ):
-                    specs.append(
-                        {
-                            "event_type": "benchmark_command_completed",
-                            "instance_uuid": self.context.instance_uuid,
-                            "metadata": command_metadata,
-                        }
-                    )
-                credit = self.context.solve_reward_token_credit_tokens
-                if credit > 0:
-                    for level_index in range(1, levels_completed + 1):
-                        if _level_credit_exists(
-                            events_path,
-                            self.context.instance_uuid,
-                            item_ref.item_id,
-                            level_index,
-                        ):
-                            continue
-                        specs.append(
-                            {
-                                "event_type": "solve_reward_credit",
-                                "instance_uuid": self.context.instance_uuid,
-                                "amount_tokens": credit,
-                                "metadata": {
-                                    "benchmark": "arc-agi",
-                                    "benchmark_item": item_ref.to_metadata(),
-                                    "game_id": game_id,
-                                    "item_id": item_ref.item_id,
-                                    "level_index": level_index,
-                                    "reward": 1.0,
-                                    "completion_policy": "official_level_completed",
-                                },
-                            }
-                        )
-                return specs
-
-            budget_ledger_transaction(
+            benchmark_event_transaction(
                 events_path,
-                debit_instance_uuid=self.context.instance_uuid,
-                required_tokens=0,
-                build_event_specs=build_events,
+                lambda existing: []
+                if _command_event_exists(existing, self.context.instance_uuid, step_index)
+                else [
+                    {
+                        "event_type": "benchmark_command_completed",
+                        "instance_uuid": self.context.instance_uuid,
+                        "metadata": command_metadata,
+                    }
+                ],
             )
         except ArcAgiMcpError:
             raise
@@ -249,7 +216,7 @@ class ArcCommandService:
         try:
             if _selection_exists(events_path, self.context.instance_uuid, expected):
                 return
-            append_budget_event(
+            append_benchmark_event(
                 events_path,
                 event_type="benchmark_item_selected",
                 instance_uuid=self.context.instance_uuid,
@@ -283,7 +250,7 @@ def load_context(path: str | Path) -> ArcMcpContext:
         if version == CONTEXT_VERSION
         else _CONTEXT_FIELDS_V2
         if version == LEGACY_DRIVER_CONTEXT_VERSION
-        else _CONTEXT_FIELDS_V3
+        else _CONTEXT_FIELDS_V2
         if version == DRIVER_CONTEXT_VERSION
         else None
     )
@@ -336,7 +303,6 @@ def load_context(path: str | Path) -> ArcMcpContext:
     instance_uuid: str | None = None
     events_path: Path | None = None
     benchmark_items: dict[str, BenchmarkItemRef] = {}
-    credit_tokens = 0
     if version in (LEGACY_DRIVER_CONTEXT_VERSION, DRIVER_CONTEXT_VERSION):
         instance_uuid = value.get("instance_uuid")
         if not isinstance(instance_uuid, str) or not instance_uuid:
@@ -362,14 +328,6 @@ def load_context(path: str | Path) -> ArcMcpContext:
             benchmark_items[game_id] = item_ref
         if len({item.item_id for item in benchmark_items.values()}) != len(benchmark_items):
             raise ArcAgiMcpError("ARC handler context has duplicate benchmark items")
-        if version == DRIVER_CONTEXT_VERSION:
-            credit_tokens = value.get("solve_reward_token_credit_tokens")
-            if (
-                isinstance(credit_tokens, bool)
-                or not isinstance(credit_tokens, int)
-                or credit_tokens < 0
-            ):
-                raise ArcAgiMcpError("ARC handler context has invalid solve reward credit")
 
     return ArcMcpContext(
         tuple(games),
@@ -382,7 +340,6 @@ def load_context(path: str | Path) -> ArcMcpContext:
         instance_uuid,
         events_path,
         benchmark_items,
-        credit_tokens,
     )
 
 
@@ -411,19 +368,11 @@ def _selection_exists(
 
 
 def _command_event_exists(
-    events_path: Path,
+    events: list[dict[str, Any]],
     instance_uuid: str,
     step_index: int,
 ) -> bool:
-    try:
-        lines = events_path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return False
-    for line in reversed(lines):
-        try:
-            event = json.loads(line)
-        except (TypeError, ValueError):
-            continue
+    for event in reversed(events):
         if (
             isinstance(event, dict)
             and event.get("event_type") == "benchmark_command_completed"
@@ -431,37 +380,6 @@ def _command_event_exists(
         ):
             metadata = event.get("metadata")
             if isinstance(metadata, dict) and metadata.get("step_index") == step_index:
-                return True
-    return False
-
-
-def _level_credit_exists(
-    events_path: Path,
-    instance_uuid: str,
-    item_id: str,
-    level_index: int,
-) -> bool:
-    try:
-        lines = events_path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return False
-    for line in reversed(lines):
-        try:
-            event = json.loads(line)
-        except (TypeError, ValueError):
-            continue
-        if (
-            isinstance(event, dict)
-            and event.get("event_type") == "solve_reward_credit"
-            and event.get("instance_uuid") == instance_uuid
-        ):
-            metadata = event.get("metadata")
-            if (
-                isinstance(metadata, dict)
-                and metadata.get("benchmark") == "arc-agi"
-                and metadata.get("item_id") == item_id
-                and metadata.get("level_index") == level_index
-            ):
                 return True
     return False
 
