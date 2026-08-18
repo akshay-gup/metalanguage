@@ -97,7 +97,7 @@ BUNDLED_BOOTSTRAP_SEED_DIR = PROJECT_ROOT / "seeds" / "bootstrap"
 RUNTIME_BENCHMARK_IDENTITY_FILENAME = "runtime_benchmark.json"
 STABLE_SEED_FILENAMES = ("README.md",)
 READ_README_TASK_INSTRUCTIONS = (
-    "Read README.md and BENCHMARK.md and do all tasks from those files."
+    "This rollout has no assigned task. README.md describes its environment."
 )
 CODEX_READ_README_BASE_INSTRUCTIONS = READ_README_TASK_INSTRUCTIONS
 BENCHMARK_README_FILENAME = "BENCHMARK.md"
@@ -280,7 +280,7 @@ def _format_runtime_markdown(
         "- each benchmark item appears at most once in this pool copy;",
         "- items not completed under the benchmark's official policy may reappear later;",
         "- officially completed items may leave future pools after batch finalization;",
-        "- same-batch rollouts share this pool and may independently choose the same item; reward policy is benchmark-specific.",
+        "- same-batch rollouts share this pool and may independently interact with the same item; scoring policy is benchmark-specific.",
     ]
     if live_peer_instances:
         lines.extend(["", "## Live Peer Instances", ""])
@@ -2291,6 +2291,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
 
         problem_pool_json_path = shared_workspace_dir / "problem_pool.json"
         problem_pool_markdown_path = shared_workspace_dir / "problem_pool.md"
+        benchmark_readme_path = shared_workspace_dir / BENCHMARK_README_FILENAME
         prepared_benchmark_batch: PreparedBatch | None = None
         if not child_slots_already_full:
             prepared_benchmark_batch = benchmark_driver.prepare_batch(
@@ -2299,6 +2300,8 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             )
             if prepared_benchmark_batch.item_count <= 0:
                 raise RuntimeError("No unsolved problems are available for the rollout problem pool.")
+            if not benchmark_readme_path.is_file():
+                raise RuntimeError("benchmark driver did not provide shared benchmark instructions")
         problem_pool_count = (
             prepared_benchmark_batch.item_count
             if prepared_benchmark_batch is not None
@@ -2487,11 +2490,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 ),
                 encoding="utf-8",
             )
-            benchmark_readme = rollout_benchmark.model_metadata.get("benchmark_readme")
-            if not isinstance(benchmark_readme, str) or not benchmark_readme.strip():
-                raise RuntimeError("benchmark driver did not provide benchmark README text")
-            benchmark_readme_path = temp_dir / BENCHMARK_README_FILENAME
-            benchmark_readme_path.write_text(benchmark_readme.rstrip() + "\n", encoding="utf-8")
             continuation_context_path = (
                 _write_continuation_context(continuation_context, rollout_control_dir)
                 if args.worker_backend == "codex"
@@ -2629,12 +2627,8 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             solved = benchmark_outcome.solved
             if not benchmark_outcome.attempted:
                 _progress(
-                    (
-                        "solution_missing"
-                        if args.benchmark == "supergpqa"
-                        else "benchmark_outcome_missing"
-                    ),
-                    error=benchmark_outcome.error,
+                    "benchmark_not_attempted",
+                    benchmark=args.benchmark,
                 )
             _progress(
                 "rollout_scored",
@@ -2772,7 +2766,8 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             summary = (
                 f"gen={args.generation} seed={args.seed} task_index={task_index} rollout_index={rollout_index} "
                 f"rollout_username={rollout_username} task_id={record_task_id or 'unassigned'} "
-                f"solved={solved} output={output_dir}"
+                f"benchmark_attempted={benchmark_outcome.attempted} "
+                f"benchmark_solved={solved} output={output_dir}"
             )
             if worker_result.status == "error":
                 summary += f" error={worker_result.stop_reason}"

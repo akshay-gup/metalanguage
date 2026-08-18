@@ -1,12 +1,13 @@
-# SuperGPQA Benchmark
+# SuperGPQA Human-Task Interface
 
-Choose a problem by exact `uuid` from the shared pool.
+The shared problem pool contains multiple-choice human tasks keyed by exact
+`uuid`.
 
-Submit with:
+The official submission interface is:
 
 ```text
 {submit_tool}(uuid=..., answer=...)
 ```
 
-For multiple choice tasks, submit the option letter or exact option text. Call
-`spawn_child` before extended additional work so the lineage can continue.
+The `answer` value accepts an option letter or exact option text. Calls through
+this interface produce the benchmark's official scoring record.

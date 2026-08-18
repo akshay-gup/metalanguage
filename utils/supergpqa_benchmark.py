@@ -262,12 +262,32 @@ class SuperGpqaBenchmarkDriver:
             backend=self.config.backend,
             iteration_index=iteration_index,
         )
+        benchmark_readme_path = shared_workspace / "BENCHMARK.md"
+        benchmark_readme_path.write_text(
+            self._benchmark_readme(self.config.backend).rstrip() + "\n",
+            encoding="utf-8",
+        )
         return PreparedBatch(
             self.name,
             iteration_index,
             len(sampled),
-            {"problem_pool_json_path": str(json_path), "problem_pool_markdown_path": str(markdown_path)},
+            {
+                "problem_pool_json_path": str(json_path),
+                "problem_pool_markdown_path": str(markdown_path),
+                "benchmark_readme_path": str(benchmark_readme_path),
+            },
             tuple(sampled),
+        )
+
+    @staticmethod
+    def _benchmark_readme(backend: str) -> str:
+        submit_tool = (
+            "mcp__supergpqa__submit_solution"
+            if backend == "codex"
+            else "submit_solution"
+        )
+        return SUPERGPQA_BENCHMARK_README_PATH.read_text(encoding="utf-8").format(
+            submit_tool=submit_tool,
         )
 
     def _write_pool(
@@ -280,7 +300,10 @@ class SuperGpqaBenchmarkDriver:
         iteration_index: int,
     ) -> None:
         tool = "mcp__supergpqa__submit_solution" if backend == "codex" else "submit_solution"
-        instruction = f"Choose a problem by uuid and submit with {tool}(uuid=..., answer=...)."
+        instruction = (
+            f"Problems are keyed by uuid. The official submission interface is "
+            f"{tool}(uuid=..., answer=...)."
+        )
         payload = {
             "metadata": {"pool_scope": "sampled_working_set" if self.config.problem_pool_size is not None else "full_unsolved_pool", "configured_problem_pool_size": self.config.problem_pool_size, "iteration_index": iteration_index, "problem_pool_count": len(records), "sampling_seed": self.config.seed},
             "instructions": instruction,
@@ -323,11 +346,7 @@ class SuperGpqaBenchmarkDriver:
             if backend == "codex"
             else "submit_solution"
         )
-        benchmark_readme = SUPERGPQA_BENCHMARK_README_PATH.read_text(
-            encoding="utf-8"
-        ).format(
-            submit_tool=submit_tool,
-        )
+        benchmark_readme = self._benchmark_readme(backend)
         if backend != "codex":
             return RolloutBenchmark(
                 benchmark_context,

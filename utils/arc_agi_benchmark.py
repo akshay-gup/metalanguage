@@ -204,11 +204,18 @@ class ArcAgiBenchmarkDriver:
                 )
                 if not Path(staged_json).is_file() or not Path(staged_markdown).is_file():
                     raise RuntimeError("ARC pool writer did not produce both pool files")
+                staged_readme = staging / "BENCHMARK.md"
+                staged_readme.write_text(
+                    ARC_BENCHMARK_README_PATH.read_text(encoding="utf-8").rstrip() + "\n",
+                    encoding="utf-8",
+                )
                 server = self._server_launcher(
                     readiness_timeout=self.config.server_readiness_timeout
                 )
                 os.replace(staged_json, final_json)
                 os.replace(staged_markdown, final_markdown)
+                final_readme = workspace / staged_readme.name
+                os.replace(staged_readme, final_readme)
         except Exception:
             if server is not None:
                 try:
@@ -233,6 +240,7 @@ class ArcAgiBenchmarkDriver:
             metadata={
                 "problem_pool_json_path": str(final_json),
                 "problem_pool_markdown_path": str(final_markdown),
+                "benchmark_readme_path": str(final_readme),
                 "configured_problem_pool_size": self.config.problem_pool_size,
                 "sampling_seed": self.config.seed,
             },

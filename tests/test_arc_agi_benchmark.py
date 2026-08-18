@@ -294,6 +294,10 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
                 self.assertNotIn(private, public)
             self.assertNotIn("instructions", rollout_a.model_metadata)
             self.assertIn("benchmark_readme", rollout_a.model_metadata)
+            self.assertEqual(
+                rollout_a.model_metadata["benchmark_readme"].strip(),
+                (root / "shared" / "BENCHMARK.md").read_text().strip(),
+            )
             self.assertIn("mcp__arc_agi__RESET", public)
             self.assertIn("available_actions", public)
             with self.assertRaisesRegex(RuntimeError, "paths are not isolated"):

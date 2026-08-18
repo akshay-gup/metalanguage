@@ -94,7 +94,7 @@ def write_arc_task_pool(
     lines = [
         "# ARC-AGI-3 Environment Pool",
         "",
-        "Choose an environment by uuid/game_id. This is an interactive environment pool, not a static answer dataset.",
+        "Records are keyed by uuid/game_id. This is an interactive environment pool, not a static answer dataset.",
         "",
         (
             "This is a deterministic sampled working set, not necessarily the full environment universe."

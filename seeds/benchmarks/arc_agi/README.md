@@ -1,15 +1,16 @@
-# ARC-AGI Benchmark
+# ARC-AGI Human-Task Interface
 
-Choose an official `game_id` from the shared ARC pool.
+The shared ARC pool contains interactive environments keyed by official
+`game_id`.
 
-Start or reset the selected game with:
+`RESET` starts or resets an environment instance:
 
 ```text
 mcp__arc_agi__RESET(game_id=...)
 ```
 
-Then use only official ARC commands whose integer IDs appear in the latest
-`available_actions`:
+The official action interface consists of the commands whose integer IDs appear
+in the latest `available_actions`:
 
 ```text
 mcp__arc_agi__ACTION1()
@@ -21,6 +22,6 @@ mcp__arc_agi__ACTION6(x=..., y=...)
 mcp__arc_agi__ACTION7()
 ```
 
-`ACTION6` requires integer `x` and `y` coordinates in `0..63`. Use the returned
+`ACTION6` has integer `x` and `y` coordinates in `0..63`. Responses contain
 ordered frames, official state, and available actions. Official `WIN` state is
 the completion signal used for scoring and retirement from future pools.

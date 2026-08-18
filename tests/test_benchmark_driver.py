@@ -83,7 +83,10 @@ class BenchmarkDriverTests(unittest.TestCase):
                 "mcp__supergpqa__submit_solution",
                 codex_readme,
             )
-            self.assertIn("spawn_child", codex_readme)
+            self.assertEqual(
+                codex_readme.strip(),
+                (root / "shared" / "BENCHMARK.md").read_text().strip(),
+            )
             self.assertNotIn("answer", json.dumps(codex.context["problem_pool_records"]))
             self.assertIn("mcp__supergpqa__submit_solution", (root / "shared" / "problem_pool.md").read_text())
             open_root = root / "openrouter"
@@ -94,6 +97,10 @@ class BenchmarkDriverTests(unittest.TestCase):
             openrouter_readme = openrouter.model_metadata["benchmark_readme"]
             self.assertIn(
                 "submit_solution(uuid=", openrouter_readme
+            )
+            self.assertEqual(
+                openrouter_readme.strip(),
+                (open_root / "shared" / "BENCHMARK.md").read_text().strip(),
             )
             self.assertIn("submit_solution(uuid=", (open_root / "shared" / "problem_pool.md").read_text())
             self.assertNotIn("mcp__", (open_root / "shared" / "problem_pool.md").read_text())
