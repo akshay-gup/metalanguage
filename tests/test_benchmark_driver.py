@@ -12,6 +12,8 @@ import main_loop
 from main_loop import (
     _claim_spawn_slot,
     _format_runtime_markdown,
+    _parse_spawn_child_arguments,
+    _resolve_spawn_workspace_dir,
     _spawn_item_ref,
     create_archive_worktree,
     discard_archive_worktree,
@@ -57,6 +59,35 @@ class BenchmarkDriverTests(unittest.TestCase):
             ),
             rows=ROWS,
         )
+
+    def test_spawn_child_requires_non_blank_root_readme(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            context = {"workdir": str(root)}
+            _, _, missing_workspace_error = _parse_spawn_child_arguments(
+                {"prompt": "child"}
+            )
+            self.assertIn("workspace_dir", missing_workspace_error or "")
+
+            workspace = root / "workspace"
+            workspace.mkdir()
+            resolved, missing_readme_error = _resolve_spawn_workspace_dir(
+                context, "workspace"
+            )
+            self.assertIsNone(resolved)
+            self.assertIn("README.md", missing_readme_error or "")
+
+            (workspace / "README.md").write_text("   \n")
+            resolved, blank_readme_error = _resolve_spawn_workspace_dir(
+                context, "workspace"
+            )
+            self.assertIsNone(resolved)
+            self.assertIn("non-blank", blank_readme_error or "")
+
+            (workspace / "README.md").write_text("# Child\n")
+            resolved, error = _resolve_spawn_workspace_dir(context, "workspace")
+            self.assertEqual(resolved, workspace)
+            self.assertIsNone(error)
 
     def test_protocol_shape_deterministic_pool_resume_and_backend_instructions(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -234,11 +265,14 @@ class BenchmarkDriverTests(unittest.TestCase):
                 _spawn_item_ref(future_context),
                 BenchmarkItemRef("arc-instance-42", "arc-task", 7, 9),
             )
+            child_workspace = root / "child-workspace"
+            child_workspace.mkdir()
+            (child_workspace / "README.md").write_text("# Child\n")
             claimed = _claim_spawn_slot(
                 context=future_context,
                 child_instance_uuid="future-child",
                 child_prompt="continue",
-                source_workspace_dir=None,
+                source_workspace_dir=child_workspace,
             )
             self.assertTrue(claimed["slot_claimed"])
             manifest = json.loads(

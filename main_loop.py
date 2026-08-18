@@ -303,19 +303,16 @@ def _parse_spawn_child_arguments(args: dict[str, Any]) -> tuple[str | None, str 
         return None, None, "spawn_child requires a non-empty string prompt"
 
     raw_workspace_dir = args.get("workspace_dir")
-    workspace_dir: str | None = None
-    if raw_workspace_dir is not None:
-        if not isinstance(raw_workspace_dir, str):
-            return None, None, "workspace_dir must be a string when provided"
-        if raw_workspace_dir.strip():
-            workspace_dir = raw_workspace_dir.strip()
+    if not isinstance(raw_workspace_dir, str) or not raw_workspace_dir.strip():
+        return None, None, "spawn_child requires a non-empty workspace_dir"
+    workspace_dir = raw_workspace_dir.strip()
 
     return prompt, workspace_dir, None
 
 
 def _resolve_spawn_workspace_dir(context: dict[str, Any], workspace_dir: str | None) -> tuple[Path | None, str | None]:
     if workspace_dir is None:
-        return None, None
+        return None, "spawn_child requires a workspace_dir containing README.md"
     workdir = Path(str(context["workdir"])).resolve()
     raw_path = Path(workspace_dir).expanduser()
     candidate = raw_path.resolve() if raw_path.is_absolute() else (workdir / raw_path).resolve()
@@ -323,6 +320,15 @@ def _resolve_spawn_workspace_dir(context: dict[str, Any], workspace_dir: str | N
         return None, "workspace_dir must be a workspace-local directory, not the rollout workspace root"
     if not candidate.is_dir():
         return None, f"workspace_dir is not a directory: {workspace_dir}"
+    readme = candidate / "README.md"
+    if readme.is_symlink() or not readme.is_file():
+        return None, "workspace_dir must contain a regular README.md at its root"
+    try:
+        readme_text = readme.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None, "workspace_dir/README.md must be readable UTF-8 text"
+    if not readme_text.strip():
+        return None, "workspace_dir/README.md must contain non-blank text"
     return candidate, None
 
 
@@ -531,7 +537,7 @@ def _claim_spawn_slot(
     context: dict[str, Any],
     child_instance_uuid: str,
     child_prompt: str,
-    source_workspace_dir: Path | None,
+    source_workspace_dir: Path,
 ) -> dict[str, Any]:
     slots_path = Path(str(context["spawn_slots_path"]))
     slots_dir = Path(str(context["spawn_slots_dir"]))
@@ -567,11 +573,18 @@ def _claim_spawn_slot(
         slot_index = len(slots)
         slot_dir = slots_dir / f"slot_{slot_index:03d}_{child_instance_uuid[:8]}"
         slot_dir.mkdir(parents=True, exist_ok=False)
-        child_workspace_dir: Path | None = None
-        if source_workspace_dir is not None:
-            child_workspace_dir = slot_dir / "workspace"
-            child_workspace_dir.mkdir(parents=True, exist_ok=False)
-            copy_seed_workspace(source_workspace_dir, child_workspace_dir)
+        child_workspace_dir = slot_dir / "workspace"
+        child_workspace_dir.mkdir(parents=True, exist_ok=False)
+        copy_seed_workspace(source_workspace_dir, child_workspace_dir)
+        copied_readme = child_workspace_dir / "README.md"
+        if copied_readme.is_symlink() or not copied_readme.is_file():
+            raise RuntimeError("copied child workspace is missing a regular README.md")
+        try:
+            copied_readme_text = copied_readme.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise RuntimeError("copied child README.md is not readable UTF-8 text") from exc
+        if not copied_readme_text.strip():
+            raise RuntimeError("copied child README.md contains no non-blank text")
         manifest_path = slot_dir / "slot_manifest.json"
         metadata = {
             "child_instance_uuid": child_instance_uuid,
@@ -580,8 +593,8 @@ def _claim_spawn_slot(
             "parent_rollout_username": context["rollout_username"],
             "prompt": child_prompt,
             "prompt_chars": len(child_prompt),
-            "source_workspace_dir": str(source_workspace_dir) if source_workspace_dir is not None else None,
-            "workspace_dir": str(child_workspace_dir) if child_workspace_dir is not None else None,
+            "source_workspace_dir": str(source_workspace_dir),
+            "workspace_dir": str(child_workspace_dir),
             "slot_dir": str(slot_dir),
             "manifest_path": str(manifest_path),
             "source_task_index": context["task_index"],
@@ -619,7 +632,7 @@ def _claim_spawn_slot(
             "slot_index": slot_index,
             "child_instance_uuid": child_instance_uuid,
             "slot_dir": str(slot_dir),
-            "workspace_dir": str(child_workspace_dir) if child_workspace_dir is not None else None,
+            "workspace_dir": str(child_workspace_dir),
             "prompt_chars": len(child_prompt),
             "claimed_slots": claimed_slots,
             "child_slot_cap": child_slot_cap,

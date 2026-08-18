@@ -545,11 +545,14 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
                 "spawn_slots_dir": str(root / "spawn-slots"),
                 "child_slot_cap": 1,
             }
+            child_workspace = root / "arc-child-workspace"
+            child_workspace.mkdir()
+            (child_workspace / "README.md").write_text("# ARC child\n")
             claimed = _claim_spawn_slot(
                 context=spawn_context,
                 child_instance_uuid="arc-child",
                 child_prompt="continue",
-                source_workspace_dir=None,
+                source_workspace_dir=child_workspace,
             )
             self.assertTrue(claimed["slot_claimed"])
             manifest = json.loads(

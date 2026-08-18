@@ -558,8 +558,8 @@ fn metalanguage_dynamic_tools() -> Vec<DynamicToolSpec> {
             name: "spawn_child".to_string(),
             description: concat!(
                 "Atomically claim a next-iteration rollout slot. The child receives the ",
-                "supplied initial prompt and, when present, a copied workspace-local ",
-                "directory. Slots are first-come first-served."
+                "supplied initial prompt and a copied workspace-local directory whose ",
+                "root contains a non-blank README.md. Slots are first-come first-served."
             )
             .to_string(),
             input_schema: json!({
@@ -571,10 +571,10 @@ fn metalanguage_dynamic_tools() -> Vec<DynamicToolSpec> {
                     },
                     "workspace_dir": {
                         "type": "string",
-                        "description": "Optional workspace-local directory copied into the child slot. Nothing is copied implicitly. The same source can back multiple child slots in one rollout and is consumed after the parent rollout finishes."
+                        "description": "Required workspace-local directory copied into the child slot. Its root must contain a regular, non-blank UTF-8 README.md. Additional files are optional. The same source can back multiple child slots in one rollout and is consumed after the parent rollout finishes."
                     }
                 },
-                "required": ["prompt"],
+                "required": ["prompt", "workspace_dir"],
                 "additionalProperties": false,
             }),
             defer_loading: false,
@@ -686,7 +686,7 @@ fn parse_spawn_child_args(arguments: &Value) -> Result<String, String> {
         return Err("spawn_child arguments must be an object".to_string());
     };
     if args.keys().any(|key| key != "prompt" && key != "workspace_dir") {
-        return Err("spawn_child accepts only prompt and optional workspace_dir".to_string());
+        return Err("spawn_child accepts only prompt and workspace_dir".to_string());
     }
     let prompt = args
         .get("prompt")
@@ -696,10 +696,12 @@ fn parse_spawn_child_args(arguments: &Value) -> Result<String, String> {
     if prompt.trim().is_empty() {
         return Err("prompt must be non-empty".to_string());
     }
-    if let Some(workspace_dir) = args.get("workspace_dir") {
-        if !workspace_dir.is_null() && !workspace_dir.is_string() {
-            return Err("workspace_dir must be a string when provided".to_string());
-        }
+    let workspace_dir = args
+        .get("workspace_dir")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "spawn_child requires string workspace_dir".to_string())?;
+    if workspace_dir.trim().is_empty() {
+        return Err("workspace_dir must be non-empty".to_string());
     }
     Ok(prompt)
 }
@@ -786,6 +788,16 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(names, vec!["spawn_child"]);
         assert!(!names.contains(&"submit_solution".to_string()));
+    }
+
+    #[test]
+    fn spawn_child_requires_workspace_dir() {
+        assert!(parse_spawn_child_args(&json!({"prompt": "child"})).is_err());
+        assert!(parse_spawn_child_args(&json!({
+            "prompt": "child",
+            "workspace_dir": "seed_output/child"
+        }))
+        .is_ok());
     }
 
     #[test]
