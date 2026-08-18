@@ -557,9 +557,9 @@ fn metalanguage_dynamic_tools() -> Vec<DynamicToolSpec> {
         DynamicToolSpec::Function(DynamicToolFunctionSpec {
             name: "spawn_child".to_string(),
             description: concat!(
-                "Claim a next-iteration rollout slot by passing the child's inherited ",
-                "prompt, optionally copying a workspace-local directory into the child ",
-                "workspace. Slots are first-come first-served."
+                "Atomically claim a next-iteration rollout slot. The child receives the ",
+                "supplied initial prompt and, when present, a copied workspace-local ",
+                "directory. Slots are first-come first-served."
             )
             .to_string(),
             input_schema: json!({
@@ -567,11 +567,11 @@ fn metalanguage_dynamic_tools() -> Vec<DynamicToolSpec> {
                 "properties": {
                     "prompt": {
                         "type": "string",
-                        "description": "Required non-empty initial prompt for the child rollout. Use this prompt for durable current instructions for solving, benchmark submission, archive/shared_workspace use, writing a useful artifact into archive/ or inherited workspace whenever useful, preserving this artifact-writing requirement, and spawning again."
+                        "description": "Required non-empty initial user message stored for the child rollout."
                     },
                     "workspace_dir": {
                         "type": "string",
-                        "description": "Optional workspace-local directory whose contents should be copied into the child slot's inherited workspace. Nothing is copied implicitly; include README.md here if the child should inherit it. The same source can be reused for multiple child slots in this rollout and is consumed when the parent rollout finishes. Leave blank or omit for no inherited workspace files."
+                        "description": "Optional workspace-local directory copied into the child slot. Nothing is copied implicitly. The same source can back multiple child slots in one rollout and is consumed after the parent rollout finishes."
                     }
                 },
                 "required": ["prompt"],
