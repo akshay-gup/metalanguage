@@ -91,7 +91,7 @@ V. Artificial Cultural Evolution Architecture
 - Operational Failure Modes and Counterpressures
 - The Complexification Gap
 - Step 0 in Biology and Culture
-- Competitive Continuation as Minimal Selection
+- Rollout-Owned Continuation as Minimal Selection
 - Interaction Primitives
 - Emergent Ecology
 - Real-World Correspondence
@@ -179,11 +179,11 @@ language-like process structure should emerge only when context limits,
 transmission gaps, scarce attention, and grounded reuse make such structure
 necessary.
 
-The architecture further includes competitive continuation slots. Lineages
-must create bounded successor prompts and claim finite next-generation slots,
-while unclaimed capacity is restored with fresh bootstrap rollouts. This couples
-persistence to explicit inheritance behavior without introducing a simulated
-currency.
+The architecture further includes rollout-owned continuation opportunities.
+Each rollout can create at most one bounded successor prompt and child
+workspace, while unused population positions are restored with fresh bootstrap
+rollouts. This couples persistence to explicit inheritance behavior without
+introducing a simulated currency or shared child allocation.
 
 ### Introduction
 
@@ -246,10 +246,10 @@ is expected to converge under constraints of finite media, lossy transmission,
 bounded readers, limited learning, and selection for reuse. Fourth, we diagnose
 why current LLM module and memory systems tend to plateau: they often provide
 storage without necessity, adoption without causal use, and selection at the
-wrong level. Finally, we propose a minimal architecture with competitive child
-slots and bootstrap refill, allowing ecological pressure to emerge without
-predefining mature social rules, and describe experiments for artificial
-cultural evolution in LLM systems.
+wrong level. Finally, we propose a minimal architecture with one reserved child
+opportunity per rollout and bootstrap refill, allowing ecological pressure to
+emerge without predefining mature social rules, and describe experiments for
+artificial cultural evolution in LLM systems.
 
 ### Synthesis
 
@@ -275,11 +275,12 @@ verification, and downstream consequences. Under those pressures, compact
 process language is not an aesthetic goal. It is the structure that makes
 cumulative continuation possible.
 
-The architecture also requires differential continuation. Competitive child
-slots make successor construction and transmissible handoffs consequential,
-while bootstrap refill preserves exploration. Interaction primitives such as
-reading, copying, forking, citing, and patching make specialization and exchange
-possible without predefining a mature social ontology.
+The architecture also requires differential continuation. A rollout-owned,
+one-child continuation decision makes successor construction and transmissible
+handoffs consequential, while bootstrap refill preserves exploration.
+Interaction primitives such as reading, copying, forking, citing, and patching
+make specialization and exchange possible without predefining a mature social
+ontology.
 
 ### Target of Explanation: Autonomous Recursive Accumulation
 
@@ -1561,7 +1562,7 @@ inherited object.
 ### Ecology, Competition, and Engineered Drives
 
 Open-endedness tends to require dynamic landscapes, parasites or exploiters,
-resource structure, competition for continuation, scarce attention, costly
+resource structure, differential continuation, scarce attention, costly
 integration, multilevel selection, and new organizational levels that generate
 new fitness landscapes.
 
@@ -1895,9 +1896,10 @@ Vertical competition can decide:
 - which lineages receive more compute or archive access
 - which unusual lineages are preserved for exploration
 
-This should not be winner-take-all. A simple regime combines competitive child
-slots with bootstrap refill so unusual or under-sampled approaches remain
-possible while repeatedly failing or bloated lineages can disappear.
+This should not be winner-take-all. A simple regime combines one child
+opportunity per active rollout with bootstrap refill so unusual or under-sampled
+approaches remain possible while lineages that do not construct successors can
+disappear.
 
 Immediate viability and delayed reproductive value should be separated.
 Immediate score asks whether a child is viable enough to continue: task
@@ -2006,10 +2008,9 @@ Do not start with:
 - perfect causal attribution
 - large institutional role systems
 
-One concrete starter regime is a small active population of lineages.
-Competitive child slots determine continuation, bootstrap refill preserves
-novelty, weak lineages can disappear after repeated failure, and strong lineages
-may fork. Each child writes a
+One concrete starter regime is a small active population of lineages. Each
+rollout can construct one successor, and bootstrap refill preserves novelty
+where no successor is produced. Each child writes a
 bounded `next_seed.md`; full workspaces are discarded; seed quality is judged
 mainly by descendant performance rather than immediate aesthetics.
 
@@ -2329,15 +2330,16 @@ employment, and patronage. The mature institutions differ, but the primitive
 fact is shared: resources can move between bounded actors, and those transfers
 reshape the local ecology.
 
-### Competitive Continuation as Minimal Selection
+### Rollout-Owned Continuation as Minimal Selection
 
-Finite next-generation slots make successor construction consequential. A
-rollout continues only by producing a usable handoff and claiming a slot before
-capacity fills. Unclaimed slots are repopulated from a stable bootstrap seed,
+One reserved next-generation opportunity per rollout makes successor
+construction consequential independently for each source. A lineage continues
+from that rollout only if it produces a usable handoff. Every configured
+population position without a spawned child is repopulated from a stable bootstrap seed,
 which prevents a weak generation from permanently collapsing exploration.
 
-Slot competition alone is not open-ended ecology. It becomes ecological only
-when successful artifacts alter future conditions by becoming dependencies,
+This continuation rule alone is not open-ended ecology. It becomes ecological
+only when successful artifacts alter future conditions by becoming dependencies,
 shortcuts, standards, risks, interfaces, or maintenance obligations for later
 agents.
 
@@ -2408,7 +2410,7 @@ those structures can appear if they solve real continuation problems.
 - Git archive: public cross-lineage culture.
 - Workspace: individual life.
 - Rollout: temporary phenotype/interactor.
-- Tasks and competitive child slots: ecology and differential continuation.
+- Tasks and rollout-owned child opportunities: ecology and differential continuation.
 - Interaction primitives: read, copy, fork, cite, and patch.
 - Selection: differential continuation, uptake, trust, reuse, dependency, and
   cost-sensitive future option value.
@@ -2428,7 +2430,7 @@ The agent-centered view asks which lineages continue. The artifact-centered view
 asks which artifacts keep getting reconstructed. Both are required because
 agents and artifacts reproduce each other.
 
-The design principle is fixed primitive consequence, competitive continuation,
+The design principle is fixed primitive consequence, explicit continuation,
 evolvable cultural filters, dual inheritance channels, delayed selection, and
 artifact visibility through successful adoption. Do not select for complexity
 itself. Select for future option value under bounded attention, finite slots,
@@ -2782,8 +2784,8 @@ specified in advance.
 If tasks are solvable without artifacts under bounded context, the ecology
 will plateau at direct task solving without specialization.
 
-If competitive continuation is present, lineages with useful handoffs should
-persist more reliably across generations.
+If rollout-owned continuation is present, lineages that create useful handoffs
+should persist more reliably across generations.
 
 If interaction primitives are available, transfer dynamics such as trade,
 predation-like capture, parasitism, and symbiosis should become possible and
@@ -3469,10 +3471,10 @@ Open-Ended RSI as Hereditary Cultural Ecology:
 
 Endogenous Ecology Through Inheritance Dynamics:
 
-- Competitive child slots make continuation behavior consequential.
+- Rollout-owned child opportunities make continuation behavior consequential.
 - Bootstrap refill preserves exploration without uniform lineage survival.
 - Interaction primitives allow exchange without predefining mature institutions.
-- Fixed tasks plus slot competition are still insufficient unless artifacts
+- Fixed tasks plus explicit continuation are still insufficient unless artifacts
   become load-bearing future conditions.
 
 ### Timeline Examples
@@ -3561,7 +3563,7 @@ recombination.
 
 15. What counts as falsification for the near-term version of the theory?
 
-16. What competitive slot and bootstrap-refill regime creates useful selection
+16. What rollout-owned child-opportunity and bootstrap-refill regime creates useful selection
     pressure without preventing exploration?
 
 17. What signs would indicate that emergent transfer dynamics (trade, predation,

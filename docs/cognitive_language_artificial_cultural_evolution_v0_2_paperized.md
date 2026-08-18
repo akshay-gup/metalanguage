@@ -236,16 +236,17 @@ For each generation:
 
 This algorithm is deliberately minimal. It does not hand-design the final process-representation format. It fixes the medium, inheritance path, scarcity, and scoring channels. Agents can invent notes, scripts, manifests, dependency graphs, skills, retrieval guides, evaluator packages, branch rituals, or other formats. The system dictates inheritance, execution, and scoring, not syntax.
 
-### 5.4 Competitive continuation
+### 5.4 Rollout-owned continuation
 
 Uniform continuation is weak. If every rollout receives the same descendants,
 inheritance quality and artifact production are only weakly selected.
-Competitive child slots make successor construction consequential: a rollout
-must produce a usable handoff and claim finite next-generation capacity.
-Bootstrap refill restores unclaimed slots so exploration does not collapse.
+One reserved child opportunity per rollout makes successor construction
+consequential independently for each source: a lineage continues from that
+rollout only if it produces a usable handoff. Bootstrap refill restores every
+configured population position without a spawned child so exploration does not collapse.
 
-Slot competition alone is not open-ended ecology. It becomes ecological only
-when successful artifacts alter future conditions by becoming dependencies,
+This continuation rule alone is not open-ended ecology. It becomes ecological
+only when successful artifacts alter future conditions by becoming dependencies,
 shortcuts, standards, risks, interfaces, or maintenance obligations for later
 agents. The goal is future option value under bounded attention and changing
 constraints.
@@ -1314,7 +1315,7 @@ inherited object.
 ### Ecology, Competition, and Engineered Drives
 
 Open-endedness tends to require dynamic landscapes, parasites or exploiters,
-resource structure, competition for continuation, scarce attention, costly
+resource structure, differential continuation, scarce attention, costly
 integration, multilevel selection, and new organizational levels that generate
 new fitness landscapes.
 
@@ -1652,9 +1653,9 @@ Vertical competition can decide:
 - which lineages receive more compute or archive access
 - which unusual lineages are preserved for exploration
 
-This should not be winner-take-all. Competitive child slots can be combined
-with bootstrap refill so unusual approaches remain possible while repeatedly
-failing or bloated lineages can disappear.
+This should not be winner-take-all. One child opportunity per active rollout can
+be combined with bootstrap refill so unusual approaches remain possible while
+lineages that do not construct successors can disappear.
 
 Immediate viability and delayed reproductive value should be separated.
 Immediate score asks whether a child is viable enough to continue: task
@@ -1766,10 +1767,9 @@ Do not start with:
 - perfect causal attribution
 - large institutional role systems
 
-One concrete starter regime is a small active population of lineages.
-Competitive child slots determine continuation, bootstrap refill preserves
-novelty, weak lineages can disappear after repeated failure, and strong lineages
-may fork. Each child writes a
+One concrete starter regime is a small active population of lineages. Each
+rollout can construct one successor, and bootstrap refill preserves novelty
+where no successor is produced. Each child writes a
 bounded `next_seed.md`; full workspaces are discarded; seed quality is judged
 mainly by descendant performance rather than immediate aesthetics.
 
@@ -1983,15 +1983,16 @@ expanded class of solvable tasks. If the chain to grounded consequence breaks,
 the accumulated structure should lose continuation value.
 
 
-### Competitive Continuation as Minimal Selection
+### Rollout-Owned Continuation as Minimal Selection
 
-Finite next-generation slots make successor construction consequential. A
-rollout continues only by producing a usable handoff and claiming a slot before
-capacity fills. Unclaimed slots are repopulated from a stable bootstrap seed,
+One reserved next-generation opportunity per rollout makes successor
+construction consequential independently for each source. A lineage continues
+from that rollout only if it produces a usable handoff. Every configured
+population position without a spawned child is repopulated from a stable bootstrap seed,
 which prevents a weak generation from permanently collapsing exploration.
 
-Slot competition alone is not open-ended ecology. It becomes ecological only
-when successful artifacts alter future conditions by becoming dependencies,
+This continuation rule alone is not open-ended ecology. It becomes ecological
+only when successful artifacts alter future conditions by becoming dependencies,
 shortcuts, standards, risks, interfaces, or maintenance obligations for later
 agents.
 
@@ -2066,7 +2067,7 @@ those structures can appear if they solve real continuation problems.
 - Git archive: public cross-lineage culture.
 - Workspace: individual life.
 - Rollout: temporary phenotype/interactor.
-- Tasks and competitive child slots: ecology and differential continuation.
+- Tasks and rollout-owned child opportunities: ecology and differential continuation.
 - Interaction primitives: read, copy, fork, cite, and patch.
 - Selection: differential continuation, uptake, trust, reuse, dependency, and
   cost-sensitive future option value.
@@ -2086,7 +2087,7 @@ The agent-centered view asks which lineages continue. The artifact-centered view
 asks which artifacts keep getting reconstructed. Both are required because
 agents and artifacts reproduce each other.
 
-The design principle is fixed primitive consequence, competitive continuation,
+The design principle is fixed primitive consequence, explicit continuation,
 evolvable cultural filters, two inheritance channels, delayed selection, and
 artifact visibility through successful adoption. Do not select for complexity
 itself. Select for future option value under bounded attention, finite slots,
@@ -2451,8 +2452,8 @@ specified in advance.
 If tasks are solvable without artifacts under bounded context, the ecology
 will plateau at direct task solving without specialization.
 
-If competitive continuation is present, lineages with useful handoffs should
-persist more reliably across generations.
+If rollout-owned continuation is present, lineages that create useful handoffs
+should persist more reliably across generations.
 
 If interaction primitives are available, transfer dynamics such as trade,
 predation-like capture, parasitism, and symbiosis should become possible and
@@ -3305,10 +3306,10 @@ Open-Ended RSI as Hereditary Cultural Ecology:
 
 Endogenous Ecology Through Inheritance Dynamics:
 
-- Competitive child slots make continuation behavior consequential.
+- Rollout-owned child opportunities make continuation behavior consequential.
 - Bootstrap refill preserves exploration without uniform lineage survival.
 - Interaction primitives allow exchange without predefining mature institutions.
-- Fixed tasks plus slot competition are still insufficient unless artifacts
+- Fixed tasks plus explicit continuation are still insufficient unless artifacts
   become load-bearing future conditions.
 
 
@@ -3368,7 +3369,7 @@ recombination.
 
 15. What counts as falsification for the near-term version of the theory?
 
-16. What competitive slot and bootstrap-refill regime creates useful selection
+16. What rollout-owned child-opportunity and bootstrap-refill regime creates useful selection
     pressure without preventing exploration?
 
 17. What signs would indicate that emergent transfer dynamics (trade, predation,
