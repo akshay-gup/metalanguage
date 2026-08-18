@@ -47,11 +47,11 @@ take precedence over values in `.env`.
   1.5. use `moonshotai/kimi-k2.6` as the default OpenRouter model (override with `--model`),
   2. run 8 bootstrap rollout slots by default with `--num-rollouts`, then let later task width be set by spawned child slots,
   3. assign each rollout index to the matching `spawn_child` slot claimed by the prior task's rollouts, with each task's child-slot cap at least the configured rollout count so narrowed lineages can recover,
-  3.5. expose a shared cross-rollout workspace at `--rollout-temp-root/shared_workspace` where any rollout agent can leave files/messages for any other rollout agent (files written during the task batch are cleaned up after the batch; durable consequences must be copied into a successor prompt, optional child workspace, archive artifact, solution, or later behavior),
+  3.5. expose a shared cross-rollout workspace at `--rollout-temp-root/shared_workspace` where any rollout agent can leave files/messages for any other rollout agent (files written during the task batch are cleaned up after the batch; durable state can persist through a child workspace, committed archive artifact, solution, or later behavior),
   3.6. assign every rollout instance a UUID for provenance and isolated runtime state,
   4. expose `archive/world_repo` by default as the durable cross-lineage Git archive available to every rollout (override with `--archive-repo-dir`),
      using a per-rollout temporary worktree so only committed archive changes are merged back and uncommitted archive edits are discarded,
-  5. inject the selected parent slot's stored prompt as the rollout's initial user text, optionally copy that slot's inherited workspace directory into the rollout root and consume the slot workspace, and write `shared_workspace/problem_pool.json` plus `shared_workspace/problem_pool.md`, one shared redacted pool copy of all currently unsolved problems keyed by uuid for the whole rollout batch; bootstrap rollouts receive root `README.md` as the stable seed file and a short initial prompt telling them to do the task described there,
+  5. inject the selected parent slot's stored prompt as the rollout's initial user text, copy that slot's inherited workspace directory into the rollout root and consume the slot workspace, and write `shared_workspace/BENCHMARK.md` plus `problem_pool.json` and `problem_pool.md`; bootstrap rollouts receive root `README.md` as a neutral environment description and a short initial message stating that no task is assigned,
   6. register main-loop tools through the worker backend (OpenRouter tool payloads or Codex `DynamicToolSpec` entries), then run the worker with the inherited prompt and generated runtime context; operating doctrine is expected to come from the inherited prompt,
      while `runtime.md` contains only generated paths, runtime IDs, slot limits, and peer lists,
   7. score answers submitted through `submit_solution(uuid, answer)`, grounding correctness against the private stored row selected by uuid,
@@ -74,18 +74,18 @@ take precedence over values in `.env`.
   - there is no answer-file scoring fallback; a rollout that does not call `submit_solution` receives no solution score;
   - rollouts can call `submit_solution(uuid, answer)` and `spawn_child(prompt, workspace_dir)` as applicable main-loop tools;
   - `spawn_child` stores the required non-empty `prompt` in supervisor-side slot metadata as the child rollout's next initial user text;
-  - when `workspace_dir` is provided and non-blank, `spawn_child` copies that workspace-local directory's contents into the next slot's inherited workspace; `workspace_dir` must be inside the rollout workspace and must not be the rollout root; the source directory can be reused for multiple child slots in the same rollout and is deleted when that parent rollout finishes;
-  - root `README.md` is not copied implicitly; if the child should inherit it, the parent must copy it into the workspace-local directory passed as `workspace_dir`;
-  - when `workspace_dir` is omitted or blank, the child rollout starts with no inherited workspace files beyond generated runtime files, symlinks, and an empty `seed_output/`;
+  - `workspace_dir` is required and must be a workspace-local directory whose root contains a regular, non-blank UTF-8 `README.md`; `spawn_child` copies its contents into the next slot's inherited workspace, while additional files remain optional;
+  - `workspace_dir` must be inside the rollout workspace and must not be the rollout root; the source directory can be reused for multiple child slots in the same rollout and is deleted when that parent rollout finishes;
+  - root `README.md` is not copied implicitly;
   - `spawn_child` does not require or create `prompt.md`; prompt text lives in slot metadata/logs outside the child workspace;
   - `spawn_child` is competitive: an atomic file lock protects first-come first-served slot claims, one rollout may claim more than one slot, and calls fail cleanly after the task's slot cap is full.
 - Lineage behavior:
   - the first rollout batch can bootstrap without a parent slot;
   - a rollout continues only by successfully calling `spawn_child(prompt, workspace_dir)`;
-  - the successor `prompt` should at minimum preserve the core instructions needed by the next child to inspect `runtime.md`, solve from `shared_workspace/problem_pool`, call `submit_solution(uuid, answer)`, use `archive/` and `shared_workspace/`, write at least one compact useful artifact into the world archive or inherited workspace whenever useful in the task cycle, preserve that artifact-writing requirement, and spawn again before stopping;
+  - every spawned child has a stored initial prompt and an inherited workspace rooted by `README.md`;
+  - the child README is expected to preserve the parent environment description's themes, while its exact wording and elaboration may evolve;
   - solving/submitting alone does not continue that rollout's lineage; after each iteration, any child-slot capacity left unclaimed is refilled with fresh bootstrap rollouts using the base README and initial prompt;
   - there is no correctness gate for spawning; solved and unsolved rollouts may claim available child slots;
-  - preferred behavior is to make useful progress, submit when applicable, and spawn quickly with a durable successor prompt;
   - spawned children occupy claimed next-iteration slots first; only the remaining slots are reinitialized from the bootstrap seed.
 - Resume behavior:
   - runs automatically resume from existing `--runs-log` entries that match dataset/split/model/seed/generation/config/rollout-count;

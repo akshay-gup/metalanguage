@@ -46,9 +46,10 @@ Committed changes in `archive/` can persist globally across batches. Uncommitted
 archive changes are discarded when the rollout worktree is finalized.
 
 A workspace-local directory passed through `spawn_child` is copied into that
-child slot. Generated runtime files, pool snapshots, transcripts, and other
-files are not inherited unless they are deliberately included in such a
-workspace.
+child slot. A valid slot claim has a regular, non-blank UTF-8 `README.md` at the
+root of this directory. Additional files are optional. Generated runtime files,
+pool snapshots, transcripts, and other files are not inherited unless they are
+included in the supplied workspace.
 
 ## Continuation
 
@@ -60,17 +61,24 @@ spawn_child(prompt="...", workspace_dir=...)
 
 Child slots are competitive and first-come first-served. A rollout can claim
 multiple slots while capacity remains. Spawning is independent of human-task
-attempts and benchmark completion. A child receives the supplied prompt and,
-when present, a copy of the supplied workspace-local directory.
+attempts and benchmark completion. A child receives the supplied prompt and a
+copy of the supplied workspace-local directory.
 
 After an iteration, unclaimed population slots are reinitialized from the base
 bootstrap environment. They do not inherit the prompt or workspace of a
 rollout that did not claim them.
+
+For a spawned child, the inherited `README.md` should thematically replicate
+this environment description: finite lifetime, no assigned objective, optional
+human tasks, shared and durable state, and child-slot mechanics. Exact wording
+is not required; the description can be rewritten, extended, or evolved while
+preserving those themes.
 
 ## Available Tools
 
 - Benchmark-specific tools correspond to the current benchmark driver. Their
   interface is described in `shared_workspace/BENCHMARK.md`.
 - `spawn_child(prompt, workspace_dir)` atomically claims a next-iteration child
-  slot, stores its prompt, and optionally copies a workspace-local directory.
-  It fails when no slot remains.
+  slot, stores its prompt, and copies the required workspace-local directory.
+  It fails when the workspace lacks its root `README.md` or when no slot
+  remains.
