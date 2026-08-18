@@ -10,9 +10,12 @@ from unittest.mock import patch
 
 import main_loop
 from main_loop import (
-    _claim_spawn_slot,
+    _record_spawned_child,
     _format_runtime_markdown,
+    _load_spawned_child_slots,
     _parse_spawn_child_arguments,
+    _refill_parent_pool_with_bootstrap_slots,
+    _spawn_child_continuation,
     _resolve_spawn_workspace_dir,
     _spawn_item_ref,
     create_archive_worktree,
@@ -84,10 +87,115 @@ class BenchmarkDriverTests(unittest.TestCase):
             self.assertIsNone(resolved)
             self.assertIn("non-blank", blank_readme_error or "")
 
+            (workspace / "README.md").write_bytes(b"\xff")
+            resolved, invalid_utf8_error = _resolve_spawn_workspace_dir(
+                context, "workspace"
+            )
+            self.assertIsNone(resolved)
+            self.assertIn("UTF-8", invalid_utf8_error or "")
+
+            outside_readme = root / "outside-README.md"
+            outside_readme.write_text("# Outside\n")
+            (workspace / "README.md").unlink()
+            (workspace / "README.md").symlink_to(outside_readme)
+            resolved, symlink_readme_error = _resolve_spawn_workspace_dir(
+                context, "workspace"
+            )
+            self.assertIsNone(resolved)
+            self.assertIn("regular README.md", symlink_readme_error or "")
+
+            (workspace / "README.md").unlink()
             (workspace / "README.md").write_text("# Child\n")
             resolved, error = _resolve_spawn_workspace_dir(context, "workspace")
             self.assertEqual(resolved, workspace)
             self.assertIsNone(error)
+
+    def test_spawn_child_is_reserved_per_rollout_and_failures_do_not_consume_it(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            slots_path = root / "slots.json"
+            slots_dir = root / "slots"
+
+            def context(rollout_index: int) -> dict[str, object]:
+                return {
+                    "workdir": str(root),
+                    "spawn_slots_path": str(slots_path),
+                    "spawn_slots_dir": str(slots_dir),
+                    "population_size": 2,
+                    "task_id": "task",
+                    "task_index": 0,
+                    "rollout_index": rollout_index,
+                    "rollout_username": f"rollout-{rollout_index}",
+                    "instance_uuid": f"parent-{rollout_index}",
+                }
+
+            first_workspace = root / "first-child"
+            first_workspace.mkdir()
+            invalid = _spawn_child_continuation(
+                context=context(0),
+                args={"prompt": "first", "workspace_dir": "first-child"},
+                progress_callback=lambda *_args, **_kwargs: None,
+            )
+            self.assertFalse(invalid["child_spawned"])
+            self.assertTrue(invalid["retryable"])
+
+            (first_workspace / "README.md").write_text("# First child\n")
+            with patch("main_loop.copy_seed_workspace", side_effect=RuntimeError("copy failed")):
+                copy_failed = _spawn_child_continuation(
+                    context=context(0),
+                    args={"prompt": "first", "workspace_dir": "first-child"},
+                    progress_callback=lambda *_args, **_kwargs: None,
+                )
+            self.assertFalse(copy_failed["child_spawned"])
+            self.assertTrue(copy_failed["retryable"])
+            self.assertFalse(slots_path.exists())
+
+            spawned = _spawn_child_continuation(
+                context=context(0),
+                args={"prompt": "first", "workspace_dir": "first-child"},
+                progress_callback=lambda *_args, **_kwargs: None,
+            )
+            self.assertTrue(spawned["child_spawned"])
+            self.assertTrue(spawned["parent_continues"])
+            self.assertEqual(spawned["slot_index"], 0)
+            self.assertIn("parent rollout continues", spawned["message"])
+
+            duplicate = _spawn_child_continuation(
+                context=context(0),
+                args={},
+                progress_callback=lambda *_args, **_kwargs: None,
+            )
+            self.assertFalse(duplicate["child_spawned"])
+            self.assertFalse(duplicate["retryable"])
+            self.assertTrue(duplicate["parent_continues"])
+            self.assertEqual(duplicate["error_code"], "child_already_spawned")
+
+            second_workspace = root / "second-child"
+            second_workspace.mkdir()
+            (second_workspace / "README.md").write_text("# Second child\n")
+            second = _spawn_child_continuation(
+                context=context(1),
+                args={"prompt": "second", "workspace_dir": "second-child"},
+                progress_callback=lambda *_args, **_kwargs: None,
+            )
+            self.assertTrue(second["child_spawned"])
+            self.assertEqual(second["slot_index"], 1)
+            state = json.loads(slots_path.read_text())
+            self.assertEqual(
+                [slot["source_rollout_index"] for slot in state["slots"]],
+                [0, 1],
+            )
+            spawned_children = _load_spawned_child_slots(slots_path)
+            parent_pool, bootstrap_count = _refill_parent_pool_with_bootstrap_slots(
+                spawned_children,
+                target_count=3,
+            )
+            self.assertEqual(bootstrap_count, 1)
+            self.assertEqual(
+                [slot["source_rollout_index"] for slot in parent_pool[:2]],
+                [0, 1],
+            )
+            self.assertTrue(parent_pool[2]["bootstrap_reinitialized"])
 
     def test_protocol_shape_deterministic_pool_resume_and_backend_instructions(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -138,10 +246,13 @@ class BenchmarkDriverTests(unittest.TestCase):
             stable_readme = (
                 Path(__file__).resolve().parents[1] / "seeds/bootstrap/README.md"
             ).read_text()
+            stable_readme_words = " ".join(stable_readme.split())
             self.assertNotIn("SuperGPQA", stable_readme)
             self.assertNotIn("submit_solution", stable_readme)
             self.assertIn("Benchmark-specific tools", stable_readme)
             self.assertIn("spawn_child", stable_readme)
+            self.assertIn("one reserved child opportunity", stable_readme_words)
+            self.assertIn("parent rollout continues normally", stable_readme_words)
             supergpqa_readme = (
                 Path(__file__).resolve().parents[1]
                 / "seeds/benchmarks/supergpqa/README.md"
@@ -256,7 +367,7 @@ class BenchmarkDriverTests(unittest.TestCase):
                 "rollout_index": 3,
                 "spawn_slots_path": str(root / "slots.json"),
                 "spawn_slots_dir": str(root / "slots"),
-                "child_slot_cap": 2,
+                "population_size": 4,
                 "active_benchmark_item": BenchmarkItemRef(
                     "arc-instance-42", "arc-task", 7, 9
                 ).to_metadata(),
@@ -268,15 +379,15 @@ class BenchmarkDriverTests(unittest.TestCase):
             child_workspace = root / "child-workspace"
             child_workspace.mkdir()
             (child_workspace / "README.md").write_text("# Child\n")
-            claimed = _claim_spawn_slot(
+            spawned = _record_spawned_child(
                 context=future_context,
                 child_instance_uuid="future-child",
                 child_prompt="continue",
                 source_workspace_dir=child_workspace,
             )
-            self.assertTrue(claimed["slot_claimed"])
+            self.assertTrue(spawned["child_spawned"])
             manifest = json.loads(
-                (root / "slots" / "slot_000_future-c" / "slot_manifest.json").read_text()
+                (root / "slots" / "slot_003_future-c" / "slot_manifest.json").read_text()
             )
             self.assertEqual(
                 manifest["source_benchmark_item"],

@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from main_loop import (
-    _claim_spawn_slot,
+    _record_spawned_child,
     _configure_runtime_environment,
     _create_benchmark_driver,
     _validate_benchmark_backend,
@@ -543,18 +543,18 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
                 "rollout_index": 0,
                 "spawn_slots_path": str(root / "spawn-slots.json"),
                 "spawn_slots_dir": str(root / "spawn-slots"),
-                "child_slot_cap": 1,
+                "population_size": 1,
             }
             child_workspace = root / "arc-child-workspace"
             child_workspace.mkdir()
             (child_workspace / "README.md").write_text("# ARC child\n")
-            claimed = _claim_spawn_slot(
+            spawned = _record_spawned_child(
                 context=spawn_context,
                 child_instance_uuid="arc-child",
                 child_prompt="continue",
                 source_workspace_dir=child_workspace,
             )
-            self.assertTrue(claimed["slot_claimed"])
+            self.assertTrue(spawned["child_spawned"])
             manifest = json.loads(
                 (
                     root
