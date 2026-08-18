@@ -195,7 +195,6 @@ def run_codex_rollout(
     spawn_child_handler_context_path: Path | None = None,
     benchmark_mcp_servers: dict[str, Any] | None = None,
     sensitive_mcp_tools: tuple[tuple[str, str], ...] = (),
-    stop_requested: Callable[[], bool] | None = None,
     progress_callback: Callable[..., None] | None = None,
 ) -> dict[str, Any]:
     runner_bin = runner_bin.expanduser().resolve()
@@ -265,9 +264,6 @@ def run_codex_rollout(
     request_path.write_text(json.dumps(request, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     os.chmod(request_path, 0o600)
 
-    def _stop_requested() -> bool:
-        return stop_requested is not None and stop_requested()
-
     env = _prepare_rollout_env(
         workdir=workdir,
         worker_state_dir=worker_state_dir,
@@ -299,8 +295,6 @@ def run_codex_rollout(
 
         deadline = started_at + timeout_seconds + 15
         timed_out = False
-        cancelled = False
-        cancel_reason: str | None = None
         while True:
             if proc.poll() is not None:
                 remaining = proc.stdout.read()
@@ -317,27 +311,6 @@ def run_codex_rollout(
                             session_id = str(event.get("session_id") or "") or session_id
                         elif isinstance(event, dict) and event.get("event") == "turn_complete":
                             final_text = str(event.get("final_text") or "")
-                break
-            if _stop_requested():
-                cancelled = True
-                cancel_reason = "child_slots_full"
-                if progress_callback is not None:
-                    progress_callback("worker_cancel_requested", reason=cancel_reason)
-                _terminate_runner_process(proc, kill=False)
-                try:
-                    proc.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    _terminate_runner_process(proc, kill=True)
-                    proc.wait()
-                remaining = proc.stdout.read()
-                if remaining:
-                    for raw_line in remaining.splitlines():
-                        _handle_runner_line(
-                            raw_line,
-                            events_fh=events_fh,
-                            progress_callback=progress_callback,
-                            state=state,
-                        )
                 break
             if time.monotonic() > deadline:
                 timed_out = True
@@ -378,19 +351,6 @@ def run_codex_rollout(
     session_id = session_id or state.get("session_id") or None
     final_text = final_text or state.get("final_text", "")
 
-    if cancelled:
-        return {
-            "final_text": final_text,
-            "status": "cancelled",
-            "stop_reason": cancel_reason or "cancelled",
-            "error_code": cancel_reason or "cancelled",
-            "error_message": "Codex rollout stopped because the child slot cap is full.",
-            "thread_id": thread_id,
-            "session_id": session_id,
-            "request_path": str(request_path),
-            "stderr_path": str(stderr_path),
-            "events_path": str(stdout_events_path),
-        }
     if timed_out:
         return {
             "final_text": final_text,

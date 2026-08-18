@@ -230,11 +230,12 @@ spawn_child_tool: dict[str, Any] = {
     "type": "function",
     "name": "spawn_child",
     "description": (
-        "Atomically claim a next-iteration rollout slot. The child receives the "
-        "supplied initial prompt and a copied workspace-local directory whose "
-        "root contains a non-blank README.md. Slots are first-come first-served; "
-        "one rollout can claim multiple slots, and calls fail after the slot cap "
-        "is full."
+        "Spawn this rollout's one possible next-iteration child. The child receives "
+        "the supplied initial prompt and a copied workspace-local directory whose "
+        "root contains a regular, non-symlinked, readable, non-blank UTF-8 README.md. "
+        "Invalid or failed attempts can be corrected and retried. After one successful "
+        "spawn, later calls from this rollout fail. Every call returns feedback and the "
+        "parent rollout continues normally."
     ),
     "strict": None,
     "parameters": {
@@ -246,7 +247,7 @@ spawn_child_tool: dict[str, Any] = {
             },
             "workspace_dir": {
                 "type": "string",
-                "description": "Required workspace-local directory copied into the child slot. Its root must contain a regular, non-blank UTF-8 README.md. Additional files are optional. The same source can back multiple child slots in one rollout and is consumed after the parent rollout finishes.",
+                "description": "Required workspace-local directory copied for the child. Its root must contain a regular, non-symlinked, readable, non-blank UTF-8 README.md. Additional files are optional. The source is consumed after the parent rollout finishes only when spawning succeeds.",
             },
         },
         "required": ["prompt", "workspace_dir"],

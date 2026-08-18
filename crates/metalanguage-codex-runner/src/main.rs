@@ -557,9 +557,12 @@ fn metalanguage_dynamic_tools() -> Vec<DynamicToolSpec> {
         DynamicToolSpec::Function(DynamicToolFunctionSpec {
             name: "spawn_child".to_string(),
             description: concat!(
-                "Atomically claim a next-iteration rollout slot. The child receives the ",
-                "supplied initial prompt and a copied workspace-local directory whose ",
-                "root contains a non-blank README.md. Slots are first-come first-served."
+                "Spawn this rollout's one possible next-iteration child. The child receives ",
+                "the supplied initial prompt and a copied workspace-local directory whose ",
+                "root contains a regular, non-symlinked, readable, non-blank UTF-8 README.md. ",
+                "Invalid or failed attempts can be corrected and retried. After one successful ",
+                "spawn, later calls from this rollout fail. Every call returns feedback and the ",
+                "parent rollout continues normally."
             )
             .to_string(),
             input_schema: json!({
@@ -571,7 +574,7 @@ fn metalanguage_dynamic_tools() -> Vec<DynamicToolSpec> {
                     },
                     "workspace_dir": {
                         "type": "string",
-                        "description": "Required workspace-local directory copied into the child slot. Its root must contain a regular, non-blank UTF-8 README.md. Additional files are optional. The same source can back multiple child slots in one rollout and is consumed after the parent rollout finishes."
+                        "description": "Required workspace-local directory copied for the child. Its root must contain a regular, non-symlinked, readable, non-blank UTF-8 README.md. Additional files are optional. The source is consumed after the parent rollout finishes only when spawning succeeds."
                     }
                 },
                 "required": ["prompt", "workspace_dir"],
@@ -604,7 +607,15 @@ fn handle_metalanguage_dynamic_tool(
     if request.namespace.is_some() {
         return dynamic_tool_json_response(
             false,
-            json!({"error": "unsupported dynamic tool namespace", "namespace": request.namespace}),
+            json!({
+                "success": false,
+                "child_spawned": false,
+                "parent_continues": true,
+                "retryable": true,
+                "error_code": "unsupported_dynamic_tool_namespace",
+                "error": "unsupported dynamic tool namespace",
+                "namespace": request.namespace,
+            }),
         );
     }
 
@@ -624,19 +635,15 @@ fn handle_spawn_child_tool(
     let Some(command) = spawn_child_handler_command else {
         return dynamic_tool_json_response(
             false,
-            json!({"error": "spawn_child handler command is not configured"}),
+            spawn_child_failure("spawn_child_handler_unavailable", "spawn_child handler command is not configured", true),
         );
     };
     if command.is_empty() {
         return dynamic_tool_json_response(
             false,
-            json!({"error": "spawn_child handler command is empty"}),
+            spawn_child_failure("spawn_child_handler_unavailable", "spawn_child handler command is empty", true),
         );
     }
-    if let Err(message) = parse_spawn_child_args(&request.arguments) {
-        return dynamic_tool_json_response(false, json!({"error": message}));
-    }
-
     let handler_payload = json!({
         "tool": request.tool,
         "namespace": request.namespace,
@@ -646,13 +653,29 @@ fn handle_spawn_child_tool(
 
     let output = match run_spawn_child_handler(command, &handler_payload) {
         Ok(value) => value,
-        Err(message) => return dynamic_tool_json_response(false, json!({"error": message})),
+        Err(message) => {
+            return dynamic_tool_json_response(
+                false,
+                spawn_child_failure("spawn_child_handler_failed", &message, true),
+            )
+        }
     };
     let success = output
         .get("success")
         .and_then(Value::as_bool)
         .unwrap_or(false);
     dynamic_tool_json_response(success, output)
+}
+
+fn spawn_child_failure(error_code: &str, error: &str, retryable: bool) -> Value {
+    json!({
+        "success": false,
+        "child_spawned": false,
+        "parent_continues": true,
+        "retryable": retryable,
+        "error_code": error_code,
+        "error": error,
+    })
 }
 
 fn tool_is_selected(selectors: &[McpToolSelector], server: &str, tool: &str) -> bool {
@@ -679,31 +702,6 @@ fn validate_mcp_tool_selectors(
         }
     }
     Ok(selectors)
-}
-
-fn parse_spawn_child_args(arguments: &Value) -> Result<String, String> {
-    let Some(args) = arguments.as_object() else {
-        return Err("spawn_child arguments must be an object".to_string());
-    };
-    if args.keys().any(|key| key != "prompt" && key != "workspace_dir") {
-        return Err("spawn_child accepts only prompt and workspace_dir".to_string());
-    }
-    let prompt = args
-        .get("prompt")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "spawn_child requires string prompt".to_string())?
-        .to_string();
-    if prompt.trim().is_empty() {
-        return Err("prompt must be non-empty".to_string());
-    }
-    let workspace_dir = args
-        .get("workspace_dir")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "spawn_child requires string workspace_dir".to_string())?;
-    if workspace_dir.trim().is_empty() {
-        return Err("workspace_dir must be non-empty".to_string());
-    }
-    Ok(prompt)
 }
 
 fn run_spawn_child_handler(command: &[String], payload: &Value) -> Result<Value, String> {
@@ -791,13 +789,16 @@ mod tests {
     }
 
     #[test]
-    fn spawn_child_requires_workspace_dir() {
-        assert!(parse_spawn_child_args(&json!({"prompt": "child"})).is_err());
-        assert!(parse_spawn_child_args(&json!({
-            "prompt": "child",
-            "workspace_dir": "seed_output/child"
-        }))
-        .is_ok());
+    fn spawn_child_schema_requires_prompt_and_workspace_dir() {
+        let mut tools = metalanguage_dynamic_tools();
+        let DynamicToolSpec::Function(function) = tools.remove(0) else {
+            panic!("spawn_child must be a function tool");
+        };
+        assert_eq!(
+            function.input_schema["required"],
+            json!(["prompt", "workspace_dir"])
+        );
+        assert!(function.description.contains("parent rollout continues"));
     }
 
     #[test]

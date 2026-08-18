@@ -21,7 +21,6 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -34,7 +33,6 @@ from utils.benchmark_driver import (
     BenchmarkDriver,
     BenchmarkItemRef,
     BenchmarkOutcome,
-    PreparedBatch,
     RolloutBenchmark,
     ScheduledBenchmarkBatch,
     active_benchmark_item,
@@ -75,12 +73,6 @@ class WorkerResult:
     error_code: str | int | None = None
     error_message: str | None = None
     metadata: dict[str, Any] | None = None
-
-
-class SpawnSlotUnavailable(RuntimeError):
-    def __init__(self, result: dict[str, Any]):
-        super().__init__(str(result.get("error") or "spawn_child slot is unavailable"))
-        self.result = result
 
 
 CONTINUATION_CONTEXT_FILENAME = "continuation_context.json"
@@ -243,7 +235,7 @@ def _replace_with_symlink(link_path: Path, target_path: Path) -> None:
 def _format_runtime_markdown(
     *,
     instance_uuid: str,
-    child_slot_cap: int | None = None,
+    child_slot_index: int | None = None,
     problem_pool_json_path: str | None = None,
     problem_pool_markdown_path: str | None = None,
     configured_problem_pool_size: int | None = None,
@@ -266,7 +258,8 @@ def _format_runtime_markdown(
         "",
         f"- instance_uuid: {instance_uuid}",
         f"- parent_instance_uuid: {parent_instance_uuid or ''}",
-        f"- child_slot_cap: {child_slot_cap if child_slot_cap is not None else ''}",
+        f"- reserved_child_slot_index: {child_slot_index if child_slot_index is not None else ''}",
+        "- successful_child_limit: 1",
         f"- configured_problem_pool_size: {configured_problem_pool_size if configured_problem_pool_size is not None else 'uncapped'}",
         f"- problem_pool_count: {problem_pool_count if problem_pool_count is not None else ''}",
         "",
@@ -357,8 +350,7 @@ def _make_continuation_context(
     spawn_slots_dir: Path,
     live_peer_instances: list[dict[str, Any]],
     progress_log_path: Path,
-    child_slot_cap: int,
-    child_slot_stop_path: Path,
+    population_size: int,
     generation: int,
     seed: int,
     task_index: int,
@@ -386,8 +378,7 @@ def _make_continuation_context(
         "shared_workspace_write_log": str(shared_workspace_write_log),
         "spawn_slots_path": str(spawn_slots_path),
         "spawn_slots_dir": str(spawn_slots_dir),
-        "child_slot_cap": child_slot_cap,
-        "child_slot_stop_path": str(child_slot_stop_path),
+        "population_size": population_size,
         "live_peer_instances": live_peer_instances,
         "progress_log": str(progress_log_path),
         "generation": generation,
@@ -434,88 +425,56 @@ def _write_json_file_atomic(path: Path, payload: Any) -> None:
     os.replace(temp_path, path)
 
 
-def _coerce_positive_int(value: Any) -> int | None:
-    try:
-        coerced = int(value)
-    except (TypeError, ValueError):
-        return None
-    return coerced if coerced > 0 else None
-
-
-def _child_slot_cap_from_context(context: dict[str, Any]) -> int | None:
-    return _coerce_positive_int(context.get("child_slot_cap"))
-
-
-def _spawn_slot_count(spawn_slots_path: Path) -> int:
-    state = _read_json_file(spawn_slots_path, {})
-    slots = state.get("slots") if isinstance(state, dict) else None
-    return len(slots) if isinstance(slots, list) else 0
-
-
-def _spawn_slots_full(spawn_slots_path: Path, child_slot_cap: int | None) -> bool:
-    return child_slot_cap is not None and _spawn_slot_count(spawn_slots_path) >= child_slot_cap
-
-
-def _spawn_slot_cap_failure_result(
+def _spawn_failure(
+    error: str,
     *,
-    context: dict[str, Any],
-    child_instance_uuid: str | None,
-    child_prompt: str | None,
-) -> dict[str, Any] | None:
-    child_slot_cap = _child_slot_cap_from_context(context)
-    if child_slot_cap is None:
-        return None
-    claimed_slots = _spawn_slot_count(Path(str(context["spawn_slots_path"])))
-    if claimed_slots < child_slot_cap:
-        return None
+    error_code: str,
+    retryable: bool,
+    **fields: Any,
+) -> dict[str, Any]:
     return {
         "success": False,
-        "slot_claimed": False,
-        "error": f"child slot cap reached ({claimed_slots}/{child_slot_cap})",
-        "child_instance_uuid": child_instance_uuid,
-        "prompt_chars": len(child_prompt) if child_prompt is not None else None,
-        "claimed_slots": claimed_slots,
-        "child_slot_cap": child_slot_cap,
-        "child_slots_remaining": 0,
+        "child_spawned": False,
+        "parent_continues": True,
+        "retryable": retryable,
+        "error_code": error_code,
+        "error": error,
+        **fields,
     }
 
 
-def _child_slot_stop_path(context: dict[str, Any]) -> Path | None:
-    raw_path = context.get("child_slot_stop_path")
-    if not isinstance(raw_path, str) or not raw_path:
-        return None
-    return Path(raw_path)
+def _slot_for_source_rollout(
+    slots: list[dict[str, Any]],
+    source_rollout_index: int,
+) -> dict[str, Any] | None:
+    for slot in slots:
+        if _slot_source_rollout_index(slot) == source_rollout_index:
+            return slot
+    return None
 
 
-def _write_child_slot_stop_signal(
-    *,
-    context: dict[str, Any],
-    claimed_slots: int,
-    child_slot_cap: int,
-) -> None:
-    stop_path = _child_slot_stop_path(context)
-    if stop_path is None:
-        return
+def _slot_source_rollout_index(slot: dict[str, Any]) -> int | None:
     try:
-        _write_json_file_atomic(
-            stop_path,
-            {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "event": "child_slot_cap_reached",
-                "generation": int(context["generation"]),
-                "seed": int(context["seed"]),
-                "task_index": int(context["task_index"]),
-                "task_id": str(context["task_id"]),
-                "claimed_slots": claimed_slots,
-                "child_slot_cap": child_slot_cap,
-            },
-        )
-    except OSError:
-        return
+        return int(slot.get("source_rollout_index"))
+    except (TypeError, ValueError):
+        return None
 
 
-def _child_slot_stop_requested(stop_path: Path | None) -> bool:
-    return stop_path is not None and stop_path.exists()
+def _already_spawned_failure(
+    *,
+    source_rollout_index: int,
+    slot: dict[str, Any],
+    prompt_chars: int | None,
+) -> dict[str, Any]:
+    return _spawn_failure(
+        "This rollout has already spawned its child; each rollout may successfully spawn at most one child.",
+        error_code="child_already_spawned",
+        retryable=False,
+        source_rollout_index=source_rollout_index,
+        slot_index=slot.get("slot_index", source_rollout_index),
+        child_instance_uuid=slot.get("child_instance_uuid"),
+        prompt_chars=prompt_chars,
+    )
 
 
 def _spawn_item_ref(context: dict[str, Any]) -> BenchmarkItemRef:
@@ -532,7 +491,7 @@ def _spawn_item_ref(context: dict[str, Any]) -> BenchmarkItemRef:
     )
 
 
-def _claim_spawn_slot(
+def _record_spawned_child(
     *,
     context: dict[str, Any],
     child_instance_uuid: str,
@@ -545,35 +504,28 @@ def _claim_spawn_slot(
     source_id = item_ref.source_id or item_ref.item_id
     source_item_id = item_ref.item_id
     source_item_index = item_ref.item_index
+    source_rollout_index = int(context["rollout_index"])
+    slot_index = source_rollout_index
+    population_size = int(context["population_size"])
     lock_path = slots_path.with_suffix(slots_path.suffix + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     slots_dir.mkdir(parents=True, exist_ok=True)
 
-    with lock_path.open("w", encoding="utf-8") as lock_fh:
-        fcntl.flock(lock_fh, fcntl.LOCK_EX)
-        state = _read_json_file(slots_path, {})
-        slots = state.get("slots") if isinstance(state, dict) else None
-        if not isinstance(slots, list):
-            slots = []
-        child_slot_cap = _child_slot_cap_from_context(context)
-        if child_slot_cap is None and isinstance(state, dict):
-            child_slot_cap = _coerce_positive_int(state.get("child_slot_cap"))
-        if child_slot_cap is not None and len(slots) >= child_slot_cap:
-            return {
-                "success": False,
-                "slot_claimed": False,
-                "error": f"child slot cap reached ({len(slots)}/{child_slot_cap})",
-                "child_instance_uuid": child_instance_uuid,
-                "prompt_chars": len(child_prompt),
-                "claimed_slots": len(slots),
-                "child_slot_cap": child_slot_cap,
-                "child_slots_remaining": 0,
-            }
+    initial_state = _read_json_file(slots_path, {})
+    initial_slots = initial_state.get("slots") if isinstance(initial_state, dict) else None
+    if isinstance(initial_slots, list):
+        existing_slot = _slot_for_source_rollout(initial_slots, source_rollout_index)
+        if existing_slot is not None:
+            return _already_spawned_failure(
+                source_rollout_index=source_rollout_index,
+                slot=existing_slot,
+                prompt_chars=len(child_prompt),
+            )
 
-        slot_index = len(slots)
-        slot_dir = slots_dir / f"slot_{slot_index:03d}_{child_instance_uuid[:8]}"
+    slot_dir = slots_dir / f"slot_{slot_index:03d}_{child_instance_uuid[:8]}"
+    child_workspace_dir = slot_dir / "workspace"
+    try:
         slot_dir.mkdir(parents=True, exist_ok=False)
-        child_workspace_dir = slot_dir / "workspace"
         child_workspace_dir.mkdir(parents=True, exist_ok=False)
         copy_seed_workspace(source_workspace_dir, child_workspace_dir)
         copied_readme = child_workspace_dir / "README.md"
@@ -585,6 +537,24 @@ def _claim_spawn_slot(
             raise RuntimeError("copied child README.md is not readable UTF-8 text") from exc
         if not copied_readme_text.strip():
             raise RuntimeError("copied child README.md contains no non-blank text")
+    except BaseException:
+        shutil.rmtree(slot_dir, ignore_errors=True)
+        raise
+
+    with lock_path.open("w", encoding="utf-8") as lock_fh:
+        fcntl.flock(lock_fh, fcntl.LOCK_EX)
+        state = _read_json_file(slots_path, {})
+        slots = state.get("slots") if isinstance(state, dict) else None
+        if not isinstance(slots, list):
+            slots = []
+        existing_slot = _slot_for_source_rollout(slots, source_rollout_index)
+        if existing_slot is not None:
+            shutil.rmtree(slot_dir, ignore_errors=True)
+            return _already_spawned_failure(
+                source_rollout_index=source_rollout_index,
+                slot=existing_slot,
+                prompt_chars=len(child_prompt),
+            )
         manifest_path = slot_dir / "slot_manifest.json"
         metadata = {
             "child_instance_uuid": child_instance_uuid,
@@ -602,41 +572,46 @@ def _claim_spawn_slot(
             "source_task_id": source_id,
             "source_problem_uid": source_item_id,
             "source_benchmark_item": item_ref.to_metadata(),
-            "source_rollout_index": context["rollout_index"],
-            "child_slot_cap": child_slot_cap,
+            "source_rollout_index": source_rollout_index,
+            "population_size": population_size,
         }
-        _write_json_file_atomic(manifest_path, metadata)
-        slot_record = dict(metadata)
-        slots.append(slot_record)
-        claimed_slots = len(slots)
-        child_slots_remaining = (
-            max(0, child_slot_cap - claimed_slots)
-            if child_slot_cap is not None
-            else None
-        )
-        _write_json_file_atomic(
-            slots_path,
-            {
-                "source_task_index": context["task_index"],
-                "source_task_id": source_id,
-                "source_problem_uid": source_item_id,
-                "source_benchmark_item": item_ref.to_metadata(),
-                "child_slot_cap": child_slot_cap,
-                "claimed_slots": claimed_slots,
-                "slots": slots,
-            },
-        )
+        try:
+            _write_json_file_atomic(manifest_path, metadata)
+            slots.append(dict(metadata))
+            slots.sort(
+                key=lambda slot: (
+                    _slot_source_rollout_index(slot) is None,
+                    _slot_source_rollout_index(slot) or 0,
+                )
+            )
+            _write_json_file_atomic(
+                slots_path,
+                {
+                    "source_task_index": context["task_index"],
+                    "source_task_id": source_id,
+                    "source_problem_uid": source_item_id,
+                    "source_benchmark_item": item_ref.to_metadata(),
+                    "population_size": population_size,
+                    "spawned_child_count": len(slots),
+                    "slots": slots,
+                },
+            )
+        except BaseException:
+            shutil.rmtree(slot_dir, ignore_errors=True)
+            raise
         return {
             "success": True,
-            "slot_claimed": True,
+            "child_spawned": True,
+            "parent_continues": True,
+            "retryable": False,
+            "message": "Child spawned successfully; the parent rollout continues.",
+            "source_rollout_index": source_rollout_index,
             "slot_index": slot_index,
             "child_instance_uuid": child_instance_uuid,
             "slot_dir": str(slot_dir),
             "workspace_dir": str(child_workspace_dir),
             "prompt_chars": len(child_prompt),
-            "claimed_slots": claimed_slots,
-            "child_slot_cap": child_slot_cap,
-            "child_slots_remaining": child_slots_remaining,
+            "population_size": population_size,
         }
 
 
@@ -690,20 +665,29 @@ def _load_spawned_child_slots(
         return []
     sorted_slots = sorted(
         slots,
-        key=lambda item: int(item.get("slot_index", 0)) if isinstance(item, dict) else 0,
+        key=lambda item: (
+            _slot_source_rollout_index(item) is None,
+            _slot_source_rollout_index(item) or 0,
+        )
+        if isinstance(item, dict)
+        else (True, 0),
     )
     child_slots: list[dict[str, Any]] = []
+    included_source_rollout_indices: set[int] = set()
     for slot in sorted_slots:
         if not isinstance(slot, dict):
             continue
+        slot_source_rollout_index = _slot_source_rollout_index(slot)
+        if slot_source_rollout_index is None:
+            continue
+        if slot_source_rollout_index in included_source_rollout_indices:
+            continue
         if source_rollout_index is not None:
-            try:
-                if int(slot.get("source_rollout_index")) != source_rollout_index:
-                    continue
-            except (TypeError, ValueError):
+            if slot_source_rollout_index != source_rollout_index:
                 continue
         if _slot_prompt(slot) is not None:
             child_slots.append(slot)
+            included_source_rollout_indices.add(slot_source_rollout_index)
     return child_slots
 
 
@@ -1128,18 +1112,33 @@ def _spawn_child_continuation(
     args: dict[str, Any],
     progress_callback: Any = None,
 ) -> dict[str, Any]:
+    source_rollout_index = int(context["rollout_index"])
+    state = _read_json_file(Path(str(context["spawn_slots_path"])), {})
+    slots = state.get("slots") if isinstance(state, dict) else None
+    if isinstance(slots, list):
+        existing_slot = _slot_for_source_rollout(slots, source_rollout_index)
+        if existing_slot is not None:
+            raw_prompt = args.get("prompt")
+            return _already_spawned_failure(
+                source_rollout_index=source_rollout_index,
+                slot=existing_slot,
+                prompt_chars=len(raw_prompt) if isinstance(raw_prompt, str) else None,
+            )
+
     child_prompt, workspace_dir_arg, error = _parse_spawn_child_arguments(args)
     if error is not None or child_prompt is None:
-        return {
-            "success": False,
-            "error": error or "invalid spawn_child arguments",
-        }
+        return _spawn_failure(
+            error or "invalid spawn_child arguments",
+            error_code="invalid_spawn_child_arguments",
+            retryable=True,
+        )
     source_workspace_dir, error = _resolve_spawn_workspace_dir(context, workspace_dir_arg)
     if error is not None:
-        return {
-            "success": False,
-            "error": error or "invalid workspace_dir",
-        }
+        return _spawn_failure(
+            error or "invalid workspace_dir",
+            error_code="invalid_child_workspace",
+            retryable=True,
+        )
 
     parent_instance_uuid = str(context["instance_uuid"])
     item_ref = _spawn_item_ref(context)
@@ -1147,10 +1146,6 @@ def _spawn_child_continuation(
     item_id = item_ref.item_id
     item_index = item_ref.item_index
     child_instance_uuid = new_instance_uuid()
-    slot_index: int | None = None
-    child_slot_dir: str | None = None
-    child_workspace_dir: str | None = None
-    slot_result: dict[str, Any] | None = None
 
     def _progress(event: str, **fields: Any) -> None:
         payload = {
@@ -1179,61 +1174,25 @@ def _spawn_child_continuation(
             },
         )
 
-    cap_failure = _spawn_slot_cap_failure_result(
-        context=context,
-        child_instance_uuid=child_instance_uuid,
-        child_prompt=child_prompt,
-    )
-    if cap_failure is not None:
-        _progress("failed", **cap_failure)
-        return cap_failure
-
     try:
-        slot_result = _claim_spawn_slot(
+        slot_result = _record_spawned_child(
             context=context,
             child_instance_uuid=child_instance_uuid,
             child_prompt=child_prompt,
             source_workspace_dir=source_workspace_dir,
         )
-        if not slot_result.get("slot_claimed"):
-            raise SpawnSlotUnavailable(slot_result)
-        slot_index = int(slot_result["slot_index"])
-        child_slot_dir = str(slot_result["slot_dir"])
-        raw_workspace_dir = slot_result.get("workspace_dir")
-        child_workspace_dir = str(raw_workspace_dir) if raw_workspace_dir else None
-        result = {
-            **slot_result,
-            "success": True,
-        }
-        if (
-            _coerce_positive_int(slot_result.get("child_slot_cap")) is not None
-            and int(slot_result.get("child_slots_remaining") or 0) == 0
-        ):
-            _write_child_slot_stop_signal(
-                context=context,
-                claimed_slots=int(slot_result.get("claimed_slots") or 0),
-                child_slot_cap=int(slot_result["child_slot_cap"]),
-            )
-        _progress("slot_claimed", **result)
-        return result
-    except SpawnSlotUnavailable as exc:
-        result = {
-            **exc.result,
-            "success": False,
-            "slot_claimed": False,
-        }
-        _progress("failed", **result)
-        return result
+        event = "spawned" if slot_result.get("child_spawned") else "failed"
+        _progress(event, **slot_result)
+        return slot_result
     except BaseException as exc:
-        result = {
-            "success": False,
-            "child_instance_uuid": child_instance_uuid,
-            "slot_index": slot_index,
-            "child_slot_dir": child_slot_dir,
-            "child_workspace_dir": child_workspace_dir,
-            "prompt_chars": len(child_prompt),
-            "error": f"{type(exc).__name__}: {exc}",
-        }
+        result = _spawn_failure(
+            f"{type(exc).__name__}: {exc}",
+            error_code="child_workspace_copy_failed",
+            retryable=True,
+            child_instance_uuid=child_instance_uuid,
+            slot_index=int(context["rollout_index"]),
+            prompt_chars=len(child_prompt),
+        )
         _progress("failed", **result)
         return result
 
@@ -1260,7 +1219,6 @@ def run_worker(
     benchmark_driver: BenchmarkDriver,
     rollout_benchmark: RolloutBenchmark,
     initial_user_text: str,
-    stop_requested: Callable[[], bool] | None = None,
     progress_callback: Any = None,
 ) -> WorkerResult:
     """Run a multi-turn tool-calling worker loop and return final assistant text."""
@@ -1282,22 +1240,7 @@ def run_worker(
     spawned_child_slots: list[dict[str, Any]] = []
     started_at = time.monotonic()
 
-    def _stop_requested() -> bool:
-        return stop_requested is not None and stop_requested()
-
-    def _cancelled_result() -> WorkerResult:
-        return WorkerResult(
-            final_text=final_text,
-            status="cancelled",
-            stop_reason="child_slots_full",
-            error_code="child_slots_full",
-            error_message="Child slot cap reached; rollout stopped.",
-            metadata={"spawned_child_slots": spawned_child_slots},
-        )
-
     while True:
-        if _stop_requested():
-            return _cancelled_result()
         turn_count += 1
         elapsed_seconds = time.monotonic() - started_at
         if elapsed_seconds > timeout_seconds:
@@ -1430,7 +1373,8 @@ def run_worker(
                     args=args,
                     progress_callback=progress_callback,
                 )
-                spawned_child_slots.append(tool_result)
+                if tool_result.get("child_spawned"):
+                    spawned_child_slots.append(tool_result)
             elif tool_name != "run_bash":
                 tool_result = {"error": f"unsupported tool '{call.get('name')}'"}
             elif not command:
@@ -1515,9 +1459,6 @@ def run_worker(
                     "output": json.dumps(tool_result),
                 }
             )
-            if _stop_requested():
-                return _cancelled_result()
-
     return WorkerResult(
         final_text=final_text,
         status="completed",
@@ -1546,7 +1487,6 @@ def run_codex_worker(
     continuation_context_path: Path | None = None,
     benchmark_mcp_servers: dict[str, Any] | None = None,
     sensitive_mcp_tools: tuple[tuple[str, str], ...] = (),
-    stop_requested: Callable[[], bool] | None = None,
     progress_callback: Any = None,
 ) -> WorkerResult:
     """Run one rollout through the Metalanguage-owned Codex runner."""
@@ -1570,7 +1510,6 @@ def run_codex_worker(
         spawn_child_handler_context_path=continuation_context_path,
         benchmark_mcp_servers=benchmark_mcp_servers,
         sensitive_mcp_tools=sensitive_mcp_tools,
-        stop_requested=stop_requested,
         progress_callback=progress_callback,
     )
     metadata = {
@@ -1862,7 +1801,7 @@ def parse_args() -> argparse.Namespace:
         "--num-rollouts",
         type=int,
         default=DEFAULT_NUM_ROLLOUTS,
-        help="Number of bootstrap rollouts to run before spawn_child controls lineage width.",
+        help="Configured rollout population size for every batch.",
     )
     parser.add_argument(
         "--worker-timeout-seconds",
@@ -1887,7 +1826,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=(
             "Exit nonzero when any rollout has a worker/runtime error, even if "
-            "next-iteration child slots were produced."
+            "next-iteration children were spawned."
         ),
     )
     parser.add_argument("--question-key", default=None)
@@ -2165,28 +2104,12 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 counts.append(count)
         return max(counts) if counts else None
 
-    def _recorded_scheduler_task_id(per_task: dict[int, dict[str, Any]]) -> str | None:
-        for rec in per_task.values():
-            raw_task_id = rec.get("scheduler_task_id") or rec.get("task_id")
-            if isinstance(raw_task_id, str) and raw_task_id:
-                return raw_task_id
-        return None
-
-    def _task_spawn_slots_path(task_idx: int, scheduler_task_id: str) -> Path:
-        return rollout_root / f"{task_idx:06d}_{_sanitize_for_path(scheduler_task_id)}_spawn_slots.json"
-
     def _next_step_task_index() -> int:
         eligible_indices = [idx for idx in existing_by_task if idx >= args.start_task_index]
         for idx in sorted(eligible_indices):
             per_task = existing_by_task[idx]
             expected_count = _recorded_task_rollout_count(per_task) or args.num_rollouts
             if len(per_task) < expected_count:
-                scheduler_task_id = _recorded_scheduler_task_id(per_task)
-                if scheduler_task_id and _spawn_slots_full(
-                    _task_spawn_slots_path(idx, scheduler_task_id),
-                    expected_count,
-                ):
-                    continue
                 return idx
         if eligible_indices:
             return max(eligible_indices) + 1
@@ -2225,8 +2148,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
         )
         if task_rollout_count <= 0:
             raise RuntimeError(
-                f"No spawned child slots available for task_index={task_index}; "
-                "lineage cannot advance without spawn_child."
+                f"No rollout population positions available for task_index={task_index}."
             )
         task_instance_uuids: dict[int, str] = {}
         for rollout_index in range(task_rollout_count):
@@ -2256,70 +2178,21 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
         spawn_slots_dir = rollout_root / (
             f"{task_index:06d}_{_sanitize_for_path(task_id)}_next_iteration"
         )
-        # A generation may temporarily shrink when fewer children are spawned than
-        # configured rollout width. Keep the child-slot cap at the configured
-        # target so a later parent can claim an extra slot and restore width.
-        child_slot_cap = max(task_rollout_count, args.num_rollouts)
-        child_slot_stop_path = rollout_root / (
-            f"{task_index:06d}_{_sanitize_for_path(task_id)}_child_slots_full.json"
-        )
-        batch_stop_event = threading.Event()
-        child_slot_cap_logged = False
-
-        def _signal_child_slot_cap_full(reason: str) -> None:
-            nonlocal child_slot_cap_logged
-            batch_stop_event.set()
-            if child_slot_cap_logged:
-                return
-            child_slot_cap_logged = True
-            append_progress_log(
-                progress_log_path,
-                progress_log_lock,
-                {
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "event": "child_slot_cap_reached",
-                    "generation": args.generation,
-                    "seed": args.seed,
-                    "task_index": task_index,
-                    "task_id": task_id,
-                    "problem_uid": problem_uid,
-                    "reason": reason,
-                    "claimed_slots": _spawn_slot_count(spawn_slots_path),
-                    "child_slot_cap": child_slot_cap,
-                },
-            )
-
-        def _task_stop_requested() -> bool:
-            return (
-                batch_stop_event.is_set()
-                or _child_slot_stop_requested(child_slot_stop_path)
-            )
-
         if len(existing_task_records) >= task_rollout_count:
             continue
-
-        child_slots_already_full = _spawn_slots_full(spawn_slots_path, child_slot_cap)
-        if child_slots_already_full:
-            _signal_child_slot_cap_full("already_full")
 
         problem_pool_json_path = shared_workspace_dir / "problem_pool.json"
         problem_pool_markdown_path = shared_workspace_dir / "problem_pool.md"
         benchmark_readme_path = shared_workspace_dir / BENCHMARK_README_FILENAME
-        prepared_benchmark_batch: PreparedBatch | None = None
-        if not child_slots_already_full:
-            prepared_benchmark_batch = benchmark_driver.prepare_batch(
-                task_index,
-                shared_workspace_dir,
-            )
-            if prepared_benchmark_batch.item_count <= 0:
-                raise RuntimeError("No unsolved problems are available for the rollout problem pool.")
-            if not benchmark_readme_path.is_file():
-                raise RuntimeError("benchmark driver did not provide shared benchmark instructions")
-        problem_pool_count = (
-            prepared_benchmark_batch.item_count
-            if prepared_benchmark_batch is not None
-            else 0
+        prepared_benchmark_batch = benchmark_driver.prepare_batch(
+            task_index,
+            shared_workspace_dir,
         )
+        if prepared_benchmark_batch.item_count <= 0:
+            raise RuntimeError("No unsolved problems are available for the rollout problem pool.")
+        if not benchmark_readme_path.is_file():
+            raise RuntimeError("benchmark driver did not provide shared benchmark instructions")
+        problem_pool_count = prepared_benchmark_batch.item_count
 
         def _run_one_rollout(rollout_index: int) -> RolloutResult:
             existing = existing_task_records.get(rollout_index)
@@ -2448,8 +2321,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 shared_workspace_write_log=shared_workspace_write_log,
                 spawn_slots_path=spawn_slots_path,
                 spawn_slots_dir=spawn_slots_dir,
-                child_slot_cap=child_slot_cap,
-                child_slot_stop_path=child_slot_stop_path,
+                population_size=args.num_rollouts,
                 live_peer_instances=rollout_live_peer_instances,
                 progress_log_path=progress_log_path,
                 generation=args.generation,
@@ -2468,8 +2340,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 codex_initial_prompt=args.codex_initial_prompt,
                 codex_base_instructions=codex_base_instructions,
             )
-            if prepared_benchmark_batch is None:
-                raise RuntimeError("benchmark batch was not prepared")
             planned_context_path = rollout_control_dir / CONTINUATION_CONTEXT_FILENAME
             rollout_benchmark = benchmark_driver.prepare_rollout(
                 prepared_benchmark_batch,
@@ -2494,7 +2364,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                         )
                         else None
                     ),
-                    child_slot_cap=child_slot_cap,
+                    child_slot_index=rollout_index,
                     problem_pool_json_path="shared_workspace/problem_pool.json",
                     problem_pool_markdown_path="shared_workspace/problem_pool.md",
                     configured_problem_pool_size=args.problem_pool_size,
@@ -2561,7 +2431,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                             continuation_context_path=continuation_context_path,
                             benchmark_mcp_servers=rollout_benchmark.mcp_servers,
                             sensitive_mcp_tools=rollout_benchmark.sensitive_mcp_tools,
-                            stop_requested=_task_stop_requested,
                             progress_callback=_progress,
                         )
                     else:
@@ -2588,7 +2457,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                             benchmark_driver=benchmark_driver,
                             rollout_benchmark=rollout_benchmark,
                             initial_user_text=rollout_initial_prompt,
-                            stop_requested=_task_stop_requested,
                             progress_callback=_progress,
                         )
                 except BaseException as exc:
@@ -2720,7 +2588,8 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 "spawned_child_slot_count": len(spawned_child_slots),
                 "spawned_child_slot_indices": spawned_child_slot_indices,
                 "consumed_source_workspace_dirs": consumed_source_workspaces,
-                "child_slot_cap": child_slot_cap,
+                "reserved_child_slot_index": rollout_index,
+                "successful_child_limit": 1,
                 "benchmark_events_path": str(benchmark_events_path),
                 "worker_status": worker_result.status,
                 "worker_stop_reason": worker_result.stop_reason,
@@ -2794,12 +2663,11 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             )
 
         missing_rollout_indices: list[int] = []
-        if not child_slots_already_full:
-            for rollout_index in range(task_rollout_count):
-                existing = existing_task_records.get(rollout_index)
-                if existing is not None:
-                    continue
-                missing_rollout_indices.append(rollout_index)
+        for rollout_index in range(task_rollout_count):
+            existing = existing_task_records.get(rollout_index)
+            if existing is not None:
+                continue
+            missing_rollout_indices.append(rollout_index)
 
         shared_snapshot = _snapshot_workspace_files(shared_workspace_dir)
         results: list[RolloutResult] = []
@@ -2811,8 +2679,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 }
                 pending = set(futures)
                 while pending:
-                    if _task_stop_requested():
-                        _signal_child_slot_cap_full("slot_cap_full")
                     done, pending = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
                     if not done:
                         continue
@@ -2869,6 +2735,8 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                                         "next_slot_dir": None,
                                         "next_workspace_dir": None,
                                         "child_prompt_viable": False,
+                                        "reserved_child_slot_index": rollout_index,
+                                        "successful_child_limit": 1,
                                         "worker_status": "error",
                                         "worker_stop_reason": type(exc).__name__,
                                         "worker_error_code": None,
@@ -2948,9 +2816,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                                     error=str(exc),
                                 )
                             )
-                    if _task_stop_requested():
-                        _signal_child_slot_cap_full("slot_cap_full")
-
         _cleanup_rollout_shared_writes(shared_workspace_dir, shared_snapshot)
 
         for result in sorted(results, key=lambda item: item.rollout_index):
@@ -2988,7 +2853,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
         spawned_child_slots = _load_spawned_child_parent_slots(spawn_slots_path)
         parent_pool, reinitialized_bootstrap_count = _refill_parent_pool_with_bootstrap_slots(
             spawned_child_slots,
-            target_count=child_slot_cap,
+            target_count=args.num_rollouts,
         )
         save_parent_pool(parent_pool_path, parent_pool)
         append_progress_log(
@@ -3002,7 +2867,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 "task_index": task_index,
                 "task_id": task_id,
                 "problem_uid": problem_uid,
-                "child_slot_cap": child_slot_cap,
+                "population_size": args.num_rollouts,
                 "spawned_child_slot_count": len(spawned_child_slots),
                 "reinitialized_bootstrap_slot_count": reinitialized_bootstrap_count,
                 "parent_pool_count": len(parent_pool),
@@ -3068,15 +2933,17 @@ def run_child_tool_handler(context_path: Path) -> None:
                 args=args,
             )
         else:
-            result = {
-                "success": False,
-                "error": f"unsupported dynamic tool: {tool}",
-            }
+            result = _spawn_failure(
+                f"unsupported dynamic tool: {tool}",
+                error_code="unsupported_dynamic_tool",
+                retryable=True,
+            )
     except BaseException as exc:
-        result = {
-            "success": False,
-            "error": f"{type(exc).__name__}: {exc}",
-        }
+        result = _spawn_failure(
+            f"{type(exc).__name__}: {exc}",
+            error_code="spawn_child_handler_failed",
+            retryable=True,
+        )
 
     result = {
         **result,
