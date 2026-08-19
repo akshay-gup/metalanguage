@@ -19,6 +19,7 @@ use codex_core_api::AbsolutePathBuf;
 use codex_core_api::Arg0DispatchPaths;
 use codex_core_api::AskForApproval;
 use codex_core_api::AuthManager;
+use codex_core_api::CodexAppsToolsCache;
 use codex_core_api::CodexHomeUserInstructionsProvider;
 use codex_core_api::EnvironmentManager;
 use codex_core_api::EventMsg;
@@ -27,9 +28,13 @@ use codex_core_api::Feature;
 use codex_core_api::NewThread;
 use codex_core_api::Op;
 use codex_core_api::SessionSource;
+use codex_core_api::StartIfIdleSubmission;
+use codex_core_api::StartThreadOptions;
 use codex_core_api::ThreadManager;
+use codex_core_api::TurnInputRequest;
 use codex_core_api::UserInput;
 use codex_core_api::arg0_dispatch_or_else;
+use codex_core_api::build_models_manager;
 use codex_core_api::empty_extension_registry;
 use codex_core_api::init_state_db;
 use codex_core_api::item_event_to_server_notification;
@@ -208,7 +213,9 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
 
     let state_db = init_state_db(&config).await;
     let auth_manager =
-        AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ true).await;
+        AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ true)
+            .await
+            .context("initialize Codex authentication manager")?;
     let local_runtime_paths = ExecServerRuntimePaths::from_optional_paths(
         config.codex_self_exe.clone(),
         config.codex_linux_sandbox_exe.clone(),
@@ -216,9 +223,13 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
     .context("configure Codex runtime helper paths")?;
     let thread_store = thread_store_from_config(&config, state_db.clone());
     let environment_manager = Arc::new(
-        EnvironmentManager::from_codex_home(config.codex_home.clone(), Some(local_runtime_paths))
-            .await
-            .context("load Codex environment manager")?,
+        EnvironmentManager::from_codex_home(
+            config.codex_home.clone(),
+            Some(local_runtime_paths),
+            config.http_client_factory(),
+        )
+        .await
+        .context("load Codex environment manager")?,
     );
     let installation_id = resolve_installation_id(&config.codex_home)
         .await
@@ -230,7 +241,9 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
 
     let thread_manager = ThreadManager::new(
         &config,
-        auth_manager,
+        Arc::clone(&auth_manager),
+        build_models_manager(&config, auth_manager),
+        CodexAppsToolsCache::default(),
         SessionSource::Exec,
         environment_manager,
         empty_extension_registry(),
@@ -243,12 +256,14 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
         /*external_time_provider*/ None,
     );
 
+    let mut start_options = StartThreadOptions::new(config);
+    start_options.dynamic_tools = metalanguage_dynamic_tools();
     let NewThread {
         thread_id,
         thread,
         session_configured,
     } = thread_manager
-        .start_thread_with_tools(config, metalanguage_dynamic_tools())
+        .start_thread(start_options)
         .await
         .context("start Codex thread")?;
 
@@ -304,19 +319,22 @@ async fn run_turn(
     spawn_child_handler_command: Option<Vec<String>>,
     sensitive_tools: Vec<McpToolSelector>,
 ) -> anyhow::Result<()> {
-    thread
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: prompt,
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
+    let submission = thread
+        .start_turn_if_idle(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: prompt,
+            text_elements: Vec::new(),
+        }]))
         .await
         .context("submit user input")?;
+    if let StartIfIdleSubmission::NotSubmitted { reason } = submission {
+        let message = format!("turn input was not submitted: {reason:?}");
+        emit(json!({
+            "event": "error",
+            "error_code": "turn_input_not_submitted",
+            "error_message": message,
+        }))?;
+        bail!(message);
+    }
 
     let mut current_turn_id: Option<String> = None;
     let mut final_text = String::new();
@@ -467,6 +485,17 @@ async fn run_turn(
                 }
             }
             EventMsg::TurnComplete(event) => {
+                if let Some(error) = &event.error {
+                    let error_code = codex_error_code(error.codex_error_info.as_ref());
+                    emit(json!({
+                        "event": "error",
+                        "error_code": error_code,
+                        "error_message": error.message,
+                        "codex_error_info": error.codex_error_info.as_ref(),
+                        "turn_id": event.turn_id,
+                    }))?;
+                    bail!("Codex turn failed ({error_code}): {}", error.message);
+                }
                 let text = event
                     .last_agent_message
                     .clone()
@@ -480,11 +509,14 @@ async fn run_turn(
                 return Ok(());
             }
             EventMsg::Error(event) => {
+                let error_code = codex_error_code(event.codex_error_info.as_ref());
                 emit(json!({
                     "event": "error",
+                    "error_code": error_code,
                     "error_message": event.message,
+                    "codex_error_info": event.codex_error_info.as_ref(),
                 }))?;
-                bail!("{}", event.message);
+                bail!("Codex error ({error_code}): {}", event.message);
             }
             EventMsg::TurnAborted(event) => {
                 emit(json!({
@@ -540,6 +572,22 @@ async fn run_turn(
             }
             _ => {}
         }
+    }
+}
+
+fn codex_error_code(error_info: Option<&codex_protocol::protocol::CodexErrorInfo>) -> String {
+    let Some(error_info) = error_info else {
+        return "turn_failed".to_string();
+    };
+    match serde_json::to_value(error_info) {
+        Ok(Value::String(code)) => code,
+        Ok(Value::Object(details)) => details
+            .into_iter()
+            .next()
+            .map(|(code, _)| code)
+            .unwrap_or_else(|| "turn_failed".to_string()),
+        Ok(value) => value.to_string(),
+        Err(_) => "turn_failed".to_string(),
     }
 }
 
