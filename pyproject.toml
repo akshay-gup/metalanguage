@@ -3,7 +3,7 @@ name = "metalanguage"
 version = "0.1.0"
 description = "Open-ended RSI rollout loop."
 readme = "README.md"
-requires-python = ">=3.11,<3.14"
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "arc-agi>=0.0.7",
     "datasets>=2.20",
