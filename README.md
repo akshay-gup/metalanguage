@@ -106,6 +106,34 @@ take precedence over values in `.env`.
   - answers are scored only when the submitted uuid exists in that iteration's shared pool copy;
   - each uuid appears at most once in a generated pool copy, unsolved problems may reappear later with the same uuid, and after each rollout batch any problem solved by at least one rollout is removed from future pool copies.
 
+### ARC-AGI-3 benchmark semantics
+
+- ARC uses the same compatibility filenames, `shared_workspace/problem_pool.json`
+  and `problem_pool.md`, as a reusable public environment catalog. Every official
+  environment record remains eligible on every iteration, subject only to the
+  optional deterministic `--problem-pool-size` sampling cap; a prior `WIN` never
+  retires an environment.
+- The overall human task is improving general ARC-AGI-3 capability for eventual
+  hidden evaluation. A selected environment's official `WIN` and level progress
+  remain rollout diagnostics and do not complete that overall objective.
+- Rollouts interact only through the official `RESET` and `ACTION1`–`ACTION7`
+  interface documented in `shared_workspace/BENCHMARK.md`.
+- The driver reads the official Relative Human Action Efficiency score from
+  `GET /api/scorecard/{card_id}`. `BenchmarkOutcome.reward` is that RHAE
+  percentage in the explicit `official_rhae_percent_0_to_100` unit, not a 0–1
+  fraction or binary WIN reward. It is `null` when the official score is
+  unavailable, with an explicit outcome error; the game-specific endpoint's raw
+  action/accounting metrics are retained separately.
+- Batch means are labeled public-practice rollout RHAE aggregates because
+  self-selected and repeated public environments are neither the official
+  hidden score nor an official full-suite score. The official full-suite
+  methodology averages environment scores, while each completed level uses the
+  squared human-baseline/AI-action ratio, capped at 115%, 1-indexed level
+  weighting, and a completion cap.
+- `logs/arc_agi/benchmark_state.json` remains compatible with existing runtimes:
+  its historical `solved_items` field is retained as an observed-environment-WIN
+  ledger, but it has no effect on catalog eligibility.
+
 ### Codex rollout backend
 
 The default rollout backend remains OpenRouter. To run rollouts through the
