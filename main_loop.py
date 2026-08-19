@@ -704,10 +704,18 @@ def _refill_parent_pool_with_bootstrap_slots(
     *,
     target_count: int,
 ) -> tuple[list[dict[str, Any]], int]:
-    parent_pool = list(spawned_child_slots[:target_count])
-    reinitialized_count = max(0, target_count - len(parent_pool))
-    for _ in range(reinitialized_count):
-        slot_index = len(parent_pool)
+    spawned_slots_by_index: dict[int, dict[str, Any]] = {}
+    for slot in spawned_child_slots:
+        source_rollout_index = _slot_source_rollout_index(slot)
+        if source_rollout_index is None or not 0 <= source_rollout_index < target_count:
+            continue
+        spawned_slots_by_index.setdefault(source_rollout_index, slot)
+    parent_pool: list[dict[str, Any]] = []
+    for slot_index in range(target_count):
+        spawned_slot = spawned_slots_by_index.get(slot_index)
+        if spawned_slot is not None:
+            parent_pool.append(spawned_slot)
+            continue
         child_instance_uuid = new_instance_uuid()
         parent_pool.append(
             {
@@ -723,6 +731,7 @@ def _refill_parent_pool_with_bootstrap_slots(
                 "manifest_path": None,
             }
         )
+    reinitialized_count = len(parent_pool) - len(spawned_slots_by_index)
     return parent_pool, reinitialized_count
 
 

@@ -197,6 +197,31 @@ class BenchmarkDriverTests(unittest.TestCase):
             )
             self.assertTrue(parent_pool[2]["bootstrap_reinitialized"])
 
+    def test_bootstrap_refill_preserves_sparse_rollout_slot_indices(self) -> None:
+        spawned_children = [
+            {
+                "source_rollout_index": slot_index,
+                "slot_index": slot_index,
+                "child_instance_uuid": f"child-{slot_index}",
+            }
+            for slot_index in (0, 2, 3, 4, 5, 6, 7)
+        ]
+
+        parent_pool, bootstrap_count = _refill_parent_pool_with_bootstrap_slots(
+            spawned_children,
+            target_count=8,
+        )
+
+        self.assertEqual(bootstrap_count, 1)
+        self.assertEqual([slot["slot_index"] for slot in parent_pool], list(range(8)))
+        self.assertEqual(
+            [slot.get("source_rollout_index") for slot in parent_pool],
+            [0, None, 2, 3, 4, 5, 6, 7],
+        )
+        self.assertTrue(parent_pool[1]["bootstrap_reinitialized"])
+        self.assertIs(parent_pool[7], spawned_children[-1])
+        self.assertEqual(parent_pool[7]["child_instance_uuid"], "child-7")
+
     def test_protocol_shape_deterministic_pool_resume_and_backend_instructions(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
