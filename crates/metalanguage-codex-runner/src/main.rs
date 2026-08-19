@@ -443,25 +443,10 @@ async fn run_turn(
                 }))?;
             }
             EventMsg::McpToolCallBegin(event) => {
-                emit(json!({
-                    "event": "tool_begin",
-                    "tool": event.invocation.tool,
-                    "namespace": format!("mcp__{}", event.invocation.server),
-                    "call_id": event.call_id,
-                    "arguments": logged_tool_arguments(
-                        tool_is_selected(&sensitive_tools, &event.invocation.server, &event.invocation.tool),
-                        event.invocation.arguments.as_ref(),
-                    ),
-                }))?;
+                emit(logged_mcp_tool_begin_event(event, &sensitive_tools))?;
             }
             EventMsg::McpToolCallEnd(event) => {
-                emit(json!({
-                    "event": "tool_end",
-                    "tool": event.invocation.tool,
-                    "namespace": format!("mcp__{}", event.invocation.server),
-                    "call_id": event.call_id,
-                    "success": event.is_success(),
-                }))?;
+                emit(logged_mcp_tool_end_event(event))?;
             }
             EventMsg::ItemCompleted(event) => {
                 if let TurnItem::AgentMessage(message) = &event.item {
@@ -477,6 +462,7 @@ async fn run_turn(
                     &EventMsg::ItemCompleted(event.clone()),
                     thread_id,
                     current_turn_id.as_deref(),
+                    &sensitive_tools,
                 )? {
                     emit(json!({
                         "event": "codex_item",
@@ -641,11 +627,44 @@ fn dynamic_tool_name(tool: &DynamicToolSpec) -> &str {
     }
 }
 
-fn logged_tool_arguments(sensitive: bool, arguments: Option<&Value>) -> Value {
-    if !sensitive {
+fn logged_mcp_tool_arguments(
+    selectors: &[McpToolSelector],
+    server: &str,
+    tool: &str,
+    arguments: Option<&Value>,
+) -> Value {
+    if !mcp_tool_is_sensitive(selectors, server, tool) {
         return arguments.cloned().unwrap_or(Value::Null);
     }
     json!({"redacted": true})
+}
+
+fn logged_mcp_tool_begin_event(
+    event: &codex_protocol::protocol::McpToolCallBeginEvent,
+    selectors: &[McpToolSelector],
+) -> Value {
+    json!({
+        "event": "tool_begin",
+        "tool": event.invocation.tool,
+        "namespace": format!("mcp__{}", event.invocation.server),
+        "call_id": event.call_id,
+        "arguments": logged_mcp_tool_arguments(
+            selectors,
+            &event.invocation.server,
+            &event.invocation.tool,
+            event.invocation.arguments.as_ref(),
+        ),
+    })
+}
+
+fn logged_mcp_tool_end_event(event: &codex_protocol::protocol::McpToolCallEndEvent) -> Value {
+    json!({
+        "event": "tool_end",
+        "tool": event.invocation.tool,
+        "namespace": format!("mcp__{}", event.invocation.server),
+        "call_id": event.call_id,
+        "success": event.is_success(),
+    })
 }
 
 fn handle_metalanguage_dynamic_tool(
@@ -726,7 +745,7 @@ fn spawn_child_failure(error_code: &str, error: &str, retryable: bool) -> Value 
     })
 }
 
-fn tool_is_selected(selectors: &[McpToolSelector], server: &str, tool: &str) -> bool {
+fn mcp_tool_is_sensitive(selectors: &[McpToolSelector], server: &str, tool: &str) -> bool {
     selectors
         .iter()
         .any(|item| item.server == server && item.tool == tool)
@@ -803,14 +822,34 @@ fn mapped_item_notification(
     msg: &EventMsg,
     thread_id: &str,
     current_turn_id: Option<&str>,
+    sensitive_tools: &[McpToolSelector],
 ) -> anyhow::Result<Option<Value>> {
     let Some(turn_id) = current_turn_id else {
         return Ok(None);
     };
+    if item_event_contains_sensitive_mcp_call(msg, sensitive_tools) {
+        return Ok(None);
+    }
     let notification = item_event_to_server_notification(msg.clone(), thread_id, turn_id);
     serde_json::to_value(notification)
         .map(Some)
         .context("serialize mapped Codex notification")
+}
+
+fn item_event_contains_sensitive_mcp_call(
+    msg: &EventMsg,
+    sensitive_tools: &[McpToolSelector],
+) -> bool {
+    let item = match msg {
+        EventMsg::ItemStarted(event) => &event.item,
+        EventMsg::ItemCompleted(event) => &event.item,
+        _ => return false,
+    };
+    matches!(
+        item,
+        TurnItem::McpToolCall(call)
+            if mcp_tool_is_sensitive(sensitive_tools, &call.server, &call.tool)
+    )
 }
 
 fn agent_message_text(content: &[AgentMessageContent]) -> String {
@@ -825,6 +864,75 @@ fn agent_message_text(content: &[AgentMessageContent]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_protocol::items::DynamicToolCallItem;
+    use codex_protocol::items::DynamicToolCallStatus;
+    use codex_protocol::items::McpToolCallError;
+    use codex_protocol::items::McpToolCallItem;
+    use codex_protocol::items::McpToolCallStatus;
+    use codex_protocol::mcp::CallToolResult;
+    use codex_protocol::protocol::ItemCompletedEvent;
+    use codex_protocol::protocol::ItemStartedEvent;
+    use codex_protocol::protocol::McpInvocation;
+    use codex_protocol::protocol::McpToolCallBeginEvent;
+    use codex_protocol::protocol::McpToolCallEndEvent;
+    use codex_protocol::ThreadId;
+
+    const ARGUMENT_SENTINEL: &str = "sensitive-argument-sentinel";
+    const RESULT_SENTINEL: &str = "sensitive-result-sentinel";
+    const ERROR_SENTINEL: &str = "sensitive-error-sentinel";
+
+    fn sensitive_mcp_tools() -> Vec<McpToolSelector> {
+        vec![McpToolSelector {
+            server: "benchmark".to_string(),
+            tool: "submit_solution".to_string(),
+        }]
+    }
+
+    fn sensitive_mcp_item() -> McpToolCallItem {
+        McpToolCallItem {
+            id: "mcp-call".to_string(),
+            server: "benchmark".to_string(),
+            tool: "submit_solution".to_string(),
+            arguments: json!({"secret": ARGUMENT_SENTINEL}),
+            connector_id: None,
+            mcp_app_resource_uri: None,
+            link_id: None,
+            app_name: None,
+            action_name: None,
+            plugin_id: None,
+            read_only_hint: None,
+            status: McpToolCallStatus::Completed,
+            result: Some(CallToolResult {
+                content: vec![json!({"type": "text", "text": RESULT_SENTINEL})],
+                structured_content: Some(json!({"secret": RESULT_SENTINEL})),
+                is_error: Some(false),
+                meta: None,
+            }),
+            error: Some(McpToolCallError {
+                message: ERROR_SENTINEL.to_string(),
+            }),
+            duration: Some(Duration::from_millis(1)),
+        }
+    }
+
+    fn item_started(item: TurnItem) -> EventMsg {
+        EventMsg::ItemStarted(ItemStartedEvent {
+            thread_id: ThreadId::new(),
+            turn_id: "turn".to_string(),
+            item,
+            started_at_ms: 0,
+        })
+    }
+
+    fn item_completed(item: TurnItem) -> EventMsg {
+        EventMsg::ItemCompleted(ItemCompletedEvent {
+            thread_id: ThreadId::new(),
+            turn_id: "turn".to_string(),
+            item,
+            started_at_ms: Some(0),
+            completed_at_ms: 1,
+        })
+    }
 
     #[test]
     fn native_tools_never_include_submit_solution() {
@@ -851,12 +959,133 @@ mod tests {
 
     #[test]
     fn sensitive_mcp_arguments_are_redacted_from_runner_events() {
-        let logged = logged_tool_arguments(
-            true,
+        let logged = logged_mcp_tool_arguments(
+            &sensitive_mcp_tools(),
+            "benchmark",
+            "submit_solution",
             Some(&json!({"uuid": "problem", "answer": "private-answer"})),
         );
         assert_eq!(logged, json!({"redacted": true}));
         assert!(!logged.to_string().contains("private-answer"));
+    }
+
+    #[test]
+    fn sensitive_mcp_payloads_never_reach_runner_event_jsonl() {
+        let sensitive_tools = sensitive_mcp_tools();
+        let invocation = McpInvocation {
+            server: "benchmark".to_string(),
+            tool: "submit_solution".to_string(),
+            arguments: Some(json!({"secret": ARGUMENT_SENTINEL})),
+        };
+        let begin = McpToolCallBeginEvent {
+            call_id: "mcp-call".to_string(),
+            invocation: invocation.clone(),
+            connector_id: None,
+            mcp_app_resource_uri: None,
+            link_id: None,
+            app_name: None,
+            action_name: None,
+            plugin_id: None,
+            read_only_hint: None,
+        };
+        let completed_with_result = McpToolCallEndEvent {
+            call_id: "mcp-call".to_string(),
+            invocation: invocation.clone(),
+            connector_id: None,
+            mcp_app_resource_uri: None,
+            link_id: None,
+            app_name: None,
+            action_name: None,
+            plugin_id: None,
+            read_only_hint: None,
+            duration: Duration::from_millis(1),
+            result: Ok(CallToolResult {
+                content: vec![json!({"type": "text", "text": RESULT_SENTINEL})],
+                structured_content: None,
+                is_error: Some(false),
+                meta: None,
+            }),
+        };
+        let completed_with_error = McpToolCallEndEvent {
+            result: Err(ERROR_SENTINEL.to_string()),
+            ..completed_with_result.clone()
+        };
+        let started = item_started(TurnItem::McpToolCall(sensitive_mcp_item()));
+        let completed = item_completed(TurnItem::McpToolCall(sensitive_mcp_item()));
+
+        let mut emitted = vec![
+            logged_mcp_tool_begin_event(&begin, &sensitive_tools),
+            logged_mcp_tool_end_event(&completed_with_result),
+            logged_mcp_tool_end_event(&completed_with_error),
+        ];
+        for item_event in [&started, &completed] {
+            let notification = mapped_item_notification(
+                item_event,
+                "thread",
+                Some("turn"),
+                &sensitive_tools,
+            )
+            .expect("map item event");
+            assert!(notification.is_none());
+            if let Some(notification) = notification {
+                emitted.push(json!({
+                    "event": "codex_item",
+                    "notification": notification,
+                }));
+            }
+        }
+
+        let persisted_jsonl = emitted
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        for sentinel in [ARGUMENT_SENTINEL, RESULT_SENTINEL, ERROR_SENTINEL] {
+            assert!(!persisted_jsonl.contains(sentinel));
+        }
+    }
+
+    #[test]
+    fn non_sensitive_mcp_and_spawn_child_items_remain_mapped() {
+        let non_sensitive = item_completed(TurnItem::McpToolCall(sensitive_mcp_item()));
+        let non_sensitive_notification = mapped_item_notification(
+            &non_sensitive,
+            "thread",
+            Some("turn"),
+            &[],
+        )
+        .expect("map non-sensitive MCP item")
+        .expect("retain non-sensitive MCP item");
+        let non_sensitive_json = non_sensitive_notification.to_string();
+        for sentinel in [ARGUMENT_SENTINEL, RESULT_SENTINEL, ERROR_SENTINEL] {
+            assert!(non_sensitive_json.contains(sentinel));
+        }
+
+        let spawn_child = item_completed(TurnItem::DynamicToolCall(DynamicToolCallItem {
+            id: "dynamic-call".to_string(),
+            namespace: None,
+            tool: "spawn_child".to_string(),
+            arguments: json!({"prompt": ARGUMENT_SENTINEL}),
+            status: DynamicToolCallStatus::Completed,
+            content_items: Some(vec![DynamicToolCallOutputContentItem::InputText {
+                text: RESULT_SENTINEL.to_string(),
+            }]),
+            success: Some(false),
+            error: Some(ERROR_SENTINEL.to_string()),
+            duration: Some(Duration::from_millis(1)),
+        }));
+        let spawn_child_notification = mapped_item_notification(
+            &spawn_child,
+            "thread",
+            Some("turn"),
+            &sensitive_mcp_tools(),
+        )
+        .expect("map spawn_child item")
+        .expect("retain spawn_child item");
+        let spawn_child_json = spawn_child_notification.to_string();
+        for sentinel in [ARGUMENT_SENTINEL, RESULT_SENTINEL] {
+            assert!(spawn_child_json.contains(sentinel));
+        }
     }
 
     #[test]
@@ -871,7 +1100,7 @@ mod tests {
             "selectors",
         )
         .expect("valid selector");
-        assert!(tool_is_selected(&valid, "benchmark", "score"));
+        assert!(mcp_tool_is_sensitive(&valid, "benchmark", "score"));
         assert!(
             validate_mcp_tool_selectors(
                 vec![McpToolSelector {
