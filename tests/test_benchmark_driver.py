@@ -288,6 +288,9 @@ class BenchmarkDriverTests(unittest.TestCase):
             ).read_text()
             self.assertIn("{submit_tool}", supergpqa_readme)
             self.assertIn("mcp__arc_agi__RESET", arc_readme)
+            self.assertIn("reusable public practice/evaluation environments", arc_readme)
+            self.assertIn("percentage on a 0–100 scale", arc_readme)
+            self.assertNotIn("retirement from future pools", arc_readme)
             runtime_text = _format_runtime_markdown(
                 instance_uuid="fixture",
                 configured_problem_pool_size=None,

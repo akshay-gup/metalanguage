@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import math
 import os
 import sys
 import tempfile
@@ -152,36 +153,28 @@ class ArcAgiBenchmarkDriver:
 
         records = self._validated_records(self._records_loader())
         with self._state_lock():
-            solved_state = self._load_state_locked()
-        solved_ids = {item["item_id"] for item in solved_state["solved_items"]}
-        solved_games = {item["game_id"] for item in solved_state["solved_items"]}
+            benchmark_state = self._load_state_locked()
         records_by_uuid = {str(record["uuid"]): record for record in records}
         records_by_game = {str(record["game_id"]): record for record in records}
-        for solved in solved_state["solved_items"]:
-            by_uuid = records_by_uuid.get(solved["item_id"])
-            by_game = records_by_game.get(solved["game_id"])
+        for observed_win in benchmark_state["solved_items"]:
+            by_uuid = records_by_uuid.get(observed_win["item_id"])
+            by_game = records_by_game.get(observed_win["game_id"])
             if (
                 by_uuid is not None
-                and by_uuid["game_id"] != solved["game_id"]
+                and by_uuid["game_id"] != observed_win["game_id"]
                 or by_game is not None
-                and by_game["uuid"] != solved["item_id"]
+                and by_game["uuid"] != observed_win["item_id"]
             ):
                 raise RuntimeError("ARC benchmark state does not match the environment catalog")
-        eligible_records = [
-            record
-            for record in records
-            if record["uuid"] not in solved_ids
-            and record["game_id"] not in solved_games
-        ]
         sampled_records = deterministic_problem_pool_sample(
-            eligible_records,
+            records,
             problem_pool_size=self.config.problem_pool_size,
             seed=self.config.seed,
             iteration_index=iteration_index,
             record_id=lambda record: str(record["uuid"]),
         )
         if not sampled_records:
-            raise RuntimeError("No unsolved ARC environments remain")
+            raise RuntimeError("No ARC environment records are available")
         items = tuple(
             _ArcPoolItem(index, str(record["uuid"]), str(record["game_id"]), record)
             for index, record in enumerate(sampled_records)
@@ -243,6 +236,7 @@ class ArcAgiBenchmarkDriver:
                 "benchmark_readme_path": str(final_readme),
                 "configured_problem_pool_size": self.config.problem_pool_size,
                 "sampling_seed": self.config.seed,
+                "catalog_semantics": "reusable_public_environments",
             },
             private=batch_state,
         )
@@ -382,10 +376,14 @@ class ArcAgiBenchmarkDriver:
                 instance_uuid=instance_uuid,
                 attempted=False,
                 solved=False,
-                reward=0.0,
+                reward=None,
                 error="ARC RESET was not called",
-                metadata={"fitness_pending": True, "attempted": False},
-                run_record={"fitness_pending": True, "attempted": False},
+                metadata=_unavailable_rhae_metadata(
+                    attempted=False, error="ARC RESET was not called"
+                ),
+                run_record=_unavailable_rhae_metadata(
+                    attempted=False, error="ARC RESET was not called"
+                ),
             )
         try:
             snapshot = self._snapshot_reader(rollout.state_path)
@@ -394,10 +392,14 @@ class ArcAgiBenchmarkDriver:
                 instance_uuid=instance_uuid,
                 attempted=True,
                 solved=False,
-                reward=0.0,
+                reward=None,
                 error="ARC rollout state is unavailable",
-                metadata={"fitness_pending": True, "attempted": True},
-                run_record={"fitness_pending": True, "attempted": True},
+                metadata=_unavailable_rhae_metadata(
+                    attempted=True, error="ARC rollout state is unavailable"
+                ),
+                run_record=_unavailable_rhae_metadata(
+                    attempted=True, error="ARC rollout state is unavailable"
+                ),
             )
         item = state.by_game_id.get(snapshot.game_id)
         if item is None:
@@ -405,23 +407,46 @@ class ArcAgiBenchmarkDriver:
                 instance_uuid=instance_uuid,
                 attempted=True,
                 solved=False,
-                reward=0.0,
+                reward=None,
                 error="ARC rollout selected a game outside the prepared batch",
-                metadata={"fitness_pending": True, "attempted": True},
-                run_record={"fitness_pending": True, "attempted": True},
+                metadata=_unavailable_rhae_metadata(
+                    attempted=True,
+                    error="ARC rollout selected a game outside the prepared batch",
+                ),
+                run_record=_unavailable_rhae_metadata(
+                    attempted=True,
+                    error="ARC rollout selected a game outside the prepared batch",
+                ),
             )
 
-        scorecard: dict[str, Any] | None = None
-        scorecard_available = False
+        raw_scorecard: dict[str, Any] | None = None
+        full_scorecard: dict[str, Any] | None = None
+        raw_scorecard_available = False
+        official_scorecard_available = False
         if not snapshot.closed:
             try:
-                scorecard = self._client_factory(snapshot.base_url).get_scorecard(
-                    snapshot.card_id, snapshot.game_id
-                )
-                scorecard_available = True
+                client = self._client_factory(snapshot.base_url)
             except Exception:
-                scorecard = None
-        metrics = _safe_scorecard_metrics(scorecard, snapshot.game_id)
+                client = None
+            if client is not None:
+                try:
+                    raw_scorecard = client.get_scorecard(
+                        snapshot.card_id, snapshot.game_id
+                    )
+                    raw_scorecard_available = True
+                except Exception:
+                    raw_scorecard = None
+                try:
+                    full_scorecard = client.get_scorecard(snapshot.card_id)
+                    official_scorecard_available = True
+                except Exception:
+                    full_scorecard = None
+        metrics = _safe_scorecard_metrics(raw_scorecard, snapshot.game_id)
+        official_rhae = _official_rhae_metrics(
+            full_scorecard,
+            snapshot.game_id,
+            snapshot.guid,
+        )
         item_ref = BenchmarkItemRef(
             item_id=item.uuid,
             source_id=item.game_id,
@@ -437,9 +462,15 @@ class ArcAgiBenchmarkDriver:
             snapshot.state == "WIN" or accounting["official_win_observed"]
         )
         accounting["official_win_observed"] = official_win_observed
+        reward = official_rhae["official_rhae_score_percent"]
+        score_error = (
+            None
+            if reward is not None
+            else "Official ARC-AGI-3 RHAE score is unavailable from the full scorecard endpoint"
+        )
         safe = {
             "fitness_pending": False,
-            "completion_policy": "official_command_win_observed",
+            "completion_policy": "selected_environment_win_diagnostic",
             "attempted": True,
             "game_id": item.game_id,
             "state": snapshot.state,
@@ -450,13 +481,18 @@ class ArcAgiBenchmarkDriver:
             "step_index": snapshot.step_index,
             "operation": snapshot.operation,
             "closed": snapshot.closed,
-            "scorecard_available": scorecard_available,
-            "reward": 1.0 if official_win_observed else 0.0,
+            "scorecard_available": raw_scorecard_available,
+            "raw_game_scorecard_available": raw_scorecard_available,
+            "official_scorecard_available": official_scorecard_available,
+            "reward": reward,
+            "reward_unit": "official_rhae_percent_0_to_100",
+            "official_rhae_error": score_error,
+            **official_rhae,
             **metrics,
             **accounting,
         }
         safe["action_accounting_consistent"] = (
-            scorecard_available
+            raw_scorecard_available
             and metrics["scorecard_total_actions"]
             == accounting["accounted_action_count"]
         )
@@ -465,8 +501,9 @@ class ArcAgiBenchmarkDriver:
             instance_uuid=instance_uuid,
             attempted=True,
             solved=solved,
-            reward=1.0 if solved else 0.0,
+            reward=reward,
             item_id=item.uuid,
+            error=score_error,
             metadata=safe,
             item_ref=item_ref,
             run_record={**safe, "benchmark_item": item_ref.to_metadata()},
@@ -504,17 +541,25 @@ class ArcAgiBenchmarkDriver:
             existing_ids = {
                 item["item_id"] for item in persisted["solved_items"]
             }
-            newly_solved = sorted(won_ids - existing_ids)
-            already_solved = sorted(won_ids & existing_ids)
+            newly_observed_wins = sorted(won_ids - existing_ids)
+            previously_observed_wins = sorted(won_ids & existing_ids)
             known = {
                 item["item_id"]: item for item in persisted["solved_items"]
             }
-            for item_id in newly_solved:
+            for item_id in newly_observed_wins:
                 item = state.by_uuid[item_id]
                 known[item_id] = {"item_id": item.uuid, "game_id": item.game_id}
             persisted["solved_items"] = [known[key] for key in sorted(known)]
             self._write_state_locked(persisted)
-            total_solved = sorted(known)
+            observed_win_history = sorted(known)
+            observed_win_history_game_ids = sorted(
+                item["game_id"] for item in known.values()
+            )
+        available_rhae_scores = [
+            float(outcome.reward)
+            for outcome in outcomes
+            if outcome.reward is not None
+        ]
         state_counts = Counter(
             str(outcome.metadata.get("state"))
             for outcome in outcomes
@@ -544,13 +589,42 @@ class ArcAgiBenchmarkDriver:
                 for outcome in outcomes
             ),
             "state_counts": dict(sorted(state_counts.items())),
-            "newly_solved_item_ids": newly_solved,
-            "already_solved_item_ids": already_solved,
-            "total_solved_item_ids": total_solved,
+            "environment_state_counts": dict(sorted(state_counts.items())),
+            "newly_observed_win_item_ids": newly_observed_wins,
+            "newly_observed_win_game_ids": sorted(
+                state.by_uuid[item_id].game_id for item_id in newly_observed_wins
+            ),
+            "previously_observed_win_item_ids": previously_observed_wins,
+            "observed_win_history_item_ids": observed_win_history,
+            "observed_win_history_game_ids": observed_win_history_game_ids,
+            "observed_win_history_count": len(observed_win_history),
+            "environment_win_rollout_count": sum(
+                outcome.solved for outcome in outcomes
+            ),
+            "environment_win_unique_count": len(won_ids),
             "solved_count": len(won_ids),
-            "reward_total": float(sum(outcome.reward for outcome in outcomes)),
+            "reward_total": (
+                float(sum(available_rhae_scores)) if available_rhae_scores else None
+            ),
+            "reward_unit": "official_rhae_percent_0_to_100",
+            "reward_scope": "sum_of_available_public_practice_rollout_rhae_percentages",
+            "public_practice_rollout_rhae_available_count": len(
+                available_rhae_scores
+            ),
+            "public_practice_rollout_rhae_unavailable_count": (
+                len(outcomes) - len(available_rhae_scores)
+            ),
+            "public_practice_rollout_rhae_mean_percent": (
+                sum(available_rhae_scores) / len(available_rhae_scores)
+                if available_rhae_scores
+                else None
+            ),
+            "rhae_aggregate_scope": (
+                "self_selected_repeated_public_practice_rollouts; "
+                "not_an_official_hidden_or_full_suite_score"
+            ),
             "fitness_pending": False,
-            "completion_policy": "official_command_win_observed",
+            "completion_policy": "selected_environment_win_diagnostic",
         }
         self.finalization_summary = summary
         if self.config.audit_path is not None:
@@ -705,6 +779,129 @@ class ArcAgiBenchmarkDriver:
         return rollout
 
 
+def _unavailable_rhae_metadata(*, attempted: bool, error: str) -> dict[str, Any]:
+    return {
+        "fitness_pending": not attempted,
+        "attempted": attempted,
+        "reward": None,
+        "reward_unit": "official_rhae_percent_0_to_100",
+        "official_scorecard_available": False,
+        "official_rhae_score_available": False,
+        "official_rhae_score_percent": None,
+        "official_rhae_error": error,
+        "official_rhae_scope": "rollout_scorecard",
+        "official_rhae_source": "GET /api/scorecard/{card_id}",
+        "official_rhae_environment_count": None,
+        "official_rhae_environment": None,
+        "official_rhae_run": None,
+        "official_rhae_levels": [],
+    }
+
+
+def _official_rhae_metrics(
+    value: Any,
+    game_id: str,
+    guid: str,
+) -> dict[str, Any]:
+    unavailable = {
+        "official_rhae_score_available": False,
+        "official_rhae_score_percent": None,
+        "official_rhae_scope": "rollout_scorecard",
+        "official_rhae_source": "GET /api/scorecard/{card_id}",
+        "official_rhae_environment_count": None,
+        "official_rhae_environment": None,
+        "official_rhae_run": None,
+        "official_rhae_levels": [],
+    }
+    if not isinstance(value, dict):
+        return unavailable
+    score = _percentage(value.get("score"), maximum=100.0)
+    if score is None:
+        return unavailable
+    environments = value.get("environments")
+    available = {
+        **unavailable,
+        "official_rhae_score_available": True,
+        "official_rhae_score_percent": score,
+        "official_rhae_environment_count": (
+            len(environments) if isinstance(environments, list) else None
+        ),
+    }
+    if not isinstance(environments, list):
+        return available
+    environment = next(
+        (
+            candidate
+            for candidate in environments
+            if isinstance(candidate, dict) and candidate.get("id") == game_id
+        ),
+        None,
+    )
+    if not isinstance(environment, dict):
+        return available
+    available["official_rhae_environment"] = {
+        "game_id": game_id,
+        "score_percent": _percentage(environment.get("score"), maximum=100.0),
+        "actions": _optional_nonnegative_int(environment.get("actions")),
+        "levels_completed": _optional_nonnegative_int(
+            environment.get("levels_completed")
+        ),
+        "completed": _optional_bool(environment.get("completed")),
+        "level_count": _optional_nonnegative_int(environment.get("level_count")),
+        "resets": _optional_nonnegative_int(environment.get("resets")),
+        "run_count": (
+            len(environment["runs"])
+            if isinstance(environment.get("runs"), list)
+            else None
+        ),
+    }
+    runs = environment.get("runs")
+    if not isinstance(runs, list) or not runs:
+        return available
+    valid_runs = [run for run in runs if isinstance(run, dict)]
+    if not valid_runs:
+        return available
+    matching_runs = [run for run in valid_runs if run.get("guid") == guid]
+    run = matching_runs[-1] if matching_runs else valid_runs[-1]
+
+    level_scores = run.get("level_scores")
+    level_actions = run.get("level_actions")
+    level_baselines = run.get("level_baseline_actions")
+    sequences = [
+        sequence
+        for sequence in (level_scores, level_actions, level_baselines)
+        if isinstance(sequence, list)
+    ]
+    level_count = max((len(sequence) for sequence in sequences), default=0)
+    levels: list[dict[str, Any]] = []
+    for index in range(level_count):
+        level: dict[str, Any] = {"level_index": index + 1}
+        if isinstance(level_scores, list) and index < len(level_scores):
+            level["score_percent"] = _percentage(
+                level_scores[index], maximum=115.0
+            )
+        if isinstance(level_actions, list) and index < len(level_actions):
+            level["ai_actions"] = _optional_nonnegative_int(level_actions[index])
+        if isinstance(level_baselines, list) and index < len(level_baselines):
+            level["human_baseline_actions"] = _optional_int(level_baselines[index])
+        levels.append(level)
+
+    run_summary = {
+        "score_percent": _percentage(run.get("score"), maximum=100.0),
+        "levels_completed": _optional_nonnegative_int(run.get("levels_completed")),
+        "actions": _optional_nonnegative_int(run.get("actions")),
+        "resets": _optional_nonnegative_int(run.get("resets")),
+        "state": run.get("state") if isinstance(run.get("state"), str) else None,
+        "completed": _optional_bool(run.get("completed")),
+        "number_of_levels": _optional_nonnegative_int(run.get("number_of_levels")),
+        "message": run.get("message") if isinstance(run.get("message"), str) else None,
+    }
+    available["official_rhae_environment"]["run_count"] = len(valid_runs)
+    available["official_rhae_run"] = run_summary
+    available["official_rhae_levels"] = levels
+    return available
+
+
 def _safe_scorecard_metrics(value: Any, game_id: str) -> dict[str, int]:
     scorecard = value if isinstance(value, dict) else {}
     cards = scorecard.get("cards")
@@ -777,6 +974,28 @@ def _safe_command_accounting(
 
 def _safe_int(value: Any) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _optional_int(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _optional_nonnegative_int(value: Any) -> int | None:
+    parsed = _optional_int(value)
+    return parsed if parsed is not None and parsed >= 0 else None
+
+
+def _optional_bool(value: Any) -> bool | None:
+    return value if isinstance(value, bool) else None
+
+
+def _percentage(value: Any, *, maximum: float) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    parsed = float(value)
+    if not math.isfinite(parsed) or not 0.0 <= parsed <= maximum:
+        return None
+    return parsed
 
 
 def _absolute_path(value: Any, label: str) -> Path:

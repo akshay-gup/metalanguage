@@ -66,27 +66,71 @@ class _Launcher:
 
 class _ScorecardClient:
     def __init__(self, _base_url: str) -> None:
-        pass
+        self.game_id: str | None = None
 
-    def get_scorecard(self, _card_id: str, game_id: str) -> dict[str, object]:
+    def get_scorecard(
+        self, _card_id: str, game_id: str | None = None
+    ) -> dict[str, object]:
+        if game_id is not None:
+            self.game_id = game_id
+            return {
+                "won": 0,
+                "played": 1,
+                "total_actions": 3,
+                "levels_completed": 2,
+                "cards": {
+                    game_id: {
+                        "game_id": game_id,
+                        "total_plays": 1,
+                        "guids": ["must-not-leak"],
+                        "levels_completed": [2],
+                        "states": ["NOT_FINISHED"],
+                        "actions": [3],
+                        "resets": [1],
+                        "total_actions": 3,
+                    }
+                },
+            }
+        assert self.game_id is not None
         return {
-            "won": 0,
-            "played": 1,
-            "total_actions": 3,
-            "levels_completed": 2,
-            "cards": {
-                game_id: {
-                    "game_id": game_id,
-                    "total_plays": 1,
-                    "guids": ["must-not-leak"],
-                    "levels_completed": [2],
-                    "states": ["NOT_FINISHED"],
-                    "actions": [3],
-                    "resets": [1],
-                    "total_actions": 3,
+            "card_id": "must-not-leak",
+            "score": 37.5,
+            "environments": [
+                {
+                    "id": self.game_id,
+                    "score": 37.5,
+                    "actions": 3,
+                    "levels_completed": 2,
+                    "completed": False,
+                    "level_count": 4,
+                    "resets": 1,
+                    "runs": [
+                        {
+                            "id": self.game_id,
+                            "guid": "private-guid",
+                            "score": 37.5,
+                            "levels_completed": 2,
+                            "actions": 3,
+                            "resets": 1,
+                            "state": "NOT_FINISHED",
+                            "completed": False,
+                            "level_scores": [75.0, 37.5, 0.0, 0.0],
+                            "level_actions": [2, 1, 0, 0],
+                            "level_baseline_actions": [2, 1, 4, 5],
+                        }
+                    ],
                 }
-            },
+            ],
         }
+
+
+class _RawOnlyScorecardClient(_ScorecardClient):
+    def get_scorecard(
+        self, card_id: str, game_id: str | None = None
+    ) -> dict[str, object]:
+        if game_id is None:
+            raise RuntimeError("full scorecard unavailable")
+        return super().get_scorecard(card_id, game_id)
 
 
 def _supervisor_context(root: Path, name: str) -> dict[str, object]:
@@ -117,6 +161,7 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
         launcher: _Launcher | None = None,
         snapshot=None,
         closer=None,
+        client_factory=_ScorecardClient,
     ) -> tuple[ArcAgiBenchmarkDriver, _Launcher]:
         owned_launcher = launcher or _Launcher()
         kwargs = {}
@@ -134,7 +179,7 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
                 ),
                 records_loader=lambda: _records(),
                 server_launcher=owned_launcher,
-                client_factory=_ScorecardClient,
+                client_factory=client_factory,
                 **kwargs,
             ),
             owned_launcher,
@@ -149,6 +194,10 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
             self.assertEqual(batch.item_count, 3)
             self.assertEqual(launcher.calls, 1)
             sampled = json.loads((root / "shared-a/problem_pool.json").read_text())
+            catalog_markdown = (root / "shared-a/problem_pool.md").read_text()
+            self.assertIn("Reusable Public Environment Catalog", catalog_markdown)
+            self.assertIn("prior WIN is diagnostic history", catalog_markdown)
+            self.assertNotIn("human task that is consumed", catalog_markdown)
             with self.assertRaisesRegex(RuntimeError, "active batch"):
                 first.prepare_batch(5, root / "shared-b")
 
@@ -590,7 +639,7 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
             self.assertFalse(rollout_root.exists())
             driver.close()
 
-    def test_win_retirement_is_deduplicated_and_applies_next_iteration(self) -> None:
+    def test_win_history_is_deduplicated_without_affecting_future_catalogs(self) -> None:
         snapshots: dict[str, ArcAgiSessionSnapshot] = {}
 
         def read_snapshot(path: str | Path) -> ArcAgiSessionSnapshot:
@@ -642,14 +691,22 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
                 )
 
             self.assertTrue(outcomes[0].solved)
-            self.assertEqual(outcomes[0].reward, 1)
+            self.assertEqual(outcomes[0].reward, 37.5)
+            self.assertEqual(
+                outcomes[0].metadata["reward_unit"],
+                "official_rhae_percent_0_to_100",
+            )
             self.assertTrue(outcomes[1].solved)
             self.assertFalse(outcomes[2].solved)
             summary = driver.finalize_batch(batch, outcomes)
-            self.assertEqual(summary["newly_solved_item_ids"], [won_uuid])
-            self.assertEqual(summary["already_solved_item_ids"], [])
-            self.assertEqual(summary["total_solved_item_ids"], [won_uuid])
+            self.assertEqual(summary["newly_observed_win_item_ids"], [won_uuid])
+            self.assertEqual(summary["previously_observed_win_item_ids"], [])
+            self.assertEqual(summary["observed_win_history_item_ids"], [won_uuid])
             self.assertEqual(summary["solved_count"], 1)
+            self.assertEqual(summary["environment_win_rollout_count"], 2)
+            self.assertEqual(summary["environment_win_unique_count"], 1)
+            self.assertEqual(summary["public_practice_rollout_rhae_mean_percent"], 37.5)
+            self.assertIn("not_an_official_hidden", summary["rhae_aggregate_scope"])
             self.assertEqual(current_pool_path.read_bytes(), current_pool_bytes)
             self.assertIs(driver.finalize_batch(batch, outcomes), summary)
             self.assertEqual(launcher.servers[0].terminate_calls, 1)
@@ -676,7 +733,7 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
             next_batch = resumed.prepare_batch(6, root / "shared-next")
             next_pool = json.loads((root / "shared-next/problem_pool.json").read_text())
             next_uuids = {row["uuid"] for row in next_pool}
-            self.assertNotIn(won_uuid, next_uuids)
+            self.assertIn(won_uuid, next_uuids)
             self.assertIn(partial_uuid, next_uuids)
             child_a = resumed.prepare_rollout(
                 next_batch,
@@ -695,7 +752,7 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
                 Path(child_b.mcp_servers["arc_agi"]["env"]["METALANGUAGE_ARC_CONTEXT"])
             ).allowed_game_ids
             self.assertEqual(allowed_a, allowed_b)
-            self.assertNotIn(won_game, allowed_a)
+            self.assertIn(won_game, allowed_a)
             self.assertFalse(Path(child_a.context["arc_state_path"]).exists())
             self.assertFalse(Path(child_b.context["arc_state_path"]).exists())
             resumed.finalize_batch(next_batch, [])
@@ -739,7 +796,7 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
             )
             self.assertFalse(before.attempted)
             self.assertFalse(before.solved)
-            self.assertEqual(before.reward, 0)
+            self.assertIsNone(before.reward)
 
             selected_game = load_context(
                 Path(rollout_a.mcp_servers["arc_agi"]["env"]["METALANGUAGE_ARC_CONTEXT"])
@@ -805,7 +862,7 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
             )
             self.assertTrue(outcome_a.attempted)
             self.assertFalse(outcome_a.solved)
-            self.assertEqual(outcome_a.reward, 0)
+            self.assertEqual(outcome_a.reward, 37.5)
             self.assertEqual(outcome_a.item_ref, outcome_b.item_ref)
             self.assertIsInstance(outcome_a.item_ref, BenchmarkItemRef)
             self.assertEqual(outcome_a.item_ref.source_id, selected_game)
@@ -813,6 +870,18 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
             self.assertEqual(outcome_a.metadata["accounted_action_count"], 3)
             self.assertTrue(outcome_a.metadata["action_accounting_consistent"])
             self.assertEqual(outcome_a.metadata["game_total_plays"], 1)
+            self.assertTrue(outcome_a.metadata["official_scorecard_available"])
+            self.assertTrue(outcome_a.metadata["official_rhae_score_available"])
+            self.assertEqual(outcome_a.metadata["official_rhae_score_percent"], 37.5)
+            self.assertEqual(
+                outcome_a.metadata["official_rhae_levels"][0],
+                {
+                    "level_index": 1,
+                    "score_percent": 75.0,
+                    "ai_actions": 2,
+                    "human_baseline_actions": 2,
+                },
+            )
             safe = json.dumps([outcome_a.metadata, outcome_a.run_record], sort_keys=True)
             self.assertNotIn("private-card", safe)
             self.assertNotIn("private-guid", safe)
@@ -835,12 +904,17 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
             self.assertTrue(closed_outcome.metadata["official_win_observed"])
             self.assertTrue(closed_outcome.solved)
             self.assertFalse(closed_outcome.metadata["scorecard_available"])
+            self.assertFalse(closed_outcome.metadata["official_scorecard_available"])
+            self.assertIsNone(closed_outcome.reward)
+            self.assertIn("RHAE score is unavailable", closed_outcome.error)
 
             summary = driver.finalize_batch(batch, [outcome_a, closed_outcome])
             self.assertEqual(summary["attempted_count"], 2)
             self.assertEqual(summary["selected_item_count"], 1)
             self.assertEqual(summary["solved_count"], 1)
-            self.assertEqual(summary["reward_total"], 1)
+            self.assertEqual(summary["reward_total"], 37.5)
+            self.assertEqual(summary["public_practice_rollout_rhae_available_count"], 1)
+            self.assertEqual(summary["public_practice_rollout_rhae_unavailable_count"], 1)
             self.assertEqual(summary["total_actions"], 3)
             self.assertEqual(summary["total_accounted_actions"], 6)
             self.assertEqual(summary["action_accounting_mismatch_count"], 1)
@@ -858,6 +932,64 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
             self.assertEqual(launcher.servers[0].terminate_calls, 1)
             with self.assertRaisesRegex(RuntimeError, "closed"):
                 driver.collect_outcome(batch, instance_uuid="a", context=rollout_a.context)
+
+    def test_missing_official_rhae_is_not_replaced_by_win_or_raw_metrics(self) -> None:
+        snapshots: dict[str, ArcAgiSessionSnapshot] = {}
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            driver, _ = self._driver(
+                root,
+                cap=1,
+                snapshot=lambda path: snapshots[str(path)],
+                client_factory=_RawOnlyScorecardClient,
+            )
+            batch = driver.prepare_batch(0, root / "shared")
+            rollout = driver.prepare_rollout(
+                batch,
+                backend="codex",
+                context=_supervisor_context(root, "raw-only"),
+            )
+            game_id = load_context(
+                Path(
+                    rollout.mcp_servers["arc_agi"]["env"][
+                        "METALANGUAGE_ARC_CONTEXT"
+                    ]
+                )
+            ).allowed_game_ids[0]
+            state_path = Path(rollout.context["arc_state_path"])
+            state_path.write_text("{}", encoding="utf-8")
+            snapshots[str(state_path)] = ArcAgiSessionSnapshot(
+                game_id=game_id,
+                state="WIN",
+                levels_completed=4,
+                win_levels=4,
+                available_actions=(),
+                step_index=3,
+                operation="action1",
+                closed=False,
+                base_url="http://127.0.0.1:43210",
+                card_id="private-card",
+                guid="private-guid",
+            )
+
+            outcome = driver.collect_outcome(
+                batch,
+                instance_uuid="raw-only",
+                context=rollout.context,
+            )
+            self.assertTrue(outcome.solved)
+            self.assertTrue(outcome.metadata["raw_game_scorecard_available"])
+            self.assertEqual(outcome.metadata["scorecard_total_actions"], 3)
+            self.assertFalse(outcome.metadata["official_scorecard_available"])
+            self.assertFalse(outcome.metadata["official_rhae_score_available"])
+            self.assertIsNone(outcome.reward)
+            self.assertIn("RHAE score is unavailable", outcome.error)
+            summary = driver.finalize_batch(batch, [outcome])
+            self.assertIsNone(summary["reward_total"])
+            self.assertIsNone(summary["public_practice_rollout_rhae_mean_percent"])
+            self.assertEqual(summary["public_practice_rollout_rhae_unavailable_count"], 1)
+            driver.close()
 
 
 class ArcAgiBenchmarkLiveTests(unittest.TestCase):
@@ -910,7 +1042,8 @@ class ArcAgiBenchmarkLiveTests(unittest.TestCase):
                 self.assertEqual(outcome.item_ref.source_id, game_id)
                 self.assertGreaterEqual(outcome.metadata["scorecard_total_actions"], 1)
                 self.assertFalse(outcome.solved)
-                self.assertEqual(outcome.reward, 0)
+                self.assertIsInstance(outcome.reward, float)
+                self.assertEqual(outcome.reward, outcome.metadata["official_rhae_score_percent"])
             finally:
                 driver.close()
             self.assertIsNotNone(server)

@@ -1,8 +1,8 @@
-"""ARC-AGI task-pool helpers.
+"""ARC-AGI reusable public-environment catalog helpers.
 
-This module converts ARC-AGI environment metadata into Metalanguage-like pool
-records. It does not wire ARC into the main rollout loop or persist solved
-state; callers must filter ineligible records before deterministic sampling.
+This module converts ARC-AGI environment metadata into catalog records. Public
+environments remain reusable regardless of previously observed WIN states; an
+optional deterministic sampling cap may select a smaller per-iteration catalog.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from utils.problem_pool_sampling import deterministic_problem_pool_sample
 
 
 def arc_task_uuid(game_id: str) -> str:
-    """Return a stable Metalanguage-style uid for one ARC environment id."""
+    """Return a stable compatibility uid for one ARC environment id."""
 
     digest = hashlib.sha256(game_id.encode("utf-8")).hexdigest()[:16]
     safe = "".join(ch if ch.isalnum() else "_" for ch in game_id.lower()).strip("_")
@@ -32,7 +32,7 @@ def arc_task_uuid(game_id: str) -> str:
 
 
 def environment_info_records(arcade: Any | None = None) -> list[dict[str, Any]]:
-    """Fetch available ARC environments and normalize them as task records."""
+    """Fetch available ARC environments and normalize them as catalog records."""
 
     if arcade is None:
         arcade = make_arcade()
@@ -80,7 +80,7 @@ def write_arc_task_pool(
     seed: int = 42,
     iteration_index: int = 0,
 ) -> tuple[Path, Path]:
-    """Write ARC environment records as JSON and a human-readable Markdown pool."""
+    """Write ARC environment records as a reusable public catalog."""
 
     if records is None:
         records = environment_info_records()
@@ -92,19 +92,21 @@ def write_arc_task_pool(
 
     capped = configured_problem_pool_size is not None
     lines = [
-        "# ARC-AGI-3 Environment Pool",
+        "# ARC-AGI-3 Reusable Public Environment Catalog",
         "",
-        "Records are keyed by uuid/game_id. This is an interactive environment pool, not a static answer dataset.",
+        "Records are keyed by uuid/game_id. These are reusable interactive practice/evaluation environments, not individual human tasks or a static answer dataset.",
+        "",
+        "A prior WIN is diagnostic history and does not remove an environment from later catalogs.",
         "",
         (
-            "This is a deterministic sampled working set, not necessarily the full environment universe."
+            "This is a deterministic sampled catalog, not necessarily the full public environment universe."
             if capped
-            else "This pool contains every environment record supplied by the caller."
+            else "This catalog contains every environment record supplied by the caller."
         ),
         "",
-        f"Configured problem-pool cap: {configured_problem_pool_size if capped else 'uncapped'}",
+        f"Configured environment-catalog sampling cap: {configured_problem_pool_size if capped else 'uncapped'}",
         "",
-        f"Working-set count: {len(records)}",
+        f"Catalog record count: {len(records)}",
         "",
         f"Sampling seed: {seed}",
         "",
@@ -155,13 +157,16 @@ def _add_sampling_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build ARC-AGI task-pool files.")
+    parser = argparse.ArgumentParser(description="Build ARC-AGI public environment catalog files.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     list_parser = subparsers.add_parser("list", help="Print normalized ARC environment records as JSON.")
     _add_sampling_arguments(list_parser)
 
-    write_parser = subparsers.add_parser("write-pool", help="Write ARC pool JSON and Markdown files.")
+    write_parser = subparsers.add_parser(
+        "write-pool",
+        help="Write ARC catalog JSON and Markdown files (compatibility command name).",
+    )
     write_parser.add_argument("--json-path", required=True)
     write_parser.add_argument("--markdown-path", required=True)
     _add_sampling_arguments(write_parser)

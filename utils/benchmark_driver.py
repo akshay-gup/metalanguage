@@ -108,7 +108,7 @@ class BenchmarkOutcome:
     instance_uuid: str
     attempted: bool
     solved: bool
-    reward: float
+    reward: float | None
     item_id: str | None = None
     error: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)

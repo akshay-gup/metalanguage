@@ -1927,8 +1927,9 @@ def parse_args() -> argparse.Namespace:
         type=_positive_int_argument,
         default=None,
         help=(
-            "Maximum number of currently unsolved problems exposed per iteration. "
-            "Defaults to uncapped."
+            "Maximum number of benchmark records exposed per iteration. SuperGPQA "
+            "samples currently unsolved problems; ARC samples its reusable public "
+            "environment catalog. Defaults to uncapped."
         ),
     )
     parser.add_argument(
@@ -2198,6 +2199,10 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             shared_workspace_dir,
         )
         if prepared_benchmark_batch.item_count <= 0:
+            if args.benchmark == "arc-agi":
+                raise RuntimeError(
+                    "No ARC public environments are available for the rollout catalog."
+                )
             raise RuntimeError("No unsolved problems are available for the rollout problem pool.")
         if not benchmark_readme_path.is_file():
             raise RuntimeError("benchmark driver did not provide shared benchmark instructions")
