@@ -51,10 +51,10 @@ take precedence over values in `.env`.
   3.6. assign every rollout instance a UUID for provenance and isolated runtime state,
   4. expose `archive/world_repo` by default as the durable cross-lineage Git archive available to every rollout (override with `--archive-repo-dir`),
      using a per-rollout temporary worktree so only committed archive changes are merged back and uncommitted archive edits are discarded,
-  5. inject the selected parent slot's stored prompt as the rollout's initial user text, copy that slot's inherited workspace directory into the rollout root and consume the slot workspace, and write `shared_workspace/BENCHMARK.md` plus `problem_pool.json` and `problem_pool.md`; bootstrap rollouts receive root `README.md` as a neutral environment description and a short initial message stating that no task is assigned,
+  5. inject the selected parent slot's stored prompt as the rollout's initial user text, copy that slot's inherited workspace directory into the rollout root and consume the slot workspace, and write `shared_workspace/BENCHMARK.md`; evaluated benchmark profiles also write their pool/catalog files, while the open-ended profile writes only the exact human-authored task; bootstrap rollouts receive root `README.md` as a neutral environment description and a short initial message stating that no task is assigned,
   6. register main-loop tools through the worker backend (OpenRouter tool payloads or Codex `DynamicToolSpec` entries), then run the worker with the inherited prompt and generated runtime context; operating doctrine is expected to come from the inherited prompt,
      while `runtime.md` contains only generated paths, runtime IDs, the rollout's reserved child-slot index, and peer lists,
-  7. score answers submitted through `submit_solution(uuid, answer)`, grounding correctness against the private stored row selected by uuid,
+  7. for SuperGPQA, score answers submitted through `submit_solution(uuid, answer)`, grounding correctness against the private stored row selected by uuid; other profiles retain their own explicitly documented evaluation semantics,
   8. let each rollout spawn at most one child with `spawn_child(prompt, workspace_dir)`; failed validation or copying can be corrected and retried, and spawning returns feedback without stopping the parent rollout or batch,
   9. append run metadata to a growing JSONL log and print one-line summary per rollout.
 - Runtime containment:
@@ -105,6 +105,38 @@ take precedence over values in `.env`.
   - rollouts select a uuid directly from those shared pool files; there is no problem request or lease tool;
   - answers are scored only when the submitted uuid exists in that iteration's shared pool copy;
   - each uuid appears at most once in a generated pool copy, unsolved problems may reappear later with the same uuid, and after each rollout batch any problem solved by at least one rollout is removed from future pool copies.
+
+### Open-ended task profile
+
+Use `--benchmark open-ended` to run infrastructure around one arbitrary
+human-authored Markdown task without configuring a benchmark evaluator. A new
+runtime requires `--task-file`:
+
+```bash
+uv run python -B main_loop.py \
+  --benchmark open-ended \
+  --task-file ./my-task.md \
+  --runtime-root ~/Documents/metalanguage_open_ended \
+  --step
+```
+
+- The task file's exact bytes are copied to
+  `shared_workspace/BENCHMARK.md` at batch setup; no generated task text or
+  placeholder is added.
+- The runtime stores the exact content and its SHA-256 identity under
+  `logs/open_ended_task/`. Later steps may omit `--task-file` and use that
+  runtime-owned copy. If `--task-file` is supplied again, its bytes must match
+  the recorded task.
+- This profile creates no problem pool or catalog, private answer store,
+  benchmark MCP server, benchmark-specific model tool, submission interface,
+  solved-item state, evaluator, score, reward, solved/failed/no-attempt label,
+  or ranking. Generic rollout tools, child spawning, shared workspace,
+  artifacts, and archive behavior are unchanged.
+- Run records and one-line summaries say `evaluation=unconfigured`. Worker
+  status, artifacts, archive activity, and child spawns remain lifecycle
+  diagnostics and are not treated as proxy scores.
+- `--problem-pool-size` is rejected for this profile. A runtime claimed by one
+  benchmark/profile cannot be reused for another.
 
 ### ARC-AGI-3 benchmark semantics
 
