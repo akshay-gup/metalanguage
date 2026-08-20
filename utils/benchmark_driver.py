@@ -136,7 +136,9 @@ class BenchmarkDriver(Protocol):
         *,
         instance_uuid: str,
         context: dict[str, Any],
-    ) -> BenchmarkOutcome: ...
+    ) -> BenchmarkOutcome | None:
+        """Return an evaluated outcome, or None when no evaluator is configured."""
+        ...
 
     def handle_tool(
         self,

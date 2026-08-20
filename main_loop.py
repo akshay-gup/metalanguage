@@ -45,6 +45,12 @@ from utils.openrouter import (
     get_tool_calls,
     spawn_child_tool,
 )
+from utils.open_ended_benchmark import (
+    OpenEndedBenchmarkDriver,
+    OpenEndedConfig,
+    OpenEndedTask,
+    resolve_open_ended_task,
+)
 from utils.supergpqa_benchmark import SuperGpqaBenchmarkDriver, SuperGpqaConfig
 
 
@@ -242,6 +248,7 @@ def _format_runtime_markdown(
     problem_pool_count: int | None = None,
     live_peer_instances: list[dict[str, Any]] | None = None,
     parent_instance_uuid: str | None = None,
+    has_problem_pool: bool = True,
 ) -> str:
     lines = [
         "# Runtime",
@@ -251,30 +258,56 @@ def _format_runtime_markdown(
         "- seed_output: seed_output/",
         "- archive: archive/",
         "- shared_workspace: shared_workspace/",
-        f"- problem_pool_json: {problem_pool_json_path or ''}",
-        f"- problem_pool_markdown: {problem_pool_markdown_path or ''}",
-        "",
-        "## Runtime Values",
-        "",
-        f"- instance_uuid: {instance_uuid}",
-        f"- parent_instance_uuid: {parent_instance_uuid or ''}",
-        f"- reserved_child_slot_index: {child_slot_index if child_slot_index is not None else ''}",
-        "- successful_child_limit: 1",
-        f"- configured_problem_pool_size: {configured_problem_pool_size if configured_problem_pool_size is not None else 'uncapped'}",
-        f"- problem_pool_count: {problem_pool_count if problem_pool_count is not None else ''}",
-        "",
-        "## Benchmark Pool Semantics",
-        "",
-        (
-            "- this pool copy is a deterministic sampled working set of currently eligible benchmark items; it may not contain every eligible item;"
-            if configured_problem_pool_size is not None
-            else "- this pool copy contains all currently eligible benchmark items;"
-        ),
-        "- each benchmark item appears at most once in this pool copy;",
-        "- items not completed under the benchmark's official policy may reappear later;",
-        "- officially completed items may leave future pools after batch finalization;",
-        "- same-batch rollouts share this pool and may independently interact with the same item; scoring policy is benchmark-specific.",
     ]
+    if has_problem_pool:
+        lines.extend(
+            [
+                f"- problem_pool_json: {problem_pool_json_path or ''}",
+                f"- problem_pool_markdown: {problem_pool_markdown_path or ''}",
+            ]
+        )
+    else:
+        lines.append("- task: shared_workspace/BENCHMARK.md")
+    lines.extend(
+        [
+            "",
+            "## Runtime Values",
+            "",
+            f"- instance_uuid: {instance_uuid}",
+            f"- parent_instance_uuid: {parent_instance_uuid or ''}",
+            f"- reserved_child_slot_index: {child_slot_index if child_slot_index is not None else ''}",
+            "- successful_child_limit: 1",
+        ]
+    )
+    if has_problem_pool:
+        lines.extend(
+            [
+                f"- configured_problem_pool_size: {configured_problem_pool_size if configured_problem_pool_size is not None else 'uncapped'}",
+                f"- problem_pool_count: {problem_pool_count if problem_pool_count is not None else ''}",
+                "",
+                "## Benchmark Pool Semantics",
+                "",
+                (
+                    "- this pool copy is a deterministic sampled working set of currently eligible benchmark items; it may not contain every eligible item;"
+                    if configured_problem_pool_size is not None
+                    else "- this pool copy contains all currently eligible benchmark items;"
+                ),
+                "- each benchmark item appears at most once in this pool copy;",
+                "- items not completed under the benchmark's official policy may reappear later;",
+                "- officially completed items may leave future pools after batch finalization;",
+                "- same-batch rollouts share this pool and may independently interact with the same item; scoring policy is benchmark-specific.",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "",
+                "## Evaluation",
+                "",
+                "- evaluation: unconfigured",
+                "- this profile has no evaluator, score, reward, solved status, or ranking.",
+            ]
+        )
     if live_peer_instances:
         lines.extend(["", "## Live Peer Instances", ""])
         for peer in live_peer_instances:
@@ -768,7 +801,7 @@ def _runtime_benchmark(runtime_root: Path) -> str | None:
     if not isinstance(payload, dict):
         raise RuntimeError("Runtime benchmark identity is invalid.")
     benchmark = payload.get("benchmark", "supergpqa")
-    if benchmark not in {"supergpqa", "arc-agi"}:
+    if benchmark not in {"supergpqa", "arc-agi", "open-ended"}:
         raise RuntimeError("Runtime benchmark identity is invalid.")
     return str(benchmark)
 
@@ -834,7 +867,18 @@ def _create_benchmark_driver(
     task_store_dir: Path,
     dataset_cache_dir: Path,
     existing_records: list[dict[str, Any]],
+    open_ended_task: OpenEndedTask | None = None,
+    open_ended_state_dir: Path | None = None,
 ) -> BenchmarkDriver:
+    if args.benchmark == "open-ended":
+        if open_ended_task is None or open_ended_state_dir is None:
+            raise ValueError("open-ended task configuration was not resolved")
+        return OpenEndedBenchmarkDriver(
+            OpenEndedConfig(
+                task=open_ended_task,
+                state_dir=open_ended_state_dir,
+            )
+        )
     if args.benchmark == "arc-agi":
         return ArcAgiBenchmarkDriver(
             ArcAgiConfig(
@@ -1790,9 +1834,17 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run one RLVR episode.")
     parser.add_argument(
         "--benchmark",
-        choices=["supergpqa", "arc-agi"],
+        choices=["supergpqa", "arc-agi", "open-ended"],
         default="supergpqa",
         help="Benchmark runtime to use.",
+    )
+    parser.add_argument(
+        "--task-file",
+        default=None,
+        help=(
+            "UTF-8 Markdown task for --benchmark open-ended. Required when "
+            "initializing that runtime; later steps can use its persisted copy."
+        ),
     )
     parser.add_argument("--dataset-name", default="m-a-p/SuperGPQA")
     parser.add_argument("--split", default="train")
@@ -1995,10 +2047,26 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
         raise ValueError("--bash-timeout-seconds must be > 0")
     if args.openrouter_max_retries < 0:
         raise ValueError("--openrouter-max-retries must be >= 0")
+    if args.benchmark == "open-ended" and args.problem_pool_size is not None:
+        raise SystemExit(
+            "error: --problem-pool-size is not valid with --benchmark open-ended"
+        )
 
     unresolved_runtime_root = _resolve_runtime_root(args.runtime_root, create=False)
     _check_runtime_benchmark(unresolved_runtime_root, args.benchmark)
     _validate_benchmark_backend(args.benchmark, args.worker_backend)
+    open_ended_state_dir = unresolved_runtime_root / "logs" / "open_ended_task"
+    open_ended_task: OpenEndedTask | None = None
+    if args.benchmark == "open-ended":
+        try:
+            open_ended_task = resolve_open_ended_task(
+                open_ended_state_dir,
+                args.task_file,
+            )
+        except ValueError as exc:
+            raise SystemExit(f"error: {exc}") from None
+    elif args.task_file is not None:
+        raise SystemExit("error: --task-file is only valid with --benchmark open-ended")
 
     load_dotenv()
     api_key: str | None = os.environ.get("OPENROUTER_API_KEY")
@@ -2025,10 +2093,15 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
     arc_benchmark_state_path = runtime_root / "logs" / "arc_agi" / "benchmark_state.json"
     archive_repo_dir = _resolve_runtime_path(args.archive_repo_dir, runtime_root, "--archive-repo-dir")
     bootstrap_seed_dir = _resolve_runtime_path(args.bootstrap_seed_dir, runtime_root, "--bootstrap-seed-dir")
-    benchmark_events_path = runtime_root / "logs" / "benchmark_events.jsonl"
-    benchmark_events_path.parent.mkdir(parents=True, exist_ok=True)
-    benchmark_events_path.touch(mode=0o600, exist_ok=True)
-    os.chmod(benchmark_events_path, 0o600)
+    benchmark_events_path = (
+        runtime_root / "logs" / "benchmark_events.jsonl"
+        if args.benchmark != "open-ended"
+        else None
+    )
+    if benchmark_events_path is not None:
+        benchmark_events_path.parent.mkdir(parents=True, exist_ok=True)
+        benchmark_events_path.touch(mode=0o600, exist_ok=True)
+        os.chmod(benchmark_events_path, 0o600)
     dataset_cache_dir = _configure_runtime_environment(
         runtime_root,
         include_huggingface=args.benchmark == "supergpqa",
@@ -2073,6 +2146,10 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             ):
                 return False
             if args.benchmark != "supergpqa":
+                if args.benchmark == "open-ended":
+                    return rec.get("open_ended_task_sha256") == (
+                        open_ended_task.sha256 if open_ended_task is not None else None
+                    )
                 return True
             return (
                 rec.get("dataset_name") == args.dataset_name
@@ -2132,6 +2209,8 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
         task_store_dir=task_store_dir,
         dataset_cache_dir=dataset_cache_dir,
         existing_records=existing_records,
+        open_ended_task=open_ended_task,
+        open_ended_state_dir=open_ended_state_dir,
     )
     active_drivers.append(benchmark_driver)
     problem_start_index = _next_step_task_index() if args.step else args.start_task_index
@@ -2139,7 +2218,11 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
     scheduled_batches = [
         ScheduledBenchmarkBatch(
             iteration_index=index,
-            scheduler_id=f"problem_pool_batch_{index:06d}",
+            scheduler_id=(
+                f"open_ended_iteration_{index:06d}"
+                if args.benchmark == "open-ended"
+                else f"problem_pool_batch_{index:06d}"
+            ),
         )
         for index in range(problem_start_index, problem_start_index + problem_batch_count)
     ]
@@ -2147,7 +2230,9 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
     for scheduled_batch in scheduled_batches:
         task_index = scheduled_batch.iteration_index
         task_id = scheduled_batch.scheduler_id
-        problem_uid = scheduled_batch.scheduler_id
+        problem_uid = (
+            None if args.benchmark == "open-ended" else scheduled_batch.scheduler_id
+        )
         existing_task_records = existing_by_task.get(task_index, {})
         recorded_task_rollout_count = _recorded_task_rollout_count(existing_task_records)
         bootstrap_without_parent = not parent_pool
@@ -2191,14 +2276,19 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
         if len(existing_task_records) >= task_rollout_count:
             continue
 
-        problem_pool_json_path = shared_workspace_dir / "problem_pool.json"
-        problem_pool_markdown_path = shared_workspace_dir / "problem_pool.md"
         benchmark_readme_path = shared_workspace_dir / BENCHMARK_README_FILENAME
         prepared_benchmark_batch = benchmark_driver.prepare_batch(
             task_index,
             shared_workspace_dir,
         )
-        if prepared_benchmark_batch.item_count <= 0:
+        has_problem_pool = prepared_benchmark_batch.metadata.get("has_problem_pool") is not False
+        problem_pool_json_path = (
+            shared_workspace_dir / "problem_pool.json" if has_problem_pool else None
+        )
+        problem_pool_markdown_path = (
+            shared_workspace_dir / "problem_pool.md" if has_problem_pool else None
+        )
+        if prepared_benchmark_batch.item_count <= 0 and has_problem_pool:
             if args.benchmark == "arc-agi":
                 raise RuntimeError(
                     "No ARC public environments are available for the rollout catalog."
@@ -2206,7 +2296,20 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             raise RuntimeError("No unsolved problems are available for the rollout problem pool.")
         if not benchmark_readme_path.is_file():
             raise RuntimeError("benchmark driver did not provide shared benchmark instructions")
-        problem_pool_count = prepared_benchmark_batch.item_count
+        problem_pool_count = prepared_benchmark_batch.item_count if has_problem_pool else None
+        batch_reporting = (
+            {
+                "configured_problem_pool_size": args.problem_pool_size,
+                "problem_pool_count": problem_pool_count,
+            }
+            if has_problem_pool
+            else {
+                "evaluation": "unconfigured",
+                "open_ended_task_sha256": prepared_benchmark_batch.metadata.get(
+                    "task_sha256"
+                ),
+            }
+        )
 
         def _run_one_rollout(rollout_index: int) -> RolloutResult:
             existing = existing_task_records.get(rollout_index)
@@ -2238,9 +2341,8 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                     "rollout_index": rollout_index,
                     "rollout_username": rollout_username,
                     "task_id": task_id,
-                    "problem_uid": problem_uid,
-                    "configured_problem_pool_size": args.problem_pool_size,
-                    "problem_pool_count": problem_pool_count,
+                    **({"problem_uid": problem_uid} if has_problem_pool else {}),
+                    **batch_reporting,
                     "elapsed_seconds": round(time.monotonic() - started_at, 3),
                     **fields,
                 }
@@ -2360,9 +2462,13 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 backend=args.worker_backend,
                 context={
                     **continuation_context,
-                    "benchmark_events_path": str(benchmark_events_path),
                     "continuation_context_path": str(planned_context_path),
                     "rollout_state_dir": str(rollout_state_dir),
+                    **(
+                        {"benchmark_events_path": str(benchmark_events_path)}
+                        if benchmark_events_path is not None
+                        else {}
+                    ),
                 },
             )
             continuation_context = rollout_benchmark.context
@@ -2379,11 +2485,16 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                         else None
                     ),
                     child_slot_index=rollout_index,
-                    problem_pool_json_path="shared_workspace/problem_pool.json",
-                    problem_pool_markdown_path="shared_workspace/problem_pool.md",
+                    problem_pool_json_path=(
+                        "shared_workspace/problem_pool.json" if has_problem_pool else None
+                    ),
+                    problem_pool_markdown_path=(
+                        "shared_workspace/problem_pool.md" if has_problem_pool else None
+                    ),
                     configured_problem_pool_size=args.problem_pool_size,
                     problem_pool_count=problem_pool_count,
                     live_peer_instances=rollout_live_peer_instances,
+                    has_problem_pool=has_problem_pool,
                 ),
                 encoding="utf-8",
             )
@@ -2400,10 +2511,15 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 problem_queue_path=(
                     str(problem_queue_path) if args.benchmark == "supergpqa" else None
                 ),
-                problem_pool_json_path=str(problem_pool_json_path),
-                problem_pool_markdown_path=str(problem_pool_markdown_path),
-                configured_problem_pool_size=args.problem_pool_size,
-                problem_pool_count=problem_pool_count,
+                **(
+                    {
+                        "problem_pool_json_path": str(problem_pool_json_path),
+                        "problem_pool_markdown_path": str(problem_pool_markdown_path),
+                    }
+                    if has_problem_pool
+                    else {}
+                ),
+                **batch_reporting,
                 seed_output_dir=str(seed_output_dir),
                 rollout_control_dir=str(rollout_control_dir) if args.worker_backend == "codex" else None,
                 rollout_state_dir=str(rollout_state_dir),
@@ -2507,32 +2623,65 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 worker_error_code=worker_result.error_code,
                 worker_error_message=worker_result.error_message,
             )
-            benchmark_outcome = benchmark_driver.collect_outcome(
-                prepared_benchmark_batch,
-                instance_uuid=instance_uuid,
-                context=continuation_context,
+            evaluation_unconfigured = (
+                prepared_benchmark_batch.metadata.get("evaluation") == "unconfigured"
             )
-            outcome_item = benchmark_outcome.item_ref
-            record_task_id = outcome_item.source_id if outcome_item is not None else None
-            record_problem_uid = (
-                outcome_item.item_id if outcome_item is not None else benchmark_outcome.item_id
-            )
-            record_problem_task_index = outcome_item.item_index if outcome_item is not None else None
-            reward = benchmark_outcome.reward
-            solved = benchmark_outcome.solved
-            if not benchmark_outcome.attempted:
-                _progress(
-                    "benchmark_not_attempted",
-                    benchmark=args.benchmark,
+            if evaluation_unconfigured:
+                benchmark_outcome = None
+            else:
+                benchmark_outcome = benchmark_driver.collect_outcome(
+                    prepared_benchmark_batch,
+                    instance_uuid=instance_uuid,
+                    context=continuation_context,
                 )
-            _progress(
-                "rollout_scored",
-                attempted=benchmark_outcome.attempted,
-                solved=solved,
-                reward=reward,
-                item=(outcome_item.to_metadata() if outcome_item is not None else None),
-                benchmark_metadata=benchmark_outcome.metadata,
-            )
+                if benchmark_outcome is None:
+                    raise RuntimeError(
+                        "configured benchmark driver returned no evaluation outcome"
+                    )
+            if benchmark_outcome is None:
+                outcome_item = None
+                record_task_id = task_id
+                record_problem_uid = None
+                record_problem_task_index = None
+                evaluation_record = {
+                    "evaluation": "unconfigured",
+                    "open_ended_task_sha256": prepared_benchmark_batch.metadata.get(
+                        "task_sha256"
+                    ),
+                }
+                _progress(
+                    "evaluation_unconfigured",
+                    evaluation="unconfigured",
+                )
+            else:
+                outcome_item = benchmark_outcome.item_ref
+                record_task_id = outcome_item.source_id if outcome_item is not None else None
+                record_problem_uid = (
+                    outcome_item.item_id
+                    if outcome_item is not None
+                    else benchmark_outcome.item_id
+                )
+                record_problem_task_index = (
+                    outcome_item.item_index if outcome_item is not None else None
+                )
+                if not benchmark_outcome.attempted:
+                    _progress(
+                        "benchmark_not_attempted",
+                        benchmark=args.benchmark,
+                    )
+                _progress(
+                    "rollout_scored",
+                    attempted=benchmark_outcome.attempted,
+                    solved=benchmark_outcome.solved,
+                    reward=benchmark_outcome.reward,
+                    item=(outcome_item.to_metadata() if outcome_item is not None else None),
+                    benchmark_metadata=benchmark_outcome.metadata,
+                )
+                evaluation_record = {
+                    "solved": benchmark_outcome.solved,
+                    "reward": benchmark_outcome.reward,
+                    "benchmark_outcome_metadata": benchmark_outcome.metadata,
+                }
 
             output_dir = persist_episode_outputs(
                 temp_dir,
@@ -2583,11 +2732,19 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 "rollout_username": rollout_username,
                 "instance_uuid": instance_uuid,
                 "task_id": record_task_id,
-                "problem_uid": record_problem_uid,
-                "problem_task_index": record_problem_task_index,
-                "problem_assignment_key": _problem_assignment_key(continuation_context),
                 "scheduler_task_id": task_id,
-                "scheduler_problem_uid": problem_uid,
+                **(
+                    {
+                        "problem_uid": record_problem_uid,
+                        "problem_task_index": record_problem_task_index,
+                        "problem_assignment_key": _problem_assignment_key(
+                            continuation_context
+                        ),
+                        "scheduler_problem_uid": problem_uid,
+                    }
+                    if has_problem_pool
+                    else {}
+                ),
                 "parent_slot_dir": sampled_parent.get("slot_dir") if sampled_parent else None,
                 "parent_workspace_dir": sampled_parent.get("workspace_dir") if sampled_parent else None,
                 "bootstrap_seed_dir": (
@@ -2604,24 +2761,31 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 "consumed_source_workspace_dirs": consumed_source_workspaces,
                 "reserved_child_slot_index": rollout_index,
                 "successful_child_limit": 1,
-                "benchmark_events_path": str(benchmark_events_path),
+                **(
+                    {"benchmark_events_path": str(benchmark_events_path)}
+                    if benchmark_events_path is not None
+                    else {}
+                ),
                 "worker_status": worker_result.status,
                 "worker_stop_reason": worker_result.stop_reason,
                 "worker_error_code": worker_result.error_code,
                 "worker_error_message": worker_result.error_message,
                 "worker_backend": args.worker_backend,
                 "worker_metadata": worker_result.metadata,
-                "solved": solved,
-                "reward": reward,
-                "benchmark_outcome_metadata": benchmark_outcome.metadata,
+                **evaluation_record,
                 "output_path": str(output_dir),
                 "problem_queue_path": (
                     str(problem_queue_path) if args.benchmark == "supergpqa" else None
                 ),
-                "problem_pool_json_path": str(problem_pool_json_path),
-                "problem_pool_markdown_path": str(problem_pool_markdown_path),
-                "configured_problem_pool_size": args.problem_pool_size,
-                "problem_pool_count": problem_pool_count,
+                **(
+                    {
+                        "problem_pool_json_path": str(problem_pool_json_path),
+                        "problem_pool_markdown_path": str(problem_pool_markdown_path),
+                    }
+                    if has_problem_pool
+                    else {}
+                ),
+                **batch_reporting,
                 "shared_workspace_write_log": str(shared_workspace_write_log),
                 "progress_log": str(progress_log_path),
                 "dataset_name": args.dataset_name if args.benchmark == "supergpqa" else None,
@@ -2658,13 +2822,20 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 ),
                 **archive_result,
             }
-            record.update(benchmark_outcome.run_record)
-            summary = (
-                f"gen={args.generation} seed={args.seed} task_index={task_index} rollout_index={rollout_index} "
-                f"rollout_username={rollout_username} task_id={record_task_id or 'unassigned'} "
-                f"benchmark_attempted={benchmark_outcome.attempted} "
-                f"benchmark_solved={solved} output={output_dir}"
-            )
+            if benchmark_outcome is not None:
+                record.update(benchmark_outcome.run_record)
+                summary = (
+                    f"gen={args.generation} seed={args.seed} task_index={task_index} rollout_index={rollout_index} "
+                    f"rollout_username={rollout_username} task_id={record_task_id or 'unassigned'} "
+                    f"benchmark_attempted={benchmark_outcome.attempted} "
+                    f"benchmark_solved={benchmark_outcome.solved} output={output_dir}"
+                )
+            else:
+                summary = (
+                    f"gen={args.generation} seed={args.seed} task_index={task_index} rollout_index={rollout_index} "
+                    f"rollout_username={rollout_username} task_id={record_task_id} "
+                    f"evaluation=unconfigured output={output_dir}"
+                )
             if worker_result.status == "error":
                 summary += f" error={worker_result.stop_reason}"
             return RolloutResult(
@@ -2722,9 +2893,8 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                                     "rollout_index": rollout_index,
                                     "rollout_username": _rollout_username(rollout_index),
                                     "task_id": task_id,
-                                    "problem_uid": problem_uid,
-                                    "configured_problem_pool_size": args.problem_pool_size,
-                                    "problem_pool_count": problem_pool_count,
+                                    **({"problem_uid": problem_uid} if has_problem_pool else {}),
+                                    **batch_reporting,
                                     "worker_status": "error",
                                     "worker_stop_reason": type(exc).__name__,
                                     "worker_error_message": str(exc),
@@ -2742,7 +2912,11 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                                         "rollout_index": rollout_index,
                                         "rollout_username": _rollout_username(rollout_index),
                                         "task_id": task_id,
-                                        "problem_uid": problem_uid,
+                                        **(
+                                            {"problem_uid": problem_uid}
+                                            if has_problem_pool
+                                            else {}
+                                        ),
                                         "parent_slot_dir": None,
                                         "parent_workspace_dir": None,
                                         "bootstrap_seed_dir": str(bootstrap_seed_dir),
@@ -2757,16 +2931,25 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                                         "worker_error_message": str(exc),
                                         "worker_backend": args.worker_backend,
                                         "worker_metadata": None,
-                                        "solved": False,
-                                        "reward": 0.0,
+                                        **(
+                                            {
+                                                "evaluation": "unconfigured",
+                                                "open_ended_task_sha256": (
+                                                    prepared_benchmark_batch.metadata.get(
+                                                        "task_sha256"
+                                                    )
+                                                ),
+                                            }
+                                            if args.benchmark == "open-ended"
+                                            else {"solved": False, "reward": 0.0}
+                                        ),
                                         "output_path": None,
                                         "problem_queue_path": (
                                             str(problem_queue_path)
                                             if args.benchmark == "supergpqa"
                                             else None
                                         ),
-                                        "configured_problem_pool_size": args.problem_pool_size,
-                                        "problem_pool_count": problem_pool_count,
+                                        **batch_reporting,
                                         "shared_workspace_write_log": str(shared_workspace_write_log),
                                         "progress_log": str(progress_log_path),
                                         "dataset_name": (
@@ -2811,6 +2994,9 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                                             else None
                                         ),
                                         **(
+                                            {}
+                                            if args.benchmark == "open-ended"
+                                            else
                                             {
                                                 "submitted_uuid": None,
                                                 "reported_problem_uid": None,
@@ -2825,7 +3011,13 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                                     summary=(
                                         f"gen={args.generation} seed={args.seed} task_index={task_index} "
                                         f"rollout_index={rollout_index} rollout_username={_rollout_username(rollout_index)} "
-                                        f"task_id={task_id} solved=False output=None error={type(exc).__name__}"
+                                        f"task_id={task_id} "
+                                        + (
+                                            "evaluation=unconfigured "
+                                            if args.benchmark == "open-ended"
+                                            else "solved=False "
+                                        )
+                                        + f"output=None error={type(exc).__name__}"
                                     ),
                                     error=str(exc),
                                 )
@@ -2843,7 +3035,10 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
         ]
         benchmark_finalization = (
             benchmark_driver.finalize_batch(prepared_benchmark_batch, batch_outcomes)
-            if prepared_benchmark_batch is not None
+            if (
+                prepared_benchmark_batch is not None
+                and prepared_benchmark_batch.metadata.get("evaluation") != "unconfigured"
+            )
             else {}
         )
         if benchmark_finalization:
