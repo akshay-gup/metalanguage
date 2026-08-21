@@ -19,7 +19,7 @@ from urllib.parse import parse_qs, urlparse
 
 
 if "--version" in sys.argv:
-    print(os.environ.get("FAKE_OPENCODE_VERSION", "1.18.18"))
+    print(os.environ.get("FAKE_OPENCODE_VERSION", "1.18.19"))
     raise SystemExit(0)
 
 
@@ -124,6 +124,9 @@ class Handler(BaseHTTPRequestHandler):
                     "TMPDIR",
                     "OPENCODE_DB",
                     "METALANGUAGE_OPENCODE_SYSTEM_INSTRUCTIONS",
+                    "METALANGUAGE_SPAWN_CHILD_ENDPOINT",
+                    "METALANGUAGE_SPAWN_CHILD_HANDLER_COMMAND",
+                    "METALANGUAGE_OPENCODE_WORKER_SCRIPT",
                 ]
             }
             state["spawn_child_tool"] = Path(
@@ -145,10 +148,47 @@ class Handler(BaseHTTPRequestHandler):
             ).hexdigest()
             state["environment_names"] = sorted(os.environ)
             state["unrelated_home_visible"] = Path("/home/akshay/.ssh").exists()
-            project_env = Path(
-                os.environ["METALANGUAGE_OPENCODE_WORKER_SCRIPT"]
-            ).parents[2] / ".env"
-            state["project_env_masked"] = project_env.exists() and project_env.stat().st_size == 0
+            state["path_environment"] = {}
+            for name in (
+                "GOOGLE_APPLICATION_CREDENTIALS",
+                "REQUESTS_CA_BUNDLE",
+                "SSL_CERT_DIR",
+                "SSL_CERT_FILE",
+            ):
+                value = os.environ.get(name)
+                if value is None:
+                    continue
+                path = Path(value)
+                state["path_environment"][name] = {
+                    "value": value,
+                    "exists": path.exists(),
+                    "is_dir": path.is_dir(),
+                    "sha256": (
+                        hashlib.sha256(path.read_bytes()).hexdigest()
+                        if path.is_file()
+                        else None
+                    ),
+                }
+                try:
+                    if path.is_file():
+                        path.write_bytes(path.read_bytes())
+                    else:
+                        (path / "metalanguage-write-probe").write_text("probe")
+                    state["path_environment"][name]["writable"] = True
+                except OSError:
+                    state["path_environment"][name]["writable"] = False
+            stable_parent = Path("/run/metalanguage/credentials")
+            state["credential_mount_names"] = (
+                sorted(path.name for path in stable_parent.iterdir())
+                if stable_parent.is_dir()
+                else []
+            )
+            masked_path = os.environ.get("METALANGUAGE_OPENCODE_MASKED_PATH")
+            state["project_env_masked"] = bool(
+                masked_path
+                and Path(masked_path).exists()
+                and Path(masked_path).stat().st_size == 0
+            )
             (directory / "fake_state.json").write_text(json.dumps(state, sort_keys=True))
             text = payload["parts"][0]["text"]
             events.put(

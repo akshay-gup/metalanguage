@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import tempfile
 import unittest
 from argparse import Namespace
@@ -12,7 +13,10 @@ from main_loop import (
     _create_benchmark_driver,
     _format_runtime_markdown,
     _runtime_benchmark,
+    _run_main,
+    _spawn_child_continuation,
     _worker_backend_resume_compatible,
+    WorkerResult,
     parse_args,
 )
 from utils.open_ended_benchmark import (
@@ -54,7 +58,7 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
             args = parse_args()
         self.assertEqual(args.worker_backend, "opencode")
         self.assertEqual(args.opencode_base_instructions_mode, "read-readme")
-        self.assertIn("1.18.18", args.opencode_allowed_versions)
+        self.assertEqual(args.opencode_allowed_versions, "1.18.19")
         self.assertEqual(args.opencode_allowed_bun_versions, "1.3.14")
         self.assertEqual(args.opencode_sandbox_mode, "bubblewrap")
         self.assertEqual(args.opencode_network_mode, "allow")
@@ -82,6 +86,7 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
             opencode_agent="build",
             opencode_variant=None,
             opencode_server_startup_timeout_seconds=15,
+            worker_timeout_seconds=3600,
             opencode_sandbox_mode="bubblewrap",
             opencode_network_mode="allow",
             _opencode_runtime_version="1.18.19",
@@ -89,10 +94,16 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
             _opencode_bun_version="1.3.14",
             _opencode_bun_sha256="bun-sha",
             _opencode_worker_sha256="worker-sha",
+            _opencode_python_sha256="python-sha",
             _opencode_auth_sha256=None,
             _opencode_provider_env_names=("OPENAI_API_KEY",),
             _opencode_provider_env_sha256="provider-env-sha",
             _opencode_allowed_bun_versions=("1.3.14",),
+            _opencode_bubblewrap_bin="/usr/bin/bwrap",
+            _opencode_bubblewrap_version="bubblewrap 0.11.0",
+            _opencode_bubblewrap_sha256="bwrap-sha",
+            _opencode_system_instructions_sha256="system-sha",
+            _opencode_configured_initial_prompt_sha256="prompt-sha",
         )
         record = {
             "worker_backend": "opencode",
@@ -104,12 +115,21 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
             "opencode_bun_version": "1.3.14",
             "opencode_bun_sha256": "bun-sha",
             "opencode_worker_sha256": "worker-sha",
+            "opencode_python_sha256": "python-sha",
             "opencode_auth_sha256": None,
             "opencode_provider_env_sha256": "provider-env-sha",
             "opencode_allowed_bun_versions": ["1.3.14"],
             "opencode_server_startup_timeout_seconds": 15,
+            "opencode_worker_timeout_seconds": 3600,
             "opencode_sandbox_mode": "bubblewrap",
             "opencode_network_mode": "allow",
+            "opencode_bubblewrap_bin": "/usr/bin/bwrap",
+            "opencode_bubblewrap_version": "bubblewrap 0.11.0",
+            "opencode_bubblewrap_sha256": "bwrap-sha",
+            "opencode_system_instructions_sha256": "system-sha",
+            "opencode_configured_initial_prompt_sha256": "prompt-sha",
+            "opencode_effective_initial_prompt_sha256": "prompt-sha",
+            "bootstrap_seed_used": True,
             "opencode_provider_env_names": ["OPENAI_API_KEY"],
         }
         self.assertTrue(_worker_backend_resume_compatible(record, args))
@@ -121,6 +141,30 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
         self.assertFalse(
             _worker_backend_resume_compatible(
                 {**record, "opencode_worker_sha256": "changed"}, args
+            )
+        )
+        for field in (
+            "opencode_python_sha256",
+            "opencode_bubblewrap_bin",
+            "opencode_bubblewrap_version",
+            "opencode_bubblewrap_sha256",
+            "opencode_system_instructions_sha256",
+            "opencode_configured_initial_prompt_sha256",
+            "opencode_worker_timeout_seconds",
+        ):
+            with self.subTest(field=field):
+                self.assertFalse(
+                    _worker_backend_resume_compatible(
+                        {**record, field: "changed"}, args
+                    )
+                )
+        self.assertFalse(
+            _worker_backend_resume_compatible(
+                {
+                    **record,
+                    "opencode_effective_initial_prompt_sha256": "changed",
+                },
+                args,
             )
         )
         self.assertFalse(
@@ -153,6 +197,103 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                 {**record, "opencode_worker_script": "/tmp/other-worker.ts"}, args
             )
         )
+
+    def test_actual_opencode_orchestration_uses_custom_bootstrap_prompt(self) -> None:
+        documents = Path.home() / "Documents"
+        documents.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=documents) as temp:
+            root = Path(temp)
+            runtime = root / "runtime"
+            task = root / "task.md"
+            task.write_text("# Offline orchestration task\n")
+            fake_opencode = root / "opencode"
+            shutil.copyfile(
+                Path(__file__).parent / "fixtures/fake_opencode.py",
+                fake_opencode,
+            )
+            fake_opencode.chmod(0o755)
+            argv = [
+                "main_loop.py",
+                "--benchmark",
+                "open-ended",
+                "--task-file",
+                str(task),
+                "--runtime-root",
+                str(runtime),
+                "--worker-backend",
+                "opencode",
+                "--model",
+                "fixture/model",
+                "--num-rollouts",
+                "1",
+                "--step",
+                "--opencode-bin",
+                str(fake_opencode),
+                "--opencode-initial-prompt",
+                "CUSTOM OPENCODE BOOTSTRAP",
+            ]
+            calls: list[dict[str, object]] = []
+
+            def worker(**kwargs: object) -> WorkerResult:
+                calls.append(kwargs)
+                if len(calls) == 2:
+                    workdir = Path(str(kwargs["workdir"]))
+                    seed = workdir / "child-seed"
+                    seed.mkdir()
+                    (seed / "README.md").write_text("# Inherited child\n")
+                    context = json.loads(
+                        Path(str(kwargs["continuation_context_path"])).read_text()
+                    )
+                    spawned = _spawn_child_continuation(
+                        context=context,
+                        args={
+                            "prompt": "INHERITED CHILD PROMPT",
+                            "workspace_dir": "child-seed",
+                        },
+                    )
+                    self.assertTrue(spawned["child_spawned"])
+                return WorkerResult("offline", "completed", "final_message")
+
+            for _ in range(3):
+                with patch("sys.argv", argv), patch(
+                    "main_loop.run_opencode_worker", side_effect=worker
+                ):
+                    _run_main([])
+            self.assertEqual(len(calls), 3)
+            self.assertEqual(
+                [call["initial_user_text"] for call in calls],
+                [
+                    "CUSTOM OPENCODE BOOTSTRAP",
+                    "CUSTOM OPENCODE BOOTSTRAP",
+                    "INHERITED CHILD PROMPT",
+                ],
+            )
+            self.assertNotIn(
+                str(runtime / "logs/rollout_control"),
+                [str(path) for path in calls[0]["sandbox_writable_roots"]],
+            )
+            handler_context = Path(str(calls[0]["continuation_context_path"]))
+            mounted_sources = {
+                str(source)
+                for source, _target in calls[0]["sandbox_read_only_mounts"]
+            }
+            self.assertNotIn(str(handler_context), mounted_sources)
+            records = [
+                json.loads(line)
+                for line in (runtime / "logs/runs.jsonl").read_text().splitlines()
+            ]
+            self.assertEqual(len(records), 3)
+            self.assertEqual(
+                records[0]["opencode_effective_initial_prompt_sha256"],
+                records[1]["opencode_effective_initial_prompt_sha256"],
+            )
+            self.assertNotEqual(
+                records[1]["opencode_effective_initial_prompt_sha256"],
+                records[2]["opencode_effective_initial_prompt_sha256"],
+            )
+            self.assertTrue(records[0]["opencode_system_instructions_sha256"])
+            self.assertTrue(records[0]["opencode_python_sha256"])
+            self.assertTrue(records[0]["opencode_bubblewrap_sha256"])
 
     def test_exact_task_materialization_has_no_pool_tools_or_outcome(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

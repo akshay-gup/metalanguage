@@ -3,10 +3,11 @@ import { describe, expect, test } from "bun:test"
 import {
   EventNormalizer,
   SseDecoder,
+  safeErrorCode,
   translateMcp,
   type McpServerInput,
 } from "./protocol.ts"
-import { finalAssistantText } from "./worker.ts"
+import { finalAssistantText, startSpawnCallback } from "./worker.ts"
 import { runHandler, SYSTEM_PLUGIN_SOURCE, TOOL_SOURCE } from "./spawn_bridge.ts"
 
 function mcpServer(): McpServerInput {
@@ -178,6 +179,20 @@ describe("OpenCode native protocol adapter", () => {
       "OpenCode request failed (ProviderAuthError)",
     ])
     expect(JSON.stringify(failed.events)).not.toContain("PRIVATE")
+
+    const adversarial = normalizer.handle({
+      type: "session.error",
+      properties: {
+        sessionID: "ses_test",
+        error: { name: `Provider\nBearer sk-PRIVATE-${"💣".repeat(300)}` },
+      },
+    })
+    const code = adversarial.events[0]?.error_code
+    expect(typeof code).toBe("string")
+    expect(String(code).length).toBeLessThanOrEqual(128)
+    expect(String(code)).toMatch(/^[a-zA-Z0-9_.-]+$/)
+    expect(JSON.stringify(adversarial.events)).not.toContain("PRIVATE")
+    expect(safeErrorCode(42)).toBe("unknown")
   })
 
   test("selects only the final assistant message in production event order", () => {
@@ -283,12 +298,40 @@ describe("OpenCode native protocol adapter", () => {
   test("config-scoped sources expose exact tool and system hooks", () => {
     expect(TOOL_SOURCE).toContain("spawn_child")
     expect(TOOL_SOURCE).toContain("context.abort")
+    expect(TOOL_SOURCE).toContain("METALANGUAGE_SPAWN_CHILD_ENDPOINT")
+    expect(TOOL_SOURCE).not.toContain("METALANGUAGE_OPENCODE_WORKER_SCRIPT")
     expect(SYSTEM_PLUGIN_SOURCE).toContain("experimental.chat.system.transform")
     expect(SYSTEM_PLUGIN_SOURCE).toContain("output.system.splice")
   })
 })
 
 describe("spawn_child supervisor bridge", () => {
+  test("host callback rejects unauthorized and oversized control requests", async () => {
+    const callback = await startSpawnCallback([
+      "python3",
+      "-c",
+      "import json,sys; print(json.dumps(json.loads(sys.stdin.read())))",
+    ])
+    try {
+      const unauthorized = await fetch(callback.endpoint, {
+        method: "POST",
+        headers: { authorization: "Bearer wrong" },
+        body: "{}",
+      })
+      expect(unauthorized.status).toBe(401)
+      const oversized = await fetch(callback.endpoint, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${callback.token}`,
+        },
+        body: "x".repeat(65 * 1024),
+      })
+      expect(oversized.status).toBe(413)
+    } finally {
+      callback.stop()
+    }
+  })
+
   test("preserves success and retry responses", async () => {
     for (const response of [
       { success: true, child_spawned: true, parent_continues: true },

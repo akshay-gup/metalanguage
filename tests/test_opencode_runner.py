@@ -13,11 +13,14 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
+from main_loop import WorkerResult, run_opencode_worker
 from utils.opencode_runner import (
     _handle_runner_line,
     _rollout_environment,
     _terminate_process_group,
     opencode_worker_script_path,
+    normalize_error_code,
+    prepare_provider_environment,
     provider_environment_fingerprint,
     resolve_bun_bin,
     resolve_opencode_bin,
@@ -216,6 +219,7 @@ class OpenCodeRunnerTests(unittest.TestCase):
         timeout: int = 5,
         agent: str | None = None,
         variant: str | None = None,
+        provider_env_names: tuple[str, ...] = (),
     ) -> dict[str, object]:
         workdir = root / "workdir"
         workdir.mkdir()
@@ -235,8 +239,9 @@ class OpenCodeRunnerTests(unittest.TestCase):
             sensitive_mcp_tools=sensitive,
             agent=agent,
             variant=variant,
-            allowed_versions=("1.18.18",),
+            allowed_versions=("1.18.19",),
             startup_timeout_seconds=2,
+            provider_env_names=provider_env_names,
             extra_environment={
                 name: value
                 for name in (
@@ -254,7 +259,7 @@ class OpenCodeRunnerTests(unittest.TestCase):
             result = self._run(root, agent="build", variant="high")
             self.assertEqual(result["status"], "completed")
             self.assertEqual(result["final_text"], "fixture final")
-            self.assertEqual(result["runtime_version"], "1.18.18")
+            self.assertEqual(result["runtime_version"], "1.18.19")
             self.assertTrue(result["isolated_state_cleaned"])
             prompt = json.loads((root / "workdir/fake_prompt.json").read_text())
             self.assertEqual(prompt["system"], "exact system instruction")
@@ -276,6 +281,13 @@ class OpenCodeRunnerTests(unittest.TestCase):
                 state["METALANGUAGE_OPENCODE_SYSTEM_INSTRUCTIONS"],
                 "exact system instruction",
             )
+            self.assertTrue(
+                state["METALANGUAGE_SPAWN_CHILD_ENDPOINT"].startswith(
+                    "http://127.0.0.1:"
+                )
+            )
+            self.assertIsNone(state["METALANGUAGE_SPAWN_CHILD_HANDLER_COMMAND"])
+            self.assertIsNone(state["METALANGUAGE_OPENCODE_WORKER_SCRIPT"])
             roots = {
                 str(Path(value).parents[0] if key == "OPENCODE_DB" else Path(value))
                 for key, value in state.items()
@@ -291,6 +303,11 @@ class OpenCodeRunnerTests(unittest.TestCase):
                     "unrelated_home_visible",
                     "project_env_masked",
                     "METALANGUAGE_OPENCODE_SYSTEM_INSTRUCTIONS",
+                    "METALANGUAGE_SPAWN_CHILD_ENDPOINT",
+                    "METALANGUAGE_SPAWN_CHILD_HANDLER_COMMAND",
+                    "METALANGUAGE_OPENCODE_WORKER_SCRIPT",
+                    "path_environment",
+                    "credential_mount_names",
                 }
                 and value is not None
             }
@@ -429,7 +446,7 @@ class OpenCodeRunnerTests(unittest.TestCase):
                 worker_state_dir=root / "state",
                 timeout_seconds=2,
                 initial_user_text="ordinary prompt",
-                allowed_versions=("1.18.18",),
+                allowed_versions=("1.18.19",),
                 allowed_bun_versions=("9.9.9",),
                 startup_timeout_seconds=2,
             )
@@ -461,7 +478,7 @@ class OpenCodeRunnerTests(unittest.TestCase):
             workdir.mkdir()
             request = {
                 "opencode_bin": str(self._fake_cli(root)),
-                "allowed_versions": ["1.18.18"],
+                "allowed_versions": ["1.18.19"],
                 "model": "fixture/model",
                 "cwd": str(workdir),
                 "state_root": str(root / "state"),
@@ -514,7 +531,7 @@ class OpenCodeRunnerTests(unittest.TestCase):
             workdir.mkdir()
             request = {
                 "opencode_bin": str(self._fake_cli(root)),
-                "allowed_versions": ["1.18.18"],
+                "allowed_versions": ["1.18.19"],
                 "allowed_bun_versions": ["1.3.14"],
                 "model": "fixture/model",
                 "cwd": str(workdir),
@@ -598,6 +615,147 @@ class OpenCodeRunnerTests(unittest.TestCase):
                 provider_environment_fingerprint(("OPENAI_API_KEY",)),
             )
 
+    def test_path_credentials_are_exact_read_only_mounts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            credential_parent = root / "credential parent with spaces"
+            credential_parent.mkdir()
+            credential = credential_parent / "google key.json"
+            credential.write_text('{"private_key":"fixture"}\n')
+            alias = root / "credential-link.json"
+            alias.symlink_to(credential)
+            sibling = credential_parent / "not-mounted.txt"
+            sibling.write_text("must stay hidden")
+            cert_dir = root / "certificate directory"
+            cert_dir.mkdir()
+            (cert_dir / "root.pem").write_text("fixture certificate")
+            cert_file = root / "certificate file.pem"
+            cert_file.write_text("fixture certificate file")
+            requests_bundle = root / "requests ca bundle.pem"
+            requests_bundle.write_text("fixture requests bundle")
+            with patch.dict(
+                os.environ,
+                {
+                    "GOOGLE_APPLICATION_CREDENTIALS": str(alias),
+                    "SSL_CERT_DIR": str(cert_dir),
+                    "SSL_CERT_FILE": str(cert_file),
+                    "REQUESTS_CA_BUNDLE": str(requests_bundle),
+                },
+            ):
+                result = self._run(
+                    root,
+                    provider_env_names=("GOOGLE_APPLICATION_CREDENTIALS",),
+                )
+            self.assertEqual(result["status"], "completed")
+            state = json.loads((root / "workdir/fake_state.json").read_text())
+            mounted = state["path_environment"]
+            self.assertEqual(
+                mounted["GOOGLE_APPLICATION_CREDENTIALS"]["value"],
+                "/run/metalanguage/credentials/GOOGLE_APPLICATION_CREDENTIALS",
+            )
+            self.assertTrue(mounted["GOOGLE_APPLICATION_CREDENTIALS"]["exists"])
+            self.assertFalse(mounted["GOOGLE_APPLICATION_CREDENTIALS"]["writable"])
+            self.assertEqual(
+                mounted["SSL_CERT_DIR"]["value"],
+                "/run/metalanguage/credentials/SSL_CERT_DIR",
+            )
+            self.assertTrue(mounted["SSL_CERT_DIR"]["is_dir"])
+            self.assertFalse(mounted["SSL_CERT_DIR"]["writable"])
+            self.assertFalse(mounted["SSL_CERT_FILE"]["is_dir"])
+            self.assertFalse(mounted["SSL_CERT_FILE"]["writable"])
+            self.assertFalse(mounted["REQUESTS_CA_BUNDLE"]["is_dir"])
+            self.assertFalse(mounted["REQUESTS_CA_BUNDLE"]["writable"])
+            self.assertEqual(
+                state["credential_mount_names"],
+                [
+                    "GOOGLE_APPLICATION_CREDENTIALS",
+                    "REQUESTS_CA_BUNDLE",
+                    "SSL_CERT_DIR",
+                    "SSL_CERT_FILE",
+                ],
+            )
+            self.assertNotIn(str(credential_parent), json.dumps(state))
+
+    def test_path_credentials_reject_missing_wrong_kind_and_nested_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            cases: list[tuple[str, Path]] = [
+                ("GOOGLE_APPLICATION_CREDENTIALS", root / "missing.json"),
+                ("GOOGLE_APPLICATION_CREDENTIALS", root),
+            ]
+            file_path = root / "cert.pem"
+            file_path.write_text("cert")
+            cases.append(("SSL_CERT_DIR", file_path))
+            for name, value in cases:
+                with self.subTest(name=name, value=value), patch.dict(
+                    os.environ, {name: str(value)}
+                ):
+                    with self.assertRaisesRegex(ValueError, "OpenCode path environment"):
+                        prepare_provider_environment((name,), sandbox_mode="bubblewrap")
+
+            directory = root / "certs"
+            directory.mkdir()
+            (directory / "escape.pem").symlink_to(file_path)
+            with patch.dict(os.environ, {"SSL_CERT_DIR": str(directory)}):
+                with self.assertRaisesRegex(ValueError, "contains a symlink"):
+                    prepare_provider_environment((), sandbox_mode="bubblewrap")
+
+    def test_production_wrapper_forwards_all_opencode_controls(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            mount = (root / "credential", Path("/run/metalanguage/credentials/TEST"))
+            paths = {
+                "worker_script": root / "worker.ts",
+                "bun_bin": root / "bun",
+                "opencode_bin": root / "opencode",
+                "workdir": root / "workdir",
+                "control_dir": root / "control",
+                "worker_state_dir": root / "state",
+                "bubblewrap_bin": root / "bwrap",
+            }
+            expected = {
+                "final_text": "ok",
+                "status": "completed",
+                "stop_reason": "final_message",
+                "error_code": None,
+                "error_message": None,
+            }
+            with patch("main_loop.run_opencode_rollout", return_value=expected) as rollout:
+                result = run_opencode_worker(
+                    **paths,
+                    model="provider/model",
+                    timeout_seconds=17,
+                    initial_user_text="exact prompt",
+                    system_instructions="exact system",
+                    allowed_versions=("1.18.19",),
+                    allowed_bun_versions=("1.3.14",),
+                    startup_timeout_seconds=19,
+                    provider_env_names=("OPENAI_API_KEY",),
+                    provider_environment={"OPENAI_API_KEY": "secret"},
+                    sandbox_mode="bubblewrap",
+                    sandbox_network="allow",
+                    sandbox_read_only_roots=(root / "readonly",),
+                    sandbox_read_only_mounts=(mount,),
+                    sandbox_writable_roots=(root / "writable",),
+                    sandbox_masked_paths=(root / ".env",),
+                )
+            self.assertEqual(result.status, "completed")
+            kwargs = rollout.call_args.kwargs
+            for key in (
+                "allowed_bun_versions",
+                "provider_env_names",
+                "provider_environment",
+                "sandbox_mode",
+                "sandbox_network",
+                "bubblewrap_bin",
+                "sandbox_read_only_roots",
+                "sandbox_read_only_mounts",
+                "sandbox_writable_roots",
+                "sandbox_masked_paths",
+            ):
+                self.assertIn(key, kwargs)
+            self.assertEqual(kwargs["sandbox_read_only_mounts"], (mount,))
+
     def test_malformed_runner_stdout_is_not_persisted(self) -> None:
         stream = Buffer()
         state = {
@@ -630,6 +788,21 @@ class OpenCodeRunnerTests(unittest.TestCase):
             progress_callback=None,
             state=state,
         )
+        self.assertNotIn("PRIVATE", stream.value)
+        adversarial = _handle_runner_line(
+            json.dumps(
+                {
+                    "event": "error",
+                    "error_code": "ProviderBearer_sk-PRIVATE-" + "A" * 10_000,
+                    "error_message": "another private payload",
+                }
+            ),
+            events_stream=stream,
+            progress_callback=None,
+            state=state,
+        )
+        self.assertEqual(adversarial["error_code"], "unknown")
+        self.assertEqual(normalize_error_code("ProviderAuthError"), "ProviderAuthError")
         self.assertNotIn("PRIVATE", stream.value)
 
     def test_two_and_eight_workers_have_unique_isolation_and_no_lingering_processes(self) -> None:
@@ -819,6 +992,11 @@ class OpenCodeRunnerTests(unittest.TestCase):
             self.assertEqual(result["status"], "timeout")
             self.assertEqual(result["error_code"], "worker_timeout")
             self.assertTrue(result["isolated_state_cleaned"])
+            self.assertTrue((root / "mcp.pid").is_file())
+            mcp_pids = [int(pid) for pid in result["mcp_process_pids"]]
+            self.assertGreaterEqual(len(mcp_pids), 2)
+            for pid in mcp_pids:
+                self._assert_pid_gone(pid)
             self._assert_pid_gone(self._runtime_pid(result))
 
     def test_process_group_termination_reaps_descendant(self) -> None:

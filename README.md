@@ -236,9 +236,13 @@ synchronously calls the existing Python supervisor; its result returns to the
 same parent turn.
 
 The default Linux launcher uses bubblewrap with a private PID namespace,
-read-only source/seed/shared roots, explicit writable rollout roots, a private
-`/tmp`, and parent-death cleanup. Benchmark modes fail closed if bubblewrap is
-disabled. Network remains explicitly enabled because the private HTTP server
+read-only source and benchmark-private roots, explicit writable rollout,
+archive, shared, and benchmark-state mounts, a private `/tmp`, and parent-death
+cleanup. The Python lineage callback runs outside the rollout sandbox behind a
+random authenticated loopback endpoint; its command, context, logs, sibling
+rollouts, and spawn-slot state are not mounted into the OpenCode server.
+Benchmark modes fail closed if bubblewrap is disabled. Network remains
+explicitly enabled because the private HTTP server
 boundary and provider calls cannot currently operate in a separate network
 namespace; `--opencode-network-mode none` therefore fails closed. The
 `unsafe-none` mode is available only for trusted open-ended work and is named
@@ -256,10 +260,16 @@ Useful flags include `--opencode-bin`, `--opencode-bun-bin`,
 `--opencode-base-instructions-mode read-readme|opencode`. Provider environment
 credentials are selected from a reviewed provider-specific allowlist; additional
 names must be explicit. Unrelated host environment variables are not inherited.
+Known path-valued credentials and certificate settings, including
+`GOOGLE_APPLICATION_CREDENTIALS`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, and
+`REQUESTS_CA_BUNDLE`, are validated and rebound read-only at stable per-variable
+paths without mounting their parent directories.
 An auth file is read-only and copied into each isolated process through
 `OPENCODE_AUTH_CONTENT`. Resume compatibility fingerprints the OpenCode and Bun
-binaries/versions, worker sources, relevant provider/auth inputs, and startup
-and sandbox settings.
+binaries/versions, bubblewrap path/version/content, TypeScript worker and Python
+adapter/orchestration sources, exact effective system/configured initial prompt
+content, relevant provider/auth inputs, and all exposed worker/startup sandbox
+settings. Only pinned OpenCode `1.18.19` is source-audited.
 
 Stdio MCP commands run through a bundled proxy that gives the actual MCP child
 only the private HOME/XDG/temp base plus that server's explicitly configured
@@ -278,10 +288,10 @@ ordinary prose. Benchmark answer privacy must therefore rely on tool-specific
 redaction and benchmark policy, not semantic guessing over assistant text.
 
 Bubblewrap materially limits filesystem and process access, but network access
-is still allowed and the rollout root needed by lineage callbacks is writable.
+is still allowed, and the rollout workspace plus explicit archive/shared and
+benchmark state remain writable as required by existing semantics.
 Provider credentials necessarily remain in the OpenCode server environment and
 upstream native shell execution inherits that environment; this is another
 reason not to treat the backend as safe for credential-hostile prompts.
 This is not strict Codex-equivalent hostile-code containment; hostile-worker use
-must remain disabled until a sound network boundary and narrower callback write
-surface are available.
+must remain disabled until a sound network and provider-secret boundary exists.
