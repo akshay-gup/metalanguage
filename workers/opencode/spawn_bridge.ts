@@ -7,36 +7,27 @@ export const TOOL_SOURCE = `export default {
     workspace_dir: { type: "string", minLength: 1, description: "Prepared workspace directory containing a non-empty README.md." },
   },
   async execute(args, context) {
-    const bun = process.env.METALANGUAGE_OPENCODE_BUN_BIN
-    const worker = process.env.METALANGUAGE_OPENCODE_WORKER_SCRIPT
-    if (!bun || !worker) throw new Error("Metalanguage spawn_child bridge is not configured")
+    const endpoint = process.env.METALANGUAGE_SPAWN_CHILD_ENDPOINT
+    const token = process.env.METALANGUAGE_SPAWN_CHILD_TOKEN
+    if (!endpoint || !token) throw new Error("Metalanguage spawn_child bridge is not configured")
     const payload = JSON.stringify({
       tool: "spawn_child",
       namespace: null,
       call_id: context.callID ?? null,
       arguments: args,
     })
-    const child = Bun.spawn([bun, worker, "spawn-child-bridge"], {
-      env: process.env,
-      stdin: "pipe",
-      stdout: "pipe",
-      stderr: "pipe",
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        authorization: \`Bearer \${token}\`,
+        "content-type": "application/json",
+      },
+      body: payload,
+      signal: context.abort,
     })
-    const abort = () => child.kill()
-    context.abort.addEventListener("abort", abort, { once: true })
-    try {
-      child.stdin.write(payload)
-      child.stdin.end()
-      const [stdout, stderr, code] = await Promise.all([
-        new Response(child.stdout).text(),
-        new Response(child.stderr).text(),
-        child.exited,
-      ])
-      if (code !== 0) throw new Error(\`spawn_child bridge exited \${code}: \${stderr.trim()}\`)
-      return JSON.stringify(JSON.parse(stdout))
-    } finally {
-      context.abort.removeEventListener("abort", abort)
-    }
+    const body = await response.text()
+    if (!response.ok) throw new Error(\`spawn_child bridge returned HTTP \${response.status}\`)
+    return JSON.stringify(JSON.parse(body))
   },
 }
 `

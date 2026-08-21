@@ -61,6 +61,7 @@ export type RunnerRequest = {
     network: "allow" | "none"
     bubblewrap_bin?: string | null
     read_only_roots?: string[]
+    read_only_mounts?: Array<{ source: string; target: string }>
     writable_roots?: string[]
     masked_paths?: string[]
   }
@@ -260,7 +261,7 @@ export class EventNormalizer {
         return { events: output, terminal: "continue" }
       }
       const error = isRecord(properties.error) ? properties.error : {}
-      const code = typeof error.name === "string" ? error.name : "opencode_session_error"
+      const code = providerErrorCode(error.name)
       const message = safeErrorMessage(code)
       this.error = [code, message]
       output.push({ event: "error", error_code: code, error_message: message })
@@ -349,6 +350,19 @@ export class EventNormalizer {
   }
 }
 
+function providerErrorCode(value: unknown): string {
+  if (
+    value === "ProviderAuthError" ||
+    value === "UnknownError" ||
+    value === "MessageOutputLengthError" ||
+    value === "MessageAbortedError" ||
+    value === "APIError"
+  ) {
+    return value
+  }
+  return "opencode_session_error"
+}
+
 function loggedPayload(value: unknown, sensitive: boolean): unknown {
   return sensitive ? { redacted: true } : scrubValue(value)
 }
@@ -383,7 +397,13 @@ function looksSensitiveString(value: string): boolean {
 }
 
 export function safeErrorMessage(code: string): string {
-  return `OpenCode request failed (${cappedString(code.replaceAll(/[^a-zA-Z0-9_.-]/g, "_"), 128)})`
+  return `OpenCode request failed (${safeErrorCode(code)})`
+}
+
+export function safeErrorCode(value: unknown, fallback = "unknown"): string {
+  if (typeof value !== "string") return fallback
+  const code = value.slice(0, 512).replaceAll(/[^a-zA-Z0-9_.-]/g, "_").slice(0, 128)
+  return code || fallback
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {

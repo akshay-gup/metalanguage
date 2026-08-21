@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-import { chmod, mkdir, readFile, realpath, writeFile } from "node:fs/promises"
+import { chmod, mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises"
 import { dirname, join, resolve } from "node:path"
 
 import {
@@ -9,6 +9,7 @@ import {
   cappedString,
   isRecord,
   parseModel,
+  safeErrorCode,
   safeErrorMessage,
   translateMcp,
   type McpStatus,
@@ -22,7 +23,7 @@ import {
   type Terminal,
   type TranslatedMcp,
 } from "./protocol.ts"
-import { runSpawnBridgeFromStdio, SYSTEM_PLUGIN_SOURCE, TOOL_SOURCE } from "./spawn_bridge.ts"
+import { runHandler, runSpawnBridgeFromStdio, SYSTEM_PLUGIN_SOURCE, TOOL_SOURCE } from "./spawn_bridge.ts"
 
 class RunnerError extends Error {
   constructor(
@@ -256,6 +257,7 @@ async function isolatedEnvironment(
   root: string,
   config: Record<string, unknown>,
   password: string,
+  callback?: { endpoint: string; token: string },
 ): Promise<WorkerEnvironment> {
   const env: WorkerEnvironment = {}
   for (const [name, value] of Object.entries(process.env)) {
@@ -289,11 +291,13 @@ async function isolatedEnvironment(
     npm_config_audit: "false",
     npm_config_fund: "false",
     npm_config_update_notifier: "false",
-    METALANGUAGE_OPENCODE_BUN_BIN: process.execPath,
-    METALANGUAGE_OPENCODE_WORKER_SCRIPT: import.meta.path,
   })
-  if (request.spawn_child_handler_command) {
-    env.METALANGUAGE_SPAWN_CHILD_HANDLER_COMMAND = JSON.stringify(request.spawn_child_handler_command)
+  if (callback) {
+    env.METALANGUAGE_SPAWN_CHILD_ENDPOINT = callback.endpoint
+    env.METALANGUAGE_SPAWN_CHILD_TOKEN = callback.token
+  }
+  if (request.sandbox?.masked_paths?.[0]) {
+    env.METALANGUAGE_OPENCODE_MASKED_PATH = request.sandbox.masked_paths[0]
   }
   if (request.system_instructions?.trim()) {
     env.METALANGUAGE_OPENCODE_SYSTEM_INSTRUCTIONS = request.system_instructions
@@ -408,7 +412,6 @@ async function sandboxedServerCommand(request: RunnerRequest, root: string): Pro
   ]
   const commandExecutables = [
     ...Object.values(request.mcp_servers ?? {}).map((server) => server.command),
-    ...(request.spawn_child_handler_command?.length ? [request.spawn_child_handler_command[0]!] : []),
   ]
   const resolvedCommandRoots: string[] = []
   for (const executable of commandExecutables) {
@@ -428,12 +431,6 @@ async function sandboxedServerCommand(request: RunnerRequest, root: string): Pro
       dirname(server.command),
       dirname(dirname(server.command)),
     ]),
-    ...(request.spawn_child_handler_command?.length
-      ? [
-          dirname(request.spawn_child_handler_command[0]!),
-          dirname(dirname(request.spawn_child_handler_command[0]!)),
-        ]
-      : []),
     ...resolvedCommandRoots,
     ...(sandbox.read_only_roots ?? []),
   ])
@@ -447,6 +444,17 @@ async function sandboxedServerCommand(request: RunnerRequest, root: string): Pro
     const real = await realpath(path)
     addParentDirectories(command, real)
     command.push("--bind", real, real)
+  }
+  for (const mount of sandbox.read_only_mounts ?? []) {
+    const source = await realpath(mount.source)
+    if (
+      !mount.target.startsWith("/run/metalanguage/credentials/") &&
+      resolve(mount.target) !== source
+    ) {
+      throw new RunnerError("invalid_sandbox_mount", "read-only mount target is not stable")
+    }
+    addParentDirectories(command, mount.target)
+    command.push("--ro-bind", source, mount.target)
   }
   for (const path of sandbox.masked_paths ?? []) {
     const real = await realpath(path)
@@ -594,6 +602,42 @@ async function validateMcp(api: ApiClient, translated: TranslatedMcp): Promise<v
   })
 }
 
+async function recordMcpProcesses(serverPid: number): Promise<void> {
+  const snapshot = new Map<number, { parent: number; command: string }>()
+  for (const entry of await readdir("/proc").catch(() => [])) {
+    if (!/^\d+$/.test(entry)) continue
+    const pid = Number(entry)
+    try {
+      const status = await readFile(`/proc/${entry}/status`, "utf8")
+      const parent = Number(status.match(/^PPid:\s+(\d+)$/m)?.[1] ?? "0")
+      const command = (await readFile(`/proc/${entry}/cmdline`, "utf8")).replaceAll("\0", " ")
+      snapshot.set(pid, { parent, command })
+    } catch {
+      continue
+    }
+  }
+  const descendsFrom = (pid: number, ancestors: Set<number>): boolean => {
+    const visited = new Set<number>()
+    let current = pid
+    while (!visited.has(current)) {
+      if (ancestors.has(current)) return true
+      visited.add(current)
+      current = snapshot.get(current)?.parent ?? 0
+      if (!current) return false
+    }
+    return false
+  }
+  const serverTree = new Set(
+    [...snapshot.keys()].filter((pid) => pid === serverPid || descendsFrom(pid, new Set([serverPid]))),
+  )
+  const proxies = new Set(
+    [...serverTree].filter((pid) => snapshot.get(pid)?.command.includes("mcp_child_proxy.ts")),
+  )
+  for (const pid of [...serverTree].filter((candidate) => descendsFrom(candidate, proxies)).sort()) {
+    emit({ event: "mcp_process_started", pid })
+  }
+}
+
 function assistantText(response: SessionPromptResponse): string | undefined {
   if (!response.info || response.info.role !== "assistant" || typeof response.info.id !== "string") return undefined
   const messageID = response.info.id
@@ -625,6 +669,7 @@ async function runSession(
   translated: TranslatedMcp,
   providerId: string,
   modelId: string,
+  serverPid: number,
   cancelled: Promise<void>,
 ): Promise<void> {
   const queue = new AsyncQueue<unknown>()
@@ -640,6 +685,7 @@ async function runSession(
   }
 
   await validateMcp(api, translated)
+  await recordMcpProcesses(serverPid)
   const createBody: SessionCreateBody = {
     title: "Metalanguage rollout",
     permission: translated.permissionRules,
@@ -766,6 +812,53 @@ function randomSecret(): string {
   return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")
 }
 
+export async function startSpawnCallback(command: string[]): Promise<{
+  endpoint: string
+  token: string
+  stop: () => void
+}> {
+  const token = randomSecret()
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      if (request.method !== "POST" || new URL(request.url).pathname !== "/spawn-child") {
+        return new Response("not found", { status: 404 })
+      }
+      if (request.headers.get("authorization") !== `Bearer ${token}`) {
+        return new Response("unauthorized", { status: 401 })
+      }
+      const length = Number(request.headers.get("content-length") ?? "0")
+      if (!Number.isFinite(length) || length > 64 * 1024) {
+        return new Response("request too large", { status: 413 })
+      }
+      try {
+        const raw = await request.text()
+        if (raw.length > 64 * 1024) return new Response("request too large", { status: 413 })
+        const result = await runHandler(command, JSON.parse(raw))
+        return Response.json(result)
+      } catch {
+        return Response.json(
+          {
+            success: false,
+            child_spawned: false,
+            parent_continues: true,
+            retryable: true,
+            error_code: "spawn_child_handler_failed",
+            error: "spawn_child handler failed",
+          },
+          { status: 500 },
+        )
+      }
+    },
+  })
+  return {
+    endpoint: `http://127.0.0.1:${server.port}/spawn-child`,
+    token,
+    stop: () => server.stop(true),
+  }
+}
+
 function parseRequest(value: unknown): RunnerRequest {
   if (!isRecord(value)) throw new Error("runner request must be a JSON object")
   for (const field of ["opencode_bin", "model", "cwd", "state_root"] as const) {
@@ -805,25 +898,39 @@ export async function runRequest(request: RunnerRequest, cancelled: Promise<void
     throw asRunnerError("invalid_mcp_configuration", error)
   }
   let env: WorkerEnvironment
+  const callback = request.spawn_child_handler_command?.length
+    ? await startSpawnCallback(request.spawn_child_handler_command)
+    : undefined
   try {
-    env = await isolatedEnvironment(request, root, opencodeConfig(request, translated), randomSecret())
+    env = await isolatedEnvironment(
+      request,
+      root,
+      opencodeConfig(request, translated),
+      randomSecret(),
+      callback,
+    )
   } catch (error) {
+    callback?.stop()
     throw asRunnerError("state_isolation_failed", error)
   }
-  await verifyVersion(request, env)
-  const password = env.OPENCODE_SERVER_PASSWORD
-  const { server, baseUrl } = await startServer({ ...request, cwd }, env, root)
   try {
-    const api = new ApiClient(
-      baseUrl,
-      "metalanguage",
-      password,
-      cwd,
-      seconds(request.startup_timeout_seconds, 15) * 1000,
-    )
-    await runSession(api, request, translated, providerId, modelId, cancelled)
+    await verifyVersion(request, env)
+    const password = env.OPENCODE_SERVER_PASSWORD
+    const { server, baseUrl } = await startServer({ ...request, cwd }, env, root)
+    try {
+      const api = new ApiClient(
+        baseUrl,
+        "metalanguage",
+        password,
+        cwd,
+        seconds(request.startup_timeout_seconds, 15) * 1000,
+      )
+      await runSession(api, request, translated, providerId, modelId, server.pid, cancelled)
+    } finally {
+      await stopServer(server)
+    }
   } finally {
-    await stopServer(server)
+    callback?.stop()
   }
 }
 
@@ -846,7 +953,7 @@ export async function main(): Promise<void> {
     const normalized = asRunnerError("opencode_worker_failed", error)
     emit({
       event: "error",
-      error_code: normalized.code,
+      error_code: safeErrorCode(normalized.code),
       error_message: safeErrorMessage(normalized.code),
     })
     process.exit(1)
