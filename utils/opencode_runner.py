@@ -19,7 +19,7 @@ from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 OPENCODE_WORKER_SCRIPT = PROJECT_ROOT / "workers" / "opencode" / "worker.ts"
-SOURCE_AUDITED_OPENCODE_VERSIONS = ("1.18.18", "1.18.19")
+SOURCE_AUDITED_OPENCODE_VERSIONS = ("1.18.19",)
 SOURCE_AUDITED_BUN_VERSIONS = ("1.3.14",)
 DEFAULT_BUBBLEWRAP_BIN = Path("/usr/bin/bwrap")
 
@@ -28,10 +28,60 @@ _BASE_ENVIRONMENT_NAMES = {
     "LC_ALL",
     "LC_CTYPE",
     "NO_COLOR",
+    "REQUESTS_CA_BUNDLE",
     "SSL_CERT_DIR",
     "SSL_CERT_FILE",
     "TERM",
     "TZ",
+}
+
+_PATH_ENVIRONMENT_KINDS = {
+    "AWS_CONFIG_FILE": "file",
+    "AWS_SHARED_CREDENTIALS_FILE": "file",
+    "AZURE_AUTH_LOCATION": "file",
+    "CURL_CA_BUNDLE": "file",
+    "GOOGLE_APPLICATION_CREDENTIALS": "file",
+    "REQUESTS_CA_BUNDLE": "file",
+    "SSL_CERT_DIR": "directory",
+    "SSL_CERT_FILE": "file",
+}
+_CREDENTIAL_MOUNT_ROOT = Path("/run/metalanguage/credentials")
+_DURABLE_ERROR_CODES = {
+    "APIError",
+    "MessageAbortedError",
+    "MessageOutputLengthError",
+    "ProviderAuthError",
+    "UnknownError",
+    "invalid_mcp_configuration",
+    "invalid_model",
+    "invalid_sandbox_mount",
+    "invalid_working_directory",
+    "malformed_opencode_event",
+    "malformed_opencode_response",
+    "malformed_runner_output",
+    "opencode_event_closed",
+    "opencode_event_connect_failed",
+    "opencode_event_protocol",
+    "opencode_event_timeout",
+    "opencode_http_error",
+    "opencode_http_timeout",
+    "opencode_prompt_failed",
+    "opencode_prompt_timeout",
+    "opencode_session_error",
+    "opencode_start_failed",
+    "opencode_start_timeout",
+    "opencode_version_failed",
+    "opencode_version_timeout",
+    "opencode_worker_failed",
+    "permission_requested",
+    "required_mcp_server_unavailable",
+    "state_isolation_failed",
+    "test_provider_forbidden",
+    "unsupported_bun_version",
+    "unsupported_opencode_version",
+    "unsupported_sandbox_network_mode",
+    "worker_cancelled",
+    "worker_timeout",
 }
 _PROVIDER_ENVIRONMENT = {
     "anthropic": {"ANTHROPIC_API_KEY"},
@@ -146,15 +196,120 @@ def opencode_worker_fingerprint(worker_script: Path) -> str:
     return digest.hexdigest()
 
 
-def provider_environment_fingerprint(names: tuple[str, ...]) -> str:
+def opencode_python_fingerprint(main_loop_path: Path) -> str:
     digest = hashlib.sha256()
-    for name in sorted(names):
+    for path in (Path(__file__).resolve(), main_loop_path.resolve()):
+        digest.update(path.name.encode())
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def text_sha256(value: str | None) -> str:
+    return hashlib.sha256((value or "").encode()).hexdigest()
+
+
+def _path_content_fingerprint(path: Path, kind: str) -> str:
+    digest = hashlib.sha256()
+    if kind == "file":
+        digest.update(b"file\0")
+        digest.update(path.read_bytes())
+        return digest.hexdigest()
+    digest.update(b"directory\0")
+    for child in sorted(path.rglob("*")):
+        relative = child.relative_to(path)
+        if child.is_symlink():
+            raise ValueError(f"OpenCode credential directory contains a symlink: {child}")
+        if child.is_dir():
+            digest.update(b"dir\0")
+            digest.update(str(relative).encode())
+            digest.update(b"\0")
+            continue
+        if not child.is_file():
+            raise ValueError(f"OpenCode credential directory contains a non-file entry: {child}")
+        digest.update(b"file\0")
+        digest.update(str(relative).encode())
+        digest.update(b"\0")
+        digest.update(child.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def prepare_provider_environment(
+    names: tuple[str, ...],
+    *,
+    sandbox_mode: str,
+) -> tuple[dict[str, str], tuple[tuple[Path, Path], ...]]:
+    environment = {
+        name: value
+        for name in names
+        if (value := os.environ.get(name)) is not None
+    }
+    path_names = (set(names) & _PATH_ENVIRONMENT_KINDS.keys()) | (
+        _BASE_ENVIRONMENT_NAMES & _PATH_ENVIRONMENT_KINDS.keys()
+    )
+    for name in path_names:
+        value = os.environ.get(name)
+        if value is not None:
+            environment[name] = value
+    mounts: list[tuple[Path, Path]] = []
+    for name in sorted(path_names):
+        kind = _PATH_ENVIRONMENT_KINDS[name]
+        value = environment.get(name)
+        if value is None:
+            continue
+        source = Path(value).expanduser()
+        if not source.is_absolute():
+            raise ValueError(f"OpenCode path environment variable {name} must be absolute")
+        try:
+            source = source.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise ValueError(
+                f"OpenCode path environment variable {name} does not resolve to an existing path"
+            ) from exc
+        if kind == "file" and not source.is_file():
+            raise ValueError(f"OpenCode path environment variable {name} must name a file")
+        if kind == "directory" and not source.is_dir():
+            raise ValueError(f"OpenCode path environment variable {name} must name a directory")
+        _path_content_fingerprint(source, kind)
+        if sandbox_mode == "bubblewrap":
+            target = _CREDENTIAL_MOUNT_ROOT / name
+            environment[name] = str(target)
+            mounts.append((source, target))
+    return environment, tuple(mounts)
+
+
+def provider_environment_fingerprint(
+    names: tuple[str, ...],
+    *,
+    sandbox_mode: str = "bubblewrap",
+) -> str:
+    environment, mounts = prepare_provider_environment(names, sandbox_mode=sandbox_mode)
+    mounted = {target.name: source for source, target in mounts}
+    digest = hashlib.sha256()
+    path_names = (set(names) & _PATH_ENVIRONMENT_KINDS.keys()) | (
+        _BASE_ENVIRONMENT_NAMES & _PATH_ENVIRONMENT_KINDS.keys()
+    )
+    for name in sorted(set(names) | path_names):
         digest.update(name.encode())
         digest.update(b"\0")
         value = os.environ.get(name)
         digest.update(b"present\0" if value is not None else b"absent\0")
         if value is not None:
-            digest.update(value.encode())
+            kind = _PATH_ENVIRONMENT_KINDS.get(name)
+            if kind is None:
+                digest.update(value.encode())
+            else:
+                source = mounted.get(name)
+                if source is None:
+                    source = Path(value).expanduser().resolve(strict=True)
+                    digest.update(str(source).encode())
+                    digest.update(b"\0")
+                else:
+                    digest.update(environment[name].encode())
+                    digest.update(b"\0")
+                digest.update(_path_content_fingerprint(source, kind).encode())
         digest.update(b"\0")
     return digest.hexdigest()
 
@@ -176,6 +331,7 @@ def _rollout_environment(
     bun_bin: Path,
     opencode_bin: Path,
     provider_env_names: tuple[str, ...],
+    provider_environment: dict[str, str] | None = None,
     extra_environment: dict[str, str] | None = None,
 ) -> dict[str, str]:
     env = {
@@ -188,10 +344,12 @@ def _rollout_environment(
             [str(bun_bin.parent), str(opencode_bin.parent), "/usr/local/bin", "/usr/bin", "/bin"]
         )
     )
-    for name in provider_env_names:
-        value = os.environ.get(name)
-        if value is not None:
-            env[name] = value
+    if provider_environment is None:
+        provider_environment, _ = prepare_provider_environment(
+            provider_env_names,
+            sandbox_mode="unsafe-none",
+        )
+    env.update(provider_environment)
     if extra_environment:
         env.update(extra_environment)
     env.setdefault("LANG", "C.UTF-8")
@@ -260,6 +418,15 @@ def _durable_request(request: dict[str, Any]) -> dict[str, Any]:
             server["env"] = {key: {"redacted": True} for key in env}
     if "auth_file" in durable:
         durable["auth_file"] = {"configured": True}
+    if "spawn_child_handler_command" in durable:
+        durable["spawn_child_handler_command"] = {"configured": True}
+    sandbox = durable.get("sandbox")
+    if isinstance(sandbox, dict) and "read_only_mounts" in sandbox:
+        sandbox["read_only_mounts"] = [
+            {"target": mount.get("target"), "source": {"redacted": True}}
+            for mount in sandbox["read_only_mounts"]
+            if isinstance(mount, dict)
+        ]
     if "test_provider_config" in durable:
         durable["test_provider_config"] = {"configured": True, "redacted": True}
     return durable
@@ -293,14 +460,26 @@ def _scrub_durable_value(value: Any, *, preserve_text: bool = False) -> Any:
 def _durable_event(event: dict[str, Any]) -> dict[str, Any]:
     name = event.get("event")
     if name == "error":
-        code = re.sub(r"[^A-Za-z0-9_.-]", "_", str(event.get("error_code") or "unknown"))[:128]
+        code = normalize_error_code(event.get("error_code"))
         return {
-            **{key: value for key, value in event.items() if key != "error_message"},
+            **{
+                key: value
+                for key, value in event.items()
+                if key not in {"error_code", "error_message"}
+            },
+            "error_code": code,
             "error_message": f"OpenCode request failed ({code})",
         }
     if name in {"agent_message", "turn_complete"}:
         return _scrub_durable_value(event, preserve_text=True)
     return _scrub_durable_value(event)
+
+
+def normalize_error_code(value: object) -> str:
+    raw = value if isinstance(value, str) else str(value) if isinstance(value, int) else ""
+    if raw in _DURABLE_ERROR_CODES:
+        return raw
+    return "unknown"
 
 
 def run_opencode_rollout(
@@ -325,10 +504,12 @@ def run_opencode_rollout(
     allowed_bun_versions: tuple[str, ...] = SOURCE_AUDITED_BUN_VERSIONS,
     startup_timeout_seconds: int = 15,
     provider_env_names: tuple[str, ...] = (),
+    provider_environment: dict[str, str] | None = None,
     sandbox_mode: str = "bubblewrap",
     sandbox_network: str = "allow",
     bubblewrap_bin: Path | None = None,
     sandbox_read_only_roots: tuple[Path, ...] = (),
+    sandbox_read_only_mounts: tuple[tuple[Path, Path], ...] = (),
     sandbox_writable_roots: tuple[Path, ...] = (),
     sandbox_masked_paths: tuple[Path, ...] = (),
     extra_environment: dict[str, str] | None = None,
@@ -336,6 +517,12 @@ def run_opencode_rollout(
     progress_callback: Callable[..., None] | None = None,
 ) -> dict[str, Any]:
     runtime_root = _private_runtime_root(worker_state_dir)
+    if provider_environment is None:
+        provider_environment, inferred_mounts = prepare_provider_environment(
+            provider_env_names,
+            sandbox_mode=sandbox_mode,
+        )
+        sandbox_read_only_mounts = (*sandbox_read_only_mounts, *inferred_mounts)
     control_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(control_dir, 0o700)
     request_path = control_dir / "opencode_runner.request.json"
@@ -364,6 +551,13 @@ def run_opencode_rollout(
                 else None
             ),
             "read_only_roots": [str(path.expanduser().resolve()) for path in sandbox_read_only_roots],
+            "read_only_mounts": [
+                {
+                    "source": str(source.expanduser().resolve()),
+                    "target": str(target),
+                }
+                for source, target in sandbox_read_only_mounts
+            ],
             "writable_roots": [str(path.expanduser().resolve()) for path in sandbox_writable_roots],
             "masked_paths": [
                 str(path.expanduser().resolve())
@@ -409,6 +603,7 @@ def run_opencode_rollout(
         "runtime_version": "",
         "bun_version": "",
         "runtime_process_pid": None,
+        "mcp_process_pids": [],
         "malformed_output": False,
     }
     started_at = time.monotonic()
@@ -428,6 +623,7 @@ def run_opencode_rollout(
                     bun_bin=bun_bin,
                     opencode_bin=opencode_bin,
                     provider_env_names=provider_env_names,
+                    provider_environment=provider_environment,
                     extra_environment=extra_environment,
                 ),
                 stdin=subprocess.PIPE,
@@ -499,6 +695,7 @@ def run_opencode_rollout(
         "stderr_path": str(stderr_path),
         "events_path": str(events_path),
         "isolated_state_cleaned": not runtime_root.exists(),
+        "mcp_process_pids": list(state["mcp_process_pids"]),
     }
     if timed_out:
         return {
@@ -577,6 +774,10 @@ def _handle_runner_line(
     elif name == "runtime_process_started":
         pid = event.get("pid")
         state["runtime_process_pid"] = pid if isinstance(pid, int) else None
+    elif name == "mcp_process_started":
+        pid = event.get("pid")
+        if isinstance(pid, int) and pid > 1:
+            state.setdefault("mcp_process_pids", []).append(pid)
     elif name == "thread_started":
         state["thread_id"] = str(event.get("thread_id") or "")
         state["session_id"] = str(event.get("session_id") or "")

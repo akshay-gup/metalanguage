@@ -43,7 +43,9 @@ from utils.opencode_runner import (
     SOURCE_AUDITED_OPENCODE_VERSIONS,
     executable_version,
     file_sha256,
+    opencode_python_fingerprint,
     opencode_worker_fingerprint,
+    prepare_provider_environment,
     provider_environment_fingerprint,
     provider_environment_names,
     resolve_bubblewrap_bin,
@@ -51,6 +53,7 @@ from utils.opencode_runner import (
     resolve_opencode_bin,
     resolve_opencode_worker_script,
     run_opencode_rollout,
+    text_sha256,
 )
 from utils.openrouter import (
     OpenRouterAPIError,
@@ -372,7 +375,9 @@ def _resolve_spawn_workspace_dir(context: dict[str, Any], workspace_dir: str | N
     return candidate, None
 
 
-def _write_continuation_context(context: dict[str, Any], control_dir: Path) -> Path:
+def _write_continuation_context(
+    context: dict[str, Any], control_dir: Path
+) -> Path:
     control_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(control_dir, 0o700)
     context_path = control_dir / CONTINUATION_CONTEXT_FILENAME
@@ -981,6 +986,7 @@ def _worker_backend_resume_compatible(
             "opencode_bun_version": getattr(args, "_opencode_bun_version", None),
             "opencode_bun_sha256": getattr(args, "_opencode_bun_sha256", None),
             "opencode_worker_sha256": getattr(args, "_opencode_worker_sha256", None),
+            "opencode_python_sha256": getattr(args, "_opencode_python_sha256", None),
             "opencode_auth_sha256": getattr(args, "_opencode_auth_sha256", None),
             "opencode_provider_env_sha256": getattr(
                 args, "_opencode_provider_env_sha256", None
@@ -991,12 +997,38 @@ def _worker_backend_resume_compatible(
             "opencode_server_startup_timeout_seconds": getattr(
                 args, "opencode_server_startup_timeout_seconds", 15
             ),
+            "opencode_worker_timeout_seconds": getattr(
+                args, "worker_timeout_seconds", DEFAULT_WORKER_TIMEOUT_SECONDS
+            ),
             "opencode_sandbox_mode": getattr(args, "opencode_sandbox_mode", "bubblewrap"),
             "opencode_network_mode": getattr(args, "opencode_network_mode", "allow"),
+            "opencode_bubblewrap_bin": getattr(args, "_opencode_bubblewrap_bin", None),
+            "opencode_bubblewrap_version": getattr(
+                args, "_opencode_bubblewrap_version", None
+            ),
+            "opencode_bubblewrap_sha256": getattr(
+                args, "_opencode_bubblewrap_sha256", None
+            ),
+            "opencode_system_instructions_sha256": getattr(
+                args, "_opencode_system_instructions_sha256", None
+            ),
+            "opencode_configured_initial_prompt_sha256": getattr(
+                args, "_opencode_configured_initial_prompt_sha256", None
+            ),
             "opencode_provider_env_names": list(
                 getattr(args, "_opencode_provider_env_names", ())
             ),
         }
+        effective_prompt_sha256 = record.get(
+            "opencode_effective_initial_prompt_sha256"
+        )
+        prompt_identity_matches = isinstance(effective_prompt_sha256, str) and bool(
+            effective_prompt_sha256
+        )
+        if record.get("bootstrap_seed_used") is True:
+            prompt_identity_matches = effective_prompt_sha256 == getattr(
+                args, "_opencode_configured_initial_prompt_sha256", None
+            )
         return (
             record.get("opencode_base_instructions_mode", "opencode")
             == args.opencode_base_instructions_mode
@@ -1024,6 +1056,7 @@ def _worker_backend_resume_compatible(
                 or Path(record["opencode_bun_bin"]).resolve() == expected_bun_bin
             )
             and all(record.get(key) == value for key, value in expected_fingerprint.items())
+            and prompt_identity_matches
         )
     return True
 
@@ -1718,7 +1751,17 @@ def run_opencode_worker(
     agent: str | None = None,
     variant: str | None = None,
     allowed_versions: tuple[str, ...] = SOURCE_AUDITED_OPENCODE_VERSIONS,
+    allowed_bun_versions: tuple[str, ...] = SOURCE_AUDITED_BUN_VERSIONS,
     startup_timeout_seconds: int = 15,
+    provider_env_names: tuple[str, ...] = (),
+    provider_environment: dict[str, str] | None = None,
+    sandbox_mode: str = "bubblewrap",
+    sandbox_network: str = "allow",
+    bubblewrap_bin: Path | None = None,
+    sandbox_read_only_roots: tuple[Path, ...] = (),
+    sandbox_read_only_mounts: tuple[tuple[Path, Path], ...] = (),
+    sandbox_writable_roots: tuple[Path, ...] = (),
+    sandbox_masked_paths: tuple[Path, ...] = (),
     progress_callback: Any = None,
 ) -> WorkerResult:
     """Run one rollout through the Metalanguage-owned TypeScript/Bun worker."""
@@ -1741,7 +1784,17 @@ def run_opencode_worker(
         agent=agent,
         variant=variant,
         allowed_versions=allowed_versions,
+        allowed_bun_versions=allowed_bun_versions,
         startup_timeout_seconds=startup_timeout_seconds,
+        provider_env_names=provider_env_names,
+        provider_environment=provider_environment,
+        sandbox_mode=sandbox_mode,
+        sandbox_network=sandbox_network,
+        bubblewrap_bin=bubblewrap_bin,
+        sandbox_read_only_roots=sandbox_read_only_roots,
+        sandbox_read_only_mounts=sandbox_read_only_mounts,
+        sandbox_writable_roots=sandbox_writable_roots,
+        sandbox_masked_paths=sandbox_masked_paths,
         progress_callback=progress_callback,
     )
     metadata = {
@@ -1754,6 +1807,7 @@ def run_opencode_worker(
             "stderr_path",
             "events_path",
             "isolated_state_cleaned",
+            "mcp_process_pids",
         ]
         if result.get(key) is not None
     }
@@ -2401,6 +2455,14 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
     opencode_auth_sha256: str | None = None
     opencode_provider_env_names: tuple[str, ...] = ()
     opencode_provider_env_sha256: str | None = None
+    opencode_provider_environment: dict[str, str] | None = None
+    opencode_credential_mounts: tuple[tuple[Path, Path], ...] = ()
+    opencode_python_sha256: str | None = None
+    opencode_bubblewrap_version: str | None = None
+    opencode_bubblewrap_sha256: str | None = None
+    opencode_system_instructions: str | None = None
+    opencode_system_instructions_sha256: str | None = None
+    opencode_configured_initial_prompt_sha256: str | None = None
     if args.worker_backend == "opencode":
         if not opencode_allowed_versions:
             raise ValueError("--opencode-allowed-versions must contain at least one version")
@@ -2428,6 +2490,8 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             opencode_bubblewrap_bin = resolve_bubblewrap_bin(
                 Path(args.opencode_bubblewrap_bin)
             )
+            opencode_bubblewrap_version = executable_version(opencode_bubblewrap_bin)
+            opencode_bubblewrap_sha256 = file_sha256(opencode_bubblewrap_bin)
         opencode_runtime_version = executable_version(opencode_bin)
         opencode_bun_version = executable_version(opencode_bun_bin)
         if opencode_runtime_version not in opencode_allowed_versions:
@@ -2445,18 +2509,47 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
         opencode_provider_env_names = provider_environment_names(
             args.model, tuple(args.opencode_provider_env)
         )
+        opencode_provider_environment, opencode_credential_mounts = (
+            prepare_provider_environment(
+                opencode_provider_env_names,
+                sandbox_mode=args.opencode_sandbox_mode,
+            )
+        )
         opencode_provider_env_sha256 = provider_environment_fingerprint(
-            opencode_provider_env_names
+            opencode_provider_env_names,
+            sandbox_mode=args.opencode_sandbox_mode,
+        )
+        opencode_python_sha256 = opencode_python_fingerprint(Path(__file__))
+        opencode_system_instructions = resolve_opencode_system_instructions(
+            args.opencode_base_instructions_mode
+        )
+        opencode_system_instructions_sha256 = text_sha256(
+            opencode_system_instructions
+        )
+        opencode_configured_initial_prompt_sha256 = text_sha256(
+            args.opencode_initial_prompt
         )
         args._opencode_runtime_version = opencode_runtime_version
         args._opencode_bin_sha256 = opencode_bin_sha256
         args._opencode_bun_version = opencode_bun_version
         args._opencode_bun_sha256 = opencode_bun_sha256
         args._opencode_worker_sha256 = opencode_worker_sha256
+        args._opencode_python_sha256 = opencode_python_sha256
         args._opencode_auth_sha256 = opencode_auth_sha256
         args._opencode_provider_env_names = opencode_provider_env_names
         args._opencode_provider_env_sha256 = opencode_provider_env_sha256
         args._opencode_allowed_bun_versions = opencode_allowed_bun_versions
+        args._opencode_bubblewrap_bin = (
+            str(opencode_bubblewrap_bin) if opencode_bubblewrap_bin is not None else None
+        )
+        args._opencode_bubblewrap_version = opencode_bubblewrap_version
+        args._opencode_bubblewrap_sha256 = opencode_bubblewrap_sha256
+        args._opencode_system_instructions_sha256 = (
+            opencode_system_instructions_sha256
+        )
+        args._opencode_configured_initial_prompt_sha256 = (
+            opencode_configured_initial_prompt_sha256
+        )
 
     runtime_root = _resolve_runtime_root(args.runtime_root)
     _claim_runtime_benchmark(runtime_root, args.benchmark)
@@ -2693,6 +2786,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             instance_uuid = task_instance_uuids[rollout_index]
             rollout_control_dir = runtime_root / "logs" / "rollout_control" / instance_uuid
             rollout_state_dir = runtime_root / "logs" / "rollout_state" / instance_uuid
+            opencode_mcp_control_dir = rollout_control_dir / "mcp"
             rollout_live_peer_instances = [
                 peer
                 for peer in live_peer_instances
@@ -2785,7 +2879,10 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 if not bootstrap_seed_dir.exists():
                     raise RuntimeError(f"Bootstrap seed directory does not exist: {bootstrap_seed_dir}")
                 copy_seed_workspace(bootstrap_seed_dir, temp_dir)
-                rollout_initial_prompt = _format_bootstrap_seed_prompt(bootstrap_seed_dir)
+                if args.worker_backend != "opencode":
+                    rollout_initial_prompt = _format_bootstrap_seed_prompt(
+                        bootstrap_seed_dir
+                    )
 
             seed_output_dir = temp_dir / "seed_output"
             seed_output_dir.mkdir(parents=True, exist_ok=True)
@@ -2836,7 +2933,11 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 codex_initial_prompt=args.codex_initial_prompt,
                 codex_base_instructions=codex_base_instructions,
             )
-            planned_context_path = rollout_control_dir / CONTINUATION_CONTEXT_FILENAME
+            planned_context_path = (
+                opencode_mcp_control_dir / CONTINUATION_CONTEXT_FILENAME
+                if args.worker_backend == "opencode"
+                else rollout_control_dir / CONTINUATION_CONTEXT_FILENAME
+            )
             rollout_benchmark = benchmark_driver.prepare_rollout(
                 prepared_benchmark_batch,
                 backend=args.worker_backend,
@@ -2883,6 +2984,14 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 if args.worker_backend in {"codex", "opencode"}
                 else None
             )
+            opencode_mcp_context_path = (
+                _write_continuation_context(
+                    continuation_context,
+                    opencode_mcp_control_dir,
+                )
+                if args.worker_backend == "opencode"
+                else None
+            )
             _progress(
                 "workspace_prepared",
                 working_directory=str(temp_dir),
@@ -2924,6 +3033,16 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 opencode_system_instructions_chars=(
                     len(opencode_system_instructions)
                     if opencode_system_instructions is not None
+                    else None
+                ),
+                opencode_system_instructions_sha256=(
+                    text_sha256(opencode_system_instructions)
+                    if args.worker_backend == "opencode"
+                    else None
+                ),
+                opencode_effective_initial_prompt_sha256=(
+                    text_sha256(rollout_initial_prompt)
+                    if args.worker_backend == "opencode"
                     else None
                 ),
                 bootstrap_seed_used=bootstrap_seed_used,
@@ -2989,6 +3108,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                                 args.opencode_server_startup_timeout_seconds
                             ),
                             provider_env_names=opencode_provider_env_names,
+                            provider_environment=opencode_provider_environment,
                             sandbox_mode=(
                                 "bubblewrap"
                                 if args.opencode_sandbox_mode == "bubblewrap"
@@ -2996,20 +3116,31 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                             ),
                             sandbox_network=args.opencode_network_mode,
                             bubblewrap_bin=opencode_bubblewrap_bin,
-                            sandbox_read_only_roots=(
-                                PROJECT_ROOT,
-                                seed_output_dir,
-                                shared_workspace_dir,
+                            sandbox_read_only_roots=tuple(
+                                path
+                                for path in (
+                                    PROJECT_ROOT,
+                                    seed_output_dir,
+                                    task_store_dir,
+                                )
+                                if path.exists()
+                            ),
+                            sandbox_read_only_mounts=(
+                                *opencode_credential_mounts,
+                                *tuple(
+                                    (path, path)
+                                    for path in opencode_mcp_control_dir.glob("*.json")
+                                    if path.is_file()
+                                ),
                             ),
                             sandbox_writable_roots=tuple(
                                 path
                                 for path in (
-                                    temp_dir,
-                                    rollout_control_dir,
-                                    rollout_state_dir,
+                                    archive_worktree.path,
                                     archive_repo_dir / ".git",
-                                    rollout_root,
-                                    progress_log_path,
+                                    shared_workspace_dir,
+                                    opencode_mcp_control_dir,
+                                    rollout_state_dir / "arc_agi",
                                     benchmark_events_path,
                                 )
                                 if path is not None and path.exists()
@@ -3315,10 +3446,16 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 "opencode_bun_version": opencode_bun_version,
                 "opencode_bun_sha256": opencode_bun_sha256,
                 "opencode_worker_sha256": opencode_worker_sha256,
+                "opencode_python_sha256": opencode_python_sha256,
                 "opencode_auth_sha256": opencode_auth_sha256,
                 "opencode_provider_env_sha256": opencode_provider_env_sha256,
                 "opencode_server_startup_timeout_seconds": (
                     args.opencode_server_startup_timeout_seconds
+                    if args.worker_backend == "opencode"
+                    else None
+                ),
+                "opencode_worker_timeout_seconds": (
+                    args.worker_timeout_seconds
                     if args.worker_backend == "opencode"
                     else None
                 ),
@@ -3327,6 +3464,29 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 ),
                 "opencode_network_mode": (
                     args.opencode_network_mode if args.worker_backend == "opencode" else None
+                ),
+                "opencode_bubblewrap_bin": (
+                    str(opencode_bubblewrap_bin)
+                    if args.worker_backend == "opencode"
+                    and opencode_bubblewrap_bin is not None
+                    else None
+                ),
+                "opencode_bubblewrap_version": opencode_bubblewrap_version,
+                "opencode_bubblewrap_sha256": opencode_bubblewrap_sha256,
+                "opencode_system_instructions_sha256": (
+                    text_sha256(opencode_system_instructions)
+                    if args.worker_backend == "opencode"
+                    else None
+                ),
+                "opencode_configured_initial_prompt_sha256": (
+                    opencode_configured_initial_prompt_sha256
+                    if args.worker_backend == "opencode"
+                    else None
+                ),
+                "opencode_effective_initial_prompt_sha256": (
+                    text_sha256(rollout_initial_prompt)
+                    if args.worker_backend == "opencode"
+                    else None
                 ),
                 "opencode_provider_env_names": (
                     list(opencode_provider_env_names)
