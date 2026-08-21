@@ -6,6 +6,7 @@ import {
   translateMcp,
   type McpServerInput,
 } from "./protocol.ts"
+import { finalAssistantText } from "./worker.ts"
 import { runHandler, SYSTEM_PLUGIN_SOURCE, TOOL_SOURCE } from "./spawn_bridge.ts"
 
 function mcpServer(): McpServerInput {
@@ -88,6 +89,10 @@ describe("OpenCode native protocol adapter", () => {
     const events = [
       { type: "session.status", properties: { sessionID: "ses_test", status: { type: "busy" } } },
       {
+        type: "message.updated",
+        properties: { info: { id: "msg_parent", sessionID: "ses_test", role: "assistant" } },
+      },
+      {
         type: "message.part.updated",
         properties: {
           part: {
@@ -120,6 +125,7 @@ describe("OpenCode native protocol adapter", () => {
         properties: {
           part: {
             id: "part_text",
+            messageID: "msg_parent",
             sessionID: "ses_test",
             type: "text",
             text: "parent continued",
@@ -163,11 +169,115 @@ describe("OpenCode native protocol adapter", () => {
       type: "session.error",
       properties: {
         sessionID: "ses_test",
-        error: { name: "ProviderAuthError", data: { message: "authentication failed" } },
+        error: { name: "ProviderAuthError", data: { message: "authentication failed sk-PRIVATE" } },
       },
     })
     expect(failed.terminal).toBe("error")
-    expect(normalizer.error).toEqual(["ProviderAuthError", "authentication failed"])
+    expect(normalizer.error).toEqual([
+      "ProviderAuthError",
+      "OpenCode request failed (ProviderAuthError)",
+    ])
+    expect(JSON.stringify(failed.events)).not.toContain("PRIVATE")
+  })
+
+  test("selects only the final assistant message in production event order", () => {
+    const normalizer = new EventNormalizer("ses_test", new Set())
+    const events = [
+      { type: "message.updated", properties: { info: { id: "u1", sessionID: "ses_test", role: "user" } } },
+      {
+        type: "message.part.updated",
+        properties: { part: { id: "up", messageID: "u1", sessionID: "ses_test", type: "text", text: "USER" } },
+      },
+      {
+        type: "message.updated",
+        properties: { info: { id: "a1", sessionID: "ses_test", role: "assistant" } },
+      },
+      {
+        type: "message.part.updated",
+        properties: {
+          part: {
+            id: "ap1",
+            messageID: "a1",
+            sessionID: "ses_test",
+            type: "text",
+            text: "INTERMEDIATE",
+            time: { start: 1, end: 2 },
+          },
+        },
+      },
+      { type: "session.status", properties: { sessionID: "ses_test", status: { type: "retry" } } },
+      {
+        type: "message.updated",
+        properties: { info: { id: "a2", sessionID: "ses_test", role: "assistant" } },
+      },
+      {
+        type: "message.part.updated",
+        properties: {
+          part: {
+            id: "ap2",
+            messageID: "a2",
+            sessionID: "ses_test",
+            type: "text",
+            text: "FINAL",
+            time: { start: 3, end: 4 },
+          },
+        },
+      },
+    ]
+    for (const event of events) normalizer.handle(event)
+    expect(normalizer.finalText()).toBe("FINAL")
+  })
+
+  test("selects the last assistant from the synchronous message list", () => {
+    const messages = [
+      {
+        info: { id: "u1", role: "user" },
+        parts: [{ id: "up", messageID: "u1", type: "text", text: "USER" }],
+      },
+      {
+        info: { id: "a1", role: "assistant" },
+        parts: [{ id: "ap1", messageID: "a1", type: "text", text: "INTERMEDIATE" }],
+      },
+      {
+        info: { id: "a2", role: "assistant" },
+        parts: [{ id: "tool", messageID: "a2", type: "tool" }],
+      },
+      {
+        info: { id: "a3", role: "assistant" },
+        parts: [{ id: "ap3", messageID: "a3", type: "text", text: "FINAL" }],
+      },
+    ]
+    expect(finalAssistantText(messages as never)).toBe("FINAL")
+    expect(
+      finalAssistantText(
+        [
+          ...messages,
+          {
+            info: { id: "a4", role: "assistant" },
+            parts: [{ id: "tool-final", messageID: "a4", type: "tool" }],
+          },
+        ] as never,
+      ),
+    ).toBe("")
+  })
+
+  test("malformed SSE errors and generic scrubber do not retain secrets", () => {
+    const decoder = new SseDecoder()
+    let message = ""
+    try {
+      decoder.push(
+        new TextEncoder().encode('data: {"credential":"sk-PRIVATE-MALFORMED"\n\n'),
+      )
+    } catch (error) {
+      message = String(error)
+    }
+    expect(message).toContain("malformed OpenCode SSE JSON")
+    expect(message).not.toContain("PRIVATE")
+    const unknown = new EventNormalizer("ses_test", new Set()).handle({
+      type: "future.event",
+      properties: { secret: "sk-PRIVATE-UNKNOWN" },
+    })
+    expect(unknown).toEqual({ events: [], terminal: "continue" })
   })
 
   test("config-scoped sources expose exact tool and system hooks", () => {

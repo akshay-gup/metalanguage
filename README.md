@@ -235,6 +235,15 @@ normalizing the result. `spawn_child` is an isolated config-scoped tool that
 synchronously calls the existing Python supervisor; its result returns to the
 same parent turn.
 
+The default Linux launcher uses bubblewrap with a private PID namespace,
+read-only source/seed/shared roots, explicit writable rollout roots, a private
+`/tmp`, and parent-death cleanup. Benchmark modes fail closed if bubblewrap is
+disabled. Network remains explicitly enabled because the private HTTP server
+boundary and provider calls cannot currently operate in a separate network
+namespace; `--opencode-network-mode none` therefore fails closed. The
+`unsafe-none` mode is available only for trusted open-ended work and is named
+to avoid implying containment.
+
 The audited OpenCode API reports MCP connection status but does not enumerate
 MCP tool IDs. The runner validates required connectivity and fails closed on
 empty/invalid allowlists; unlisted tools are denied at execution time. SuperGPQA
@@ -242,12 +251,37 @@ and ARC use OpenCode's native MCP client, including its image-attachment path.
 
 Useful flags include `--opencode-bin`, `--opencode-bun-bin`,
 `--opencode-worker-script`, `--opencode-auth-file`, `--opencode-agent`,
-`--opencode-variant`, `--opencode-allowed-versions`, and
+`--opencode-variant`, `--opencode-allowed-versions`,
+`--opencode-allowed-bun-versions`, `--opencode-provider-env`, and
 `--opencode-base-instructions-mode read-readme|opencode`. Provider environment
-credentials are inherited; an auth file is read-only and copied into each
-isolated process through `OPENCODE_AUTH_CONTENT`.
+credentials are selected from a reviewed provider-specific allowlist; additional
+names must be explicit. Unrelated host environment variables are not inherited.
+An auth file is read-only and copied into each isolated process through
+`OPENCODE_AUTH_CONTENT`. Resume compatibility fingerprints the OpenCode and Bun
+binaries/versions, worker sources, relevant provider/auth inputs, and startup
+and sandbox settings.
 
-OpenCode permission rules are not an OS sandbox. This backend does not provide
-the Codex runner's filesystem writable-root or network containment guarantees;
-use an external Linux sandbox before treating OpenCode as hostile-code
-containment.
+Stdio MCP commands run through a bundled proxy that gives the actual MCP child
+only the private HOME/XDG/temp base plus that server's explicitly configured
+environment. OpenCode server credentials, auth content, and provider keys are
+not forwarded unless the same name is explicitly configured for that MCP child.
+
+Private config roots contain a dependency declaration, matching root lock entry,
+and an empty `node_modules` directory for the pinned OpenCode plugin version.
+OpenCode's source then skips its detached dependency installer; npm is also
+forced offline, so rollout startup cannot download config/plugin dependencies.
+
+Assistant final prose is intentionally preserved in durable `WorkerResult`
+output. Generic redaction protects protocol failures and sensitive MCP events,
+but cannot soundly guarantee that a model will not repeat a benchmark answer in
+ordinary prose. Benchmark answer privacy must therefore rely on tool-specific
+redaction and benchmark policy, not semantic guessing over assistant text.
+
+Bubblewrap materially limits filesystem and process access, but network access
+is still allowed and the rollout root needed by lineage callbacks is writable.
+Provider credentials necessarily remain in the OpenCode server environment and
+upstream native shell execution inherits that environment; this is another
+reason not to treat the backend as safe for credential-hostile prompts.
+This is not strict Codex-equivalent hostile-code containment; hostile-worker use
+must remain disabled until a sound network boundary and narrower callback write
+surface are available.

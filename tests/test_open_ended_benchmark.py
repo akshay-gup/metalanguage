@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from main_loop import (
+    _validate_opencode_containment,
     _create_benchmark_driver,
     _format_runtime_markdown,
     _runtime_benchmark,
@@ -37,6 +38,14 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
         self.assertEqual(args.benchmark, "open-ended")
         self.assertEqual(args.task_file, "task.md")
 
+    def test_opencode_containment_modes_fail_closed_for_benchmarks(self) -> None:
+        _validate_opencode_containment("open-ended", "unsafe-none", "allow")
+        _validate_opencode_containment("supergpqa", "bubblewrap", "allow")
+        with self.assertRaisesRegex(RuntimeError, "require.*bubblewrap"):
+            _validate_opencode_containment("supergpqa", "unsafe-none", "allow")
+        with self.assertRaisesRegex(RuntimeError, "fail-closed"):
+            _validate_opencode_containment("open-ended", "bubblewrap", "none")
+
     def test_cli_accepts_opencode_backend_and_protocol_defaults(self) -> None:
         with patch(
             "sys.argv",
@@ -46,6 +55,10 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
         self.assertEqual(args.worker_backend, "opencode")
         self.assertEqual(args.opencode_base_instructions_mode, "read-readme")
         self.assertIn("1.18.18", args.opencode_allowed_versions)
+        self.assertEqual(args.opencode_allowed_bun_versions, "1.3.14")
+        self.assertEqual(args.opencode_sandbox_mode, "bubblewrap")
+        self.assertEqual(args.opencode_network_mode, "allow")
+        self.assertEqual(args.opencode_provider_env, [])
         self.assertIsNone(args.opencode_worker_script)
         self.assertIsNone(args.opencode_bun_bin)
 
@@ -68,17 +81,61 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
             opencode_base_instructions_mode="read-readme",
             opencode_agent="build",
             opencode_variant=None,
+            opencode_server_startup_timeout_seconds=15,
+            opencode_sandbox_mode="bubblewrap",
+            opencode_network_mode="allow",
+            _opencode_runtime_version="1.18.19",
+            _opencode_bin_sha256="opencode-sha",
+            _opencode_bun_version="1.3.14",
+            _opencode_bun_sha256="bun-sha",
+            _opencode_worker_sha256="worker-sha",
+            _opencode_auth_sha256=None,
+            _opencode_provider_env_names=("OPENAI_API_KEY",),
+            _opencode_provider_env_sha256="provider-env-sha",
+            _opencode_allowed_bun_versions=("1.3.14",),
         )
         record = {
             "worker_backend": "opencode",
             "opencode_base_instructions_mode": "read-readme",
             "opencode_agent": "build",
             "opencode_variant": None,
+            "opencode_runtime_version": "1.18.19",
+            "opencode_bin_sha256": "opencode-sha",
+            "opencode_bun_version": "1.3.14",
+            "opencode_bun_sha256": "bun-sha",
+            "opencode_worker_sha256": "worker-sha",
+            "opencode_auth_sha256": None,
+            "opencode_provider_env_sha256": "provider-env-sha",
+            "opencode_allowed_bun_versions": ["1.3.14"],
+            "opencode_server_startup_timeout_seconds": 15,
+            "opencode_sandbox_mode": "bubblewrap",
+            "opencode_network_mode": "allow",
+            "opencode_provider_env_names": ["OPENAI_API_KEY"],
         }
         self.assertTrue(_worker_backend_resume_compatible(record, args))
         self.assertFalse(
             _worker_backend_resume_compatible(
                 {**record, "opencode_variant": "high"}, args
+            )
+        )
+        self.assertFalse(
+            _worker_backend_resume_compatible(
+                {**record, "opencode_worker_sha256": "changed"}, args
+            )
+        )
+        self.assertFalse(
+            _worker_backend_resume_compatible(
+                {**record, "opencode_server_startup_timeout_seconds": 99}, args
+            )
+        )
+        self.assertFalse(
+            _worker_backend_resume_compatible(
+                {**record, "opencode_provider_env_sha256": "changed"}, args
+            )
+        )
+        self.assertFalse(
+            _worker_backend_resume_compatible(
+                {**record, "opencode_allowed_bun_versions": ["1.3.13"]}, args
             )
         )
         self.assertFalse(
