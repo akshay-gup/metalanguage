@@ -261,6 +261,7 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "requires --worker-backend codex"):
                 _validate_benchmark_backend("arc-agi", "openrouter")
             _validate_benchmark_backend("arc-agi", "codex")
+            _validate_benchmark_backend("arc-agi", "opencode")
 
             environment = {
                 key: value
@@ -282,6 +283,25 @@ class ArcAgiBenchmarkTests(unittest.TestCase):
                     driver.prepare_batch(0, Path(temp) / "shared")
             self.assertEqual(launcher.calls, 1)
             self.assertEqual(launcher.servers[0].terminate_calls, 1)
+            driver.close()
+
+    def test_opencode_rollout_uses_exact_arc_mcp_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            driver, _ = self._driver(root)
+            batch = driver.prepare_batch(0, root / "shared")
+            rollout = driver.prepare_rollout(
+                batch,
+                backend="opencode",
+                context=_supervisor_context(root, "opencode-rollout"),
+            )
+            config = rollout.mcp_servers["arc_agi"]
+            self.assertEqual(config["enabled_tools"], list(ARC_TOOL_NAMES))
+            self.assertEqual(config["default_tools_approval_mode"], "approve")
+            self.assertEqual(
+                rollout.model_metadata["tool_names"],
+                [f"mcp__arc_agi__{name}" for name in ARC_TOOL_NAMES],
+            )
             driver.close()
 
     def test_private_rollout_context_exact_mcp_config_and_isolation(self) -> None:

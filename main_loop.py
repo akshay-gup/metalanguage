@@ -38,6 +38,13 @@ from utils.benchmark_driver import (
     active_benchmark_item,
 )
 from utils.codex_runner import resolve_codex_runner_bin, run_codex_rollout
+from utils.opencode_runner import (
+    SOURCE_AUDITED_OPENCODE_VERSIONS,
+    resolve_bun_bin,
+    resolve_opencode_bin,
+    resolve_opencode_worker_script,
+    run_opencode_rollout,
+)
 from utils.openrouter import (
     OpenRouterAPIError,
     bash_tool,
@@ -909,10 +916,72 @@ def _create_benchmark_driver(
 
 
 def _validate_benchmark_backend(benchmark: str, worker_backend: str) -> None:
-    if benchmark == "arc-agi" and worker_backend != "codex":
+    if benchmark == "arc-agi" and worker_backend not in {"codex", "opencode"}:
         raise SystemExit(
-            "error: --benchmark arc-agi currently requires --worker-backend codex"
+            "error: --benchmark arc-agi currently requires --worker-backend codex or opencode"
         )
+
+
+def _worker_backend_resume_compatible(
+    record: dict[str, Any], args: argparse.Namespace
+) -> bool:
+    if record.get("worker_backend", "openrouter") != args.worker_backend:
+        return False
+    if args.worker_backend == "codex":
+        return record.get("codex_base_instructions_mode", "codex") == (
+            args.codex_base_instructions_mode
+        )
+    if args.worker_backend == "opencode":
+        allowed_versions = tuple(
+            version.strip()
+            for version in getattr(
+                args,
+                "opencode_allowed_versions",
+                ",".join(SOURCE_AUDITED_OPENCODE_VERSIONS),
+            ).split(",")
+            if version.strip()
+        )
+        expected_worker_script = resolve_opencode_worker_script(
+            Path(args.opencode_worker_script)
+            if getattr(args, "opencode_worker_script", None)
+            else None
+        )
+        expected_bun_bin = resolve_bun_bin(
+            Path(args.opencode_bun_bin)
+            if getattr(args, "opencode_bun_bin", None)
+            else None
+        )
+        recorded_worker_script = record.get("opencode_worker_script")
+        if recorded_worker_script is None:
+            recorded_worker_script = record.get("opencode_runner_bin")
+        return (
+            record.get("opencode_base_instructions_mode", "opencode")
+            == args.opencode_base_instructions_mode
+            and record.get("opencode_agent") == args.opencode_agent
+            and record.get("opencode_variant") == args.opencode_variant
+            and tuple(
+                record.get(
+                    "opencode_allowed_versions",
+                    SOURCE_AUDITED_OPENCODE_VERSIONS,
+                )
+            )
+            == allowed_versions
+            and record.get("opencode_auth_source", "environment")
+            == (
+                "file"
+                if getattr(args, "opencode_auth_file", None)
+                else "environment"
+            )
+            and (
+                recorded_worker_script is None
+                or Path(recorded_worker_script).resolve() == expected_worker_script
+            )
+            and (
+                record.get("opencode_bun_bin") is None
+                or Path(record["opencode_bun_bin"]).resolve() == expected_bun_bin
+            )
+        )
+    return True
 
 
 def _ensure_runtime_bootstrap_seed(bootstrap_seed_dir: Path) -> None:
@@ -1586,6 +1655,74 @@ def run_codex_worker(
     )
 
 
+def run_opencode_worker(
+    *,
+    worker_script: Path,
+    bun_bin: Path,
+    opencode_bin: Path,
+    model: str,
+    workdir: Path,
+    control_dir: Path,
+    worker_state_dir: Path,
+    timeout_seconds: int,
+    initial_user_text: str,
+    system_instructions: str | None = None,
+    continuation_context_path: Path | None = None,
+    benchmark_mcp_servers: dict[str, Any] | None = None,
+    sensitive_mcp_tools: tuple[tuple[str, str], ...] = (),
+    auth_file: Path | None = None,
+    agent: str | None = None,
+    variant: str | None = None,
+    allowed_versions: tuple[str, ...] = SOURCE_AUDITED_OPENCODE_VERSIONS,
+    startup_timeout_seconds: int = 15,
+    progress_callback: Any = None,
+) -> WorkerResult:
+    """Run one rollout through the Metalanguage-owned TypeScript/Bun worker."""
+
+    result = run_opencode_rollout(
+        worker_script=worker_script,
+        bun_bin=bun_bin,
+        opencode_bin=opencode_bin,
+        model=model,
+        workdir=workdir,
+        control_dir=control_dir,
+        worker_state_dir=worker_state_dir,
+        timeout_seconds=timeout_seconds,
+        initial_user_text=initial_user_text,
+        system_instructions=system_instructions,
+        continuation_context_path=continuation_context_path,
+        benchmark_mcp_servers=benchmark_mcp_servers,
+        sensitive_mcp_tools=sensitive_mcp_tools,
+        auth_file=auth_file,
+        agent=agent,
+        variant=variant,
+        allowed_versions=allowed_versions,
+        startup_timeout_seconds=startup_timeout_seconds,
+        progress_callback=progress_callback,
+    )
+    metadata = {
+        key: result.get(key)
+        for key in [
+            "thread_id",
+            "session_id",
+            "runtime_version",
+            "request_path",
+            "stderr_path",
+            "events_path",
+            "isolated_state_cleaned",
+        ]
+        if result.get(key) is not None
+    }
+    return WorkerResult(
+        final_text=str(result.get("final_text") or ""),
+        status=str(result.get("status") or "error"),
+        stop_reason=result.get("stop_reason"),
+        error_code=result.get("error_code"),
+        error_message=result.get("error_message"),
+        metadata=metadata,
+    )
+
+
 def resolve_codex_base_instructions(mode: str) -> str | None:
     """Return fixed Codex base instructions, or None for Codex defaults."""
     if mode == "codex":
@@ -1593,6 +1730,15 @@ def resolve_codex_base_instructions(mode: str) -> str | None:
     if mode == "read-readme":
         return CODEX_READ_README_BASE_INSTRUCTIONS
     raise ValueError(f"Unknown Codex base instructions mode: {mode}")
+
+
+def resolve_opencode_system_instructions(mode: str) -> str | None:
+    """Return an exact per-request OpenCode system instruction override."""
+    if mode == "opencode":
+        return None
+    if mode == "read-readme":
+        return READ_README_TASK_INSTRUCTIONS
+    raise ValueError(f"Unknown OpenCode system instructions mode: {mode}")
 
 
 def persist_episode_outputs(temp_dir: Path, dest_root: Path, task_id: str) -> Path:
@@ -1852,7 +1998,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument(
         "--worker-backend",
-        choices=["openrouter", "codex"],
+        choices=["openrouter", "codex", "opencode"],
         default="openrouter",
         help="Worker runtime to use for rollouts.",
     )
@@ -2032,6 +2178,79 @@ def parse_args() -> argparse.Namespace:
             "'read-readme' uses the fixed scaffold task instruction."
         ),
     )
+    parser.add_argument(
+        "--opencode-bin",
+        default=None,
+        help="OpenCode executable. Defaults to the opencode resolved from PATH.",
+    )
+    parser.add_argument(
+        "--opencode-worker-script",
+        "--opencode-runner-bin",
+        dest="opencode_worker_script",
+        default=None,
+        help=(
+            "Optional TypeScript/Bun OpenCode worker script. The legacy "
+            "--opencode-runner-bin spelling is retained as an alias."
+        ),
+    )
+    parser.add_argument(
+        "--opencode-bun-bin",
+        default=None,
+        help="Bun executable for the native TypeScript OpenCode worker.",
+    )
+    parser.add_argument(
+        "--opencode-build-runner",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--opencode-runner-release",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--opencode-auth-file",
+        default=None,
+        help=(
+            "Optional read-only OpenCode auth JSON copied into each isolated rollout "
+            "through OPENCODE_AUTH_CONTENT. Provider environment credentials work without it."
+        ),
+    )
+    parser.add_argument(
+        "--opencode-agent",
+        default=None,
+        help="Optional OpenCode primary agent name.",
+    )
+    parser.add_argument(
+        "--opencode-variant",
+        default=None,
+        help="Optional OpenCode model variant.",
+    )
+    parser.add_argument(
+        "--opencode-allowed-versions",
+        default=",".join(SOURCE_AUDITED_OPENCODE_VERSIONS),
+        help="Comma-separated exact OpenCode CLI versions accepted by the pinned protocol adapter.",
+    )
+    parser.add_argument(
+        "--opencode-server-startup-timeout-seconds",
+        type=_positive_int_argument,
+        default=15,
+        help="Maximum seconds for the private per-rollout OpenCode server to start.",
+    )
+    parser.add_argument(
+        "--opencode-initial-prompt",
+        default=READ_README_TASK_INSTRUCTIONS,
+        help="Initial user text submitted to OpenCode for a non-inherited rollout.",
+    )
+    parser.add_argument(
+        "--opencode-base-instructions-mode",
+        choices=["opencode", "read-readme"],
+        default="read-readme",
+        help=(
+            "OpenCode system-instruction mode. 'opencode' keeps its defaults; "
+            "'read-readme' injects the fixed scaffold instruction through the prompt system field."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -2080,6 +2299,33 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             release=args.codex_runner_release,
             build=args.codex_build_runner,
         )
+    opencode_worker_script: Path | None = None
+    opencode_bun_bin: Path | None = None
+    opencode_bin: Path | None = None
+    opencode_auth_file: Path | None = None
+    opencode_allowed_versions = tuple(
+        version.strip()
+        for version in args.opencode_allowed_versions.split(",")
+        if version.strip()
+    )
+    if args.worker_backend == "opencode":
+        if not opencode_allowed_versions:
+            raise ValueError("--opencode-allowed-versions must contain at least one version")
+        opencode_worker_script = resolve_opencode_worker_script(
+            Path(args.opencode_worker_script) if args.opencode_worker_script else None,
+        )
+        opencode_bun_bin = resolve_bun_bin(
+            Path(args.opencode_bun_bin) if args.opencode_bun_bin else None
+        )
+        opencode_bin = resolve_opencode_bin(
+            Path(args.opencode_bin) if args.opencode_bin else None
+        )
+        if args.opencode_auth_file:
+            opencode_auth_file = Path(args.opencode_auth_file).expanduser().resolve()
+            if not opencode_auth_file.is_file():
+                raise FileNotFoundError(
+                    f"OpenCode auth file does not exist: {opencode_auth_file}"
+                )
 
     runtime_root = _resolve_runtime_root(args.runtime_root)
     _claim_runtime_benchmark(runtime_root, args.benchmark)
@@ -2126,9 +2372,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
     existing_records: list[dict[str, Any]] = []
     if not args.no_resume:
         all_records = load_existing_run_records(runs_log_path)
-        expected_codex_base_mode = (
-            args.codex_base_instructions_mode if args.worker_backend == "codex" else None
-        )
         def _matches_run(rec: dict[str, Any]) -> bool:
             if not (
                 rec.get("benchmark", "supergpqa") == args.benchmark
@@ -2137,12 +2380,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 and rec.get("generation") == args.generation
                 and rec.get("bootstrap_rollout_count", rec.get("num_rollouts"))
                 == args.num_rollouts
-                and rec.get("worker_backend", "openrouter") == args.worker_backend
-                and (
-                    args.worker_backend != "codex"
-                    or rec.get("codex_base_instructions_mode", "codex")
-                    == expected_codex_base_mode
-                )
+                and _worker_backend_resume_compatible(rec, args)
             ):
                 return False
             if args.benchmark != "supergpqa":
@@ -2390,7 +2628,11 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             shutil.rmtree(temp_dir, ignore_errors=True)
             temp_dir.mkdir(parents=True, exist_ok=True)
             bootstrap_seed_used = sampled_parent is None or bootstrap_reinitialized
-            rollout_initial_prompt = args.codex_initial_prompt
+            rollout_initial_prompt = (
+                args.opencode_initial_prompt
+                if args.worker_backend == "opencode"
+                else args.codex_initial_prompt
+            )
             if sampled_parent is not None and not bootstrap_reinitialized:
                 parent_prompt = _slot_prompt(sampled_parent)
                 if parent_prompt is None:
@@ -2425,6 +2667,13 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             codex_base_instructions = (
                 resolve_codex_base_instructions(args.codex_base_instructions_mode)
                 if args.worker_backend == "codex"
+                else None
+            )
+            opencode_system_instructions = (
+                resolve_opencode_system_instructions(
+                    args.opencode_base_instructions_mode
+                )
+                if args.worker_backend == "opencode"
                 else None
             )
             continuation_context = _make_continuation_context(
@@ -2500,7 +2749,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             )
             continuation_context_path = (
                 _write_continuation_context(continuation_context, rollout_control_dir)
-                if args.worker_backend == "codex"
+                if args.worker_backend in {"codex", "opencode"}
                 else None
             )
             _progress(
@@ -2521,7 +2770,11 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 ),
                 **batch_reporting,
                 seed_output_dir=str(seed_output_dir),
-                rollout_control_dir=str(rollout_control_dir) if args.worker_backend == "codex" else None,
+                rollout_control_dir=(
+                    str(rollout_control_dir)
+                    if args.worker_backend in {"codex", "opencode"}
+                    else None
+                ),
                 rollout_state_dir=str(rollout_state_dir),
                 continuation_context_path=(
                     str(continuation_context_path) if continuation_context_path is not None else None
@@ -2531,6 +2784,16 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 ),
                 codex_base_instructions_chars=(
                     len(codex_base_instructions) if codex_base_instructions is not None else None
+                ),
+                opencode_base_instructions_mode=(
+                    args.opencode_base_instructions_mode
+                    if args.worker_backend == "opencode"
+                    else None
+                ),
+                opencode_system_instructions_chars=(
+                    len(opencode_system_instructions)
+                    if opencode_system_instructions is not None
+                    else None
                 ),
                 bootstrap_seed_used=bootstrap_seed_used,
                 bootstrap_seed_embedded=False,
@@ -2561,6 +2824,38 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                             continuation_context_path=continuation_context_path,
                             benchmark_mcp_servers=rollout_benchmark.mcp_servers,
                             sensitive_mcp_tools=rollout_benchmark.sensitive_mcp_tools,
+                            progress_callback=_progress,
+                        )
+                    elif args.worker_backend == "opencode":
+                        if (
+                            opencode_worker_script is None
+                            or opencode_bun_bin is None
+                            or opencode_bin is None
+                        ):
+                            raise RuntimeError(
+                                "OpenCode worker, Bun, and CLI were not initialized."
+                            )
+                        worker_result = run_opencode_worker(
+                            worker_script=opencode_worker_script,
+                            bun_bin=opencode_bun_bin,
+                            opencode_bin=opencode_bin,
+                            model=args.model,
+                            workdir=temp_dir,
+                            control_dir=rollout_control_dir,
+                            worker_state_dir=rollout_state_dir,
+                            timeout_seconds=args.worker_timeout_seconds,
+                            initial_user_text=rollout_initial_prompt,
+                            system_instructions=opencode_system_instructions,
+                            continuation_context_path=continuation_context_path,
+                            benchmark_mcp_servers=rollout_benchmark.mcp_servers,
+                            sensitive_mcp_tools=rollout_benchmark.sensitive_mcp_tools,
+                            auth_file=opencode_auth_file,
+                            agent=args.opencode_agent,
+                            variant=args.opencode_variant,
+                            allowed_versions=opencode_allowed_versions,
+                            startup_timeout_seconds=(
+                                args.opencode_server_startup_timeout_seconds
+                            ),
                             progress_callback=_progress,
                         )
                     else:
@@ -2812,6 +3107,54 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                     if args.worker_backend == "codex" and codex_base_instructions is not None
                     else None
                 ),
+                "opencode_bin": (
+                    str(opencode_bin) if args.worker_backend == "opencode" else None
+                ),
+                "opencode_runner_bin": (
+                    str(opencode_worker_script)
+                    if args.worker_backend == "opencode"
+                    and opencode_worker_script is not None
+                    else None
+                ),
+                "opencode_worker_script": (
+                    str(opencode_worker_script)
+                    if args.worker_backend == "opencode"
+                    and opencode_worker_script is not None
+                    else None
+                ),
+                "opencode_bun_bin": (
+                    str(opencode_bun_bin)
+                    if args.worker_backend == "opencode"
+                    and opencode_bun_bin is not None
+                    else None
+                ),
+                "opencode_base_instructions_mode": (
+                    args.opencode_base_instructions_mode
+                    if args.worker_backend == "opencode"
+                    else None
+                ),
+                "opencode_system_instructions_chars": (
+                    len(opencode_system_instructions)
+                    if args.worker_backend == "opencode"
+                    and opencode_system_instructions is not None
+                    else None
+                ),
+                "opencode_allowed_versions": (
+                    list(opencode_allowed_versions)
+                    if args.worker_backend == "opencode"
+                    else None
+                ),
+                "opencode_agent": (
+                    args.opencode_agent if args.worker_backend == "opencode" else None
+                ),
+                "opencode_variant": (
+                    args.opencode_variant if args.worker_backend == "opencode" else None
+                ),
+                "opencode_auth_source": (
+                    "file"
+                    if args.worker_backend == "opencode" and opencode_auth_file is not None
+                    else "environment" if args.worker_backend == "opencode" else None
+                ),
                 "bootstrap_seed_used": bootstrap_seed_used,
                 "bootstrap_seed_embedded": False,
                 "rollout_initial_prompt_chars": len(rollout_initial_prompt),
@@ -2982,6 +3325,58 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                                             else None
                                         ),
                                         "codex_base_instructions_chars": None,
+                                        "opencode_bin": (
+                                            str(opencode_bin)
+                                            if args.worker_backend == "opencode"
+                                            else None
+                                        ),
+                                        "opencode_runner_bin": (
+                                            str(opencode_worker_script)
+                                            if args.worker_backend == "opencode"
+                                            and opencode_worker_script is not None
+                                            else None
+                                        ),
+                                        "opencode_worker_script": (
+                                            str(opencode_worker_script)
+                                            if args.worker_backend == "opencode"
+                                            and opencode_worker_script is not None
+                                            else None
+                                        ),
+                                        "opencode_bun_bin": (
+                                            str(opencode_bun_bin)
+                                            if args.worker_backend == "opencode"
+                                            and opencode_bun_bin is not None
+                                            else None
+                                        ),
+                                        "opencode_base_instructions_mode": (
+                                            args.opencode_base_instructions_mode
+                                            if args.worker_backend == "opencode"
+                                            else None
+                                        ),
+                                        "opencode_system_instructions_chars": None,
+                                        "opencode_allowed_versions": (
+                                            list(opencode_allowed_versions)
+                                            if args.worker_backend == "opencode"
+                                            else None
+                                        ),
+                                        "opencode_agent": (
+                                            args.opencode_agent
+                                            if args.worker_backend == "opencode"
+                                            else None
+                                        ),
+                                        "opencode_variant": (
+                                            args.opencode_variant
+                                            if args.worker_backend == "opencode"
+                                            else None
+                                        ),
+                                        "opencode_auth_source": (
+                                            "file"
+                                            if args.worker_backend == "opencode"
+                                            and opencode_auth_file is not None
+                                            else "environment"
+                                            if args.worker_backend == "opencode"
+                                            else None
+                                        ),
                                         "config_name": (
                                             args.config_name
                                             if args.benchmark == "supergpqa"

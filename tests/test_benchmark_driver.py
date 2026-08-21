@@ -253,6 +253,23 @@ class BenchmarkDriverTests(unittest.TestCase):
             )
             self.assertNotIn("answer", json.dumps(codex.context["problem_pool_records"]))
             self.assertIn("mcp__supergpqa__submit_solution", (root / "shared" / "problem_pool.md").read_text())
+            opencode_root = root / "opencode"
+            opencode_driver = self.make_driver(opencode_root, backend="opencode")
+            opencode_batch = opencode_driver.prepare_batch(4, opencode_root / "shared")
+            opencode = opencode_driver.prepare_rollout(
+                opencode_batch,
+                backend="opencode",
+                context=base,
+            )
+            self.assertEqual(set(opencode.mcp_servers), {"supergpqa"})
+            self.assertEqual(
+                opencode.model_metadata["submit_tool"],
+                "mcp__supergpqa__submit_solution",
+            )
+            self.assertEqual(
+                opencode.sensitive_mcp_tools,
+                (("supergpqa", "submit_solution"),),
+            )
             open_root = root / "openrouter"
             open_driver = self.make_driver(open_root, backend="openrouter")
             open_batch = open_driver.prepare_batch(4, open_root / "shared")

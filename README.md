@@ -208,3 +208,46 @@ uv run python -B main_loop.py \
   --step \
   --num-rollouts 8
 ```
+
+### OpenCode rollout backend
+
+The OpenCode backend uses a native TypeScript worker under Bun and one private
+loopback OpenCode server/session per rollout. It consumes the pinned OpenCode
+generated TypeScript contracts directly and does not require a separate build.
+
+Models must use OpenCode's explicit `provider/model` form:
+
+```bash
+uv run python -B main_loop.py \
+  --worker-backend opencode \
+  --model provider/model \
+  --step \
+  --num-rollouts 8
+```
+
+Each rollout receives private HOME, XDG config/data/state/cache, SQLite, and
+temporary roots. The TypeScript worker connects through OpenCode's authenticated
+HTTP/SSE server boundary, validates source-audited CLI versions, injects exact
+system instructions through a private config-scoped hook, translates benchmark
+MCP servers and enforces tool allowlists with session permission rules,
+redacts sensitive MCP payloads, and removes the private OpenCode state after
+normalizing the result. `spawn_child` is an isolated config-scoped tool that
+synchronously calls the existing Python supervisor; its result returns to the
+same parent turn.
+
+The audited OpenCode API reports MCP connection status but does not enumerate
+MCP tool IDs. The runner validates required connectivity and fails closed on
+empty/invalid allowlists; unlisted tools are denied at execution time. SuperGPQA
+and ARC use OpenCode's native MCP client, including its image-attachment path.
+
+Useful flags include `--opencode-bin`, `--opencode-bun-bin`,
+`--opencode-worker-script`, `--opencode-auth-file`, `--opencode-agent`,
+`--opencode-variant`, `--opencode-allowed-versions`, and
+`--opencode-base-instructions-mode read-readme|opencode`. Provider environment
+credentials are inherited; an auth file is read-only and copied into each
+isolated process through `OPENCODE_AUTH_CONTENT`.
+
+OpenCode permission rules are not an OS sandbox. This backend does not provide
+the Codex runner's filesystem writable-root or network containment guarantees;
+use an external Linux sandbox before treating OpenCode as hostile-code
+containment.

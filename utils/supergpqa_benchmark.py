@@ -283,7 +283,7 @@ class SuperGpqaBenchmarkDriver:
     def _benchmark_readme(backend: str) -> str:
         submit_tool = (
             "mcp__supergpqa__submit_solution"
-            if backend == "codex"
+            if backend in {"codex", "opencode"}
             else "submit_solution"
         )
         return SUPERGPQA_BENCHMARK_README_PATH.read_text(encoding="utf-8").format(
@@ -299,7 +299,11 @@ class SuperGpqaBenchmarkDriver:
         backend: str,
         iteration_index: int,
     ) -> None:
-        tool = "mcp__supergpqa__submit_solution" if backend == "codex" else "submit_solution"
+        tool = (
+            "mcp__supergpqa__submit_solution"
+            if backend in {"codex", "opencode"}
+            else "submit_solution"
+        )
         instruction = (
             f"Problems are keyed by uuid. The official submission interface is "
             f"{tool}(uuid=..., answer=...)."
@@ -343,11 +347,11 @@ class SuperGpqaBenchmarkDriver:
             benchmark_context["active_benchmark_item"] = historical_ref.to_metadata()
         submit_tool = (
             "mcp__supergpqa__submit_solution"
-            if backend == "codex"
+            if backend in {"codex", "opencode"}
             else "submit_solution"
         )
         benchmark_readme = self._benchmark_readme(backend)
-        if backend != "codex":
+        if backend not in {"codex", "opencode"}:
             return RolloutBenchmark(
                 benchmark_context,
                 {

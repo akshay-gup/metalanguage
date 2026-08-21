@@ -11,6 +11,7 @@ from main_loop import (
     _create_benchmark_driver,
     _format_runtime_markdown,
     _runtime_benchmark,
+    _worker_backend_resume_compatible,
     parse_args,
 )
 from utils.open_ended_benchmark import (
@@ -35,6 +36,66 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
             args = parse_args()
         self.assertEqual(args.benchmark, "open-ended")
         self.assertEqual(args.task_file, "task.md")
+
+    def test_cli_accepts_opencode_backend_and_protocol_defaults(self) -> None:
+        with patch(
+            "sys.argv",
+            ["main_loop.py", "--worker-backend", "opencode"],
+        ):
+            args = parse_args()
+        self.assertEqual(args.worker_backend, "opencode")
+        self.assertEqual(args.opencode_base_instructions_mode, "read-readme")
+        self.assertIn("1.18.18", args.opencode_allowed_versions)
+        self.assertIsNone(args.opencode_worker_script)
+        self.assertIsNone(args.opencode_bun_bin)
+
+        with patch(
+            "sys.argv",
+            [
+                "main_loop.py",
+                "--worker-backend",
+                "opencode",
+                "--opencode-runner-bin",
+                "/tmp/legacy-worker.ts",
+            ],
+        ):
+            compatible = parse_args()
+        self.assertEqual(compatible.opencode_worker_script, "/tmp/legacy-worker.ts")
+
+    def test_opencode_resume_requires_matching_backend_configuration(self) -> None:
+        args = Namespace(
+            worker_backend="opencode",
+            opencode_base_instructions_mode="read-readme",
+            opencode_agent="build",
+            opencode_variant=None,
+        )
+        record = {
+            "worker_backend": "opencode",
+            "opencode_base_instructions_mode": "read-readme",
+            "opencode_agent": "build",
+            "opencode_variant": None,
+        }
+        self.assertTrue(_worker_backend_resume_compatible(record, args))
+        self.assertFalse(
+            _worker_backend_resume_compatible(
+                {**record, "opencode_variant": "high"}, args
+            )
+        )
+        self.assertFalse(
+            _worker_backend_resume_compatible(
+                {**record, "worker_backend": "codex"}, args
+            )
+        )
+        self.assertFalse(
+            _worker_backend_resume_compatible(
+                {**record, "opencode_allowed_versions": ["9.9.9"]}, args
+            )
+        )
+        self.assertFalse(
+            _worker_backend_resume_compatible(
+                {**record, "opencode_worker_script": "/tmp/other-worker.ts"}, args
+            )
+        )
 
     def test_exact_task_materialization_has_no_pool_tools_or_outcome(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -72,6 +133,12 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
             self.assertEqual(rollout.sensitive_mcp_tools, ())
             self.assertEqual(rollout.model_metadata["tools"], [])
             self.assertEqual(rollout.context["evaluation"], "unconfigured")
+            opencode_rollout = driver.prepare_rollout(
+                batch,
+                backend="opencode",
+                context={"instance_uuid": "fixture-opencode"},
+            )
+            self.assertEqual(opencode_rollout.mcp_servers, {})
             self.assertIsNone(
                 driver.collect_outcome(
                     batch,

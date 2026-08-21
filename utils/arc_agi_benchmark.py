@@ -249,8 +249,10 @@ class ArcAgiBenchmarkDriver:
         context: dict[str, Any],
     ) -> RolloutBenchmark:
         state = self._require_batch(batch)
-        if backend != "codex":
-            raise ValueError("ARC command MCP currently requires the Codex backend")
+        if backend not in {"codex", "opencode"}:
+            raise ValueError(
+                "ARC command MCP currently requires the Codex or OpenCode backend"
+            )
         instance_uuid = context.get("instance_uuid")
         if not isinstance(instance_uuid, str) or not instance_uuid:
             raise ValueError("rollout context must contain instance_uuid")
