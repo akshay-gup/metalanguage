@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
-import { chmod, mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises"
-import { dirname, join, resolve } from "node:path"
+import { chmod, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises"
+import { basename, dirname, join, resolve } from "node:path"
 
 import {
   EventNormalizer,
@@ -227,13 +227,136 @@ async function prepareStateRoot(path: string): Promise<string> {
   return root
 }
 
-function proxyMcpChildren(translated: TranslatedMcp): void {
-  const proxy = join(import.meta.dir, "mcp_child_proxy.ts")
-  for (const config of Object.values(translated.config)) {
-    const command = config.command
-    const allowedNames = Object.keys(config.environment ?? {}).sort()
-    config.command = [process.execPath, proxy, JSON.stringify(command), JSON.stringify(allowedNames)]
+type HostMcpBridge = {
+  process: ReturnType<typeof Bun.spawn>
+  socketPath: string
+  childPid: number
+}
+
+function safeHostEnvironment(extra: Record<string, string>): Record<string, string> {
+  const env: Record<string, string> = {
+    PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+    LANG: process.env.LANG ?? "C.UTF-8",
   }
+  for (const name of ["LC_ALL", "LC_CTYPE", "NO_COLOR", "TZ"]) {
+    const value = process.env[name]
+    if (value !== undefined) env[name] = value
+  }
+  return { ...env, ...extra }
+}
+
+async function bridgeReady(
+  bridge: ReturnType<typeof Bun.spawn>,
+  timeoutSeconds: number,
+): Promise<number> {
+  if (!(bridge.stdout instanceof ReadableStream)) {
+    throw new RunnerError("benchmark_mcp_bridge_failed", "benchmark MCP bridge stdout was unavailable")
+  }
+  const reader = bridge.stdout.getReader()
+  const ready = (async () => {
+    const decoder = new TextDecoder()
+    let raw = ""
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) throw new RunnerError("benchmark_mcp_bridge_failed", "benchmark MCP bridge exited during startup")
+      raw += decoder.decode(value, { stream: true })
+      const newline = raw.indexOf("\n")
+      if (newline < 0) {
+        if (raw.length > 4096) throw new RunnerError("benchmark_mcp_bridge_failed", "benchmark MCP bridge emitted invalid startup data")
+        continue
+      }
+      let event: unknown
+      try {
+        event = JSON.parse(raw.slice(0, newline))
+      } catch {
+        throw new RunnerError("benchmark_mcp_bridge_failed", "benchmark MCP bridge emitted invalid startup data")
+      }
+      if (!isRecord(event) || event.event !== "ready" || !Number.isInteger(event.child_pid)) {
+        throw new RunnerError("benchmark_mcp_bridge_failed", "benchmark MCP bridge omitted child identity")
+      }
+      void (async () => {
+        while (!(await reader.read()).done) {}
+      })()
+      return Number(event.child_pid)
+    }
+  })()
+  return withTimeout(
+    ready,
+    Math.max(1, timeoutSeconds) * 1000,
+    new RunnerError("benchmark_mcp_bridge_timeout", "benchmark MCP bridge startup timed out"),
+  )
+}
+
+async function startHostMcpBridges(
+  request: RunnerRequest,
+  translated: TranslatedMcp,
+  root: string,
+): Promise<{ bridges: HostMcpBridge[]; hostRoot?: string }> {
+  if (!translated.servers.length) return { bridges: [] }
+  if (request.sandbox?.mode !== "bubblewrap") {
+    throw new RunnerError("benchmark_mcp_bridge_requires_sandbox", "benchmark MCP host bridge requires bubblewrap")
+  }
+  const hostRoot = join(dirname(root), `.opencode-mcp-host-${basename(root)}-${randomSecret().slice(0, 16)}`)
+  await mkdir(hostRoot, { recursive: false, mode: 0o700 })
+  await chmod(hostRoot, 0o700)
+  const proxyPath = join(hostRoot, "mcp_socket_proxy.ts")
+  await writeFile(proxyPath, await readFile(join(import.meta.dir, "mcp_socket_proxy.ts")), { mode: 0o500 })
+  await chmod(proxyPath, 0o500)
+  const bridges: HostMcpBridge[] = []
+  try {
+    for (const server of translated.servers) {
+      const config = translated.config[server.configName]
+      if (!config || config.type !== "local") throw new RunnerError("invalid_mcp_configuration", "benchmark MCP config is not local")
+      const socketPath = join(hostRoot, `${server.configName}.sock`)
+      const bridgeRequest = {
+        socket_path: socketPath,
+        command: [...config.command],
+        ...(config.cwd ? { cwd: config.cwd } : {}),
+        env: safeHostEnvironment(config.environment ?? {}),
+        supervisor_pid: process.pid,
+      }
+      const bridge = Bun.spawn(
+        [process.execPath, join(import.meta.dir, "mcp_host_bridge.ts"), JSON.stringify(bridgeRequest)],
+        {
+          env: safeHostEnvironment({}),
+          stdin: "ignore",
+          stdout: "pipe",
+          stderr: "ignore",
+          detached: true,
+        },
+      )
+      emit({ event: "mcp_process_started", pid: bridge.pid })
+      let childPid: number
+      try {
+        childPid = await bridgeReady(bridge, server.startupTimeoutSeconds)
+      } catch (error) {
+        await stopServer(bridge)
+        throw error
+      }
+      emit({ event: "mcp_process_started", pid: childPid })
+      bridges.push({ process: bridge, socketPath, childPid })
+      config.command = [process.execPath, proxyPath, socketPath]
+      config.cwd = request.cwd
+      config.environment = Object.fromEntries(
+        [
+          ...(request.provider_env_names ?? []),
+          "OPENCODE_AUTH_CONTENT",
+          "OPENCODE_SERVER_PASSWORD",
+          "METALANGUAGE_SPAWN_CHILD_TOKEN",
+        ].map((name) => [name, ""]),
+      )
+    }
+    return { bridges, hostRoot }
+  } catch (error) {
+    for (const bridge of bridges) await stopServer(bridge.process)
+    await rm(hostRoot, { recursive: true, force: true })
+    throw error
+  }
+}
+
+async function stopHostMcpBridges(bridges: HostMcpBridge[], hostRoot?: string): Promise<void> {
+  for (const bridge of bridges) await stopServer(bridge.process)
+  if (hostRoot) await rm(hostRoot, { recursive: true, force: true })
 }
 
 function opencodeConfig(request: RunnerRequest, translated: TranslatedMcp): Record<string, unknown> {
@@ -296,6 +419,7 @@ async function isolatedEnvironment(
     env.METALANGUAGE_SPAWN_CHILD_ENDPOINT = callback.endpoint
     env.METALANGUAGE_SPAWN_CHILD_TOKEN = callback.token
   }
+  env.METALANGUAGE_OPENCODE_PROVIDER_ENV_NAMES = JSON.stringify(request.provider_env_names ?? [])
   if (request.sandbox?.masked_paths?.[0]) {
     env.METALANGUAGE_OPENCODE_MASKED_PATH = request.sandbox.masked_paths[0]
   }
@@ -410,28 +534,9 @@ async function sandboxedServerCommand(request: RunnerRequest, root: string): Pro
     "--tmpfs",
     "/tmp",
   ]
-  const commandExecutables = [
-    ...Object.values(request.mcp_servers ?? {}).map((server) => server.command),
-  ]
-  const resolvedCommandRoots: string[] = []
-  for (const executable of commandExecutables) {
-    if (!executable.startsWith("/")) continue
-    const target = await realpath(executable)
-    resolvedCommandRoots.push(
-      dirname(target),
-      dirname(dirname(target)),
-      dirname(dirname(dirname(target))),
-    )
-  }
   const readOnly = new Set([
-    resolve(import.meta.dir, "../.."),
     dirname(request.opencode_bin),
     dirname(process.execPath),
-    ...Object.values(request.mcp_servers ?? {}).flatMap((server) => [
-      dirname(server.command),
-      dirname(dirname(server.command)),
-    ]),
-    ...resolvedCommandRoots,
     ...(sandbox.read_only_roots ?? []),
   ])
   const writable = new Set([root, request.cwd, ...(sandbox.writable_roots ?? [])])
@@ -602,39 +707,11 @@ async function validateMcp(api: ApiClient, translated: TranslatedMcp): Promise<v
   })
 }
 
-async function recordMcpProcesses(serverPid: number): Promise<void> {
-  const snapshot = new Map<number, { parent: number; command: string }>()
-  for (const entry of await readdir("/proc").catch(() => [])) {
-    if (!/^\d+$/.test(entry)) continue
-    const pid = Number(entry)
-    try {
-      const status = await readFile(`/proc/${entry}/status`, "utf8")
-      const parent = Number(status.match(/^PPid:\s+(\d+)$/m)?.[1] ?? "0")
-      const command = (await readFile(`/proc/${entry}/cmdline`, "utf8")).replaceAll("\0", " ")
-      snapshot.set(pid, { parent, command })
-    } catch {
-      continue
-    }
-  }
-  const descendsFrom = (pid: number, ancestors: Set<number>): boolean => {
-    const visited = new Set<number>()
-    let current = pid
-    while (!visited.has(current)) {
-      if (ancestors.has(current)) return true
-      visited.add(current)
-      current = snapshot.get(current)?.parent ?? 0
-      if (!current) return false
-    }
-    return false
-  }
-  const serverTree = new Set(
-    [...snapshot.keys()].filter((pid) => pid === serverPid || descendsFrom(pid, new Set([serverPid]))),
-  )
-  const proxies = new Set(
-    [...serverTree].filter((pid) => snapshot.get(pid)?.command.includes("mcp_child_proxy.ts")),
-  )
-  for (const pid of [...serverTree].filter((candidate) => descendsFrom(candidate, proxies)).sort()) {
-    emit({ event: "mcp_process_started", pid })
+async function verifyProcfs(): Promise<void> {
+  await readFile("/proc/self/status", "utf8")
+  const entries = await readdir("/proc")
+  if (!entries.some((entry) => /^\d+$/.test(entry))) {
+    throw new RunnerError("benchmark_mcp_bridge_failed", "benchmark MCP isolation requires procfs")
   }
 }
 
@@ -669,7 +746,6 @@ async function runSession(
   translated: TranslatedMcp,
   providerId: string,
   modelId: string,
-  serverPid: number,
   cancelled: Promise<void>,
 ): Promise<void> {
   const queue = new AsyncQueue<unknown>()
@@ -685,7 +761,7 @@ async function runSession(
   }
 
   await validateMcp(api, translated)
-  await recordMcpProcesses(serverPid)
+  if (translated.servers.length) await verifyProcfs()
   const createBody: SessionCreateBody = {
     title: "Metalanguage rollout",
     permission: translated.permissionRules,
@@ -812,7 +888,11 @@ function randomSecret(): string {
   return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")
 }
 
-export async function startSpawnCallback(command: string[]): Promise<{
+function secretFingerprint(value: string): string {
+  return new Bun.CryptoHasher("sha256").update(value).digest("hex")
+}
+
+export async function startSpawnCallback(command: string[], handlerTimeoutMs = 15_000): Promise<{
   endpoint: string
   token: string
   stop: () => void
@@ -835,7 +915,7 @@ export async function startSpawnCallback(command: string[]): Promise<{
       try {
         const raw = await request.text()
         if (raw.length > 64 * 1024) return new Response("request too large", { status: 413 })
-        const result = await runHandler(command, JSON.parse(raw))
+        const result = await runHandler(command, JSON.parse(raw), handlerTimeoutMs)
         return Response.json(result)
       } catch {
         return Response.json(
@@ -844,10 +924,9 @@ export async function startSpawnCallback(command: string[]): Promise<{
             child_spawned: false,
             parent_continues: true,
             retryable: true,
-            error_code: "spawn_child_handler_failed",
-            error: "spawn_child handler failed",
+            error_code: "spawn_child_bridge_invalid_request",
+            error: "spawn_child bridge request was invalid",
           },
-          { status: 500 },
         )
       }
     },
@@ -893,15 +972,22 @@ export async function runRequest(request: RunnerRequest, cancelled: Promise<void
   let translated: TranslatedMcp
   try {
     translated = translateMcp(request.mcp_servers ?? {}, request.sensitive_mcp_tools ?? [])
-    proxyMcpChildren(translated)
   } catch (error) {
     throw asRunnerError("invalid_mcp_configuration", error)
   }
+  const hostMcp = await startHostMcpBridges(request, translated, root)
+  if (hostMcp.hostRoot) {
+    request.sandbox = {
+      ...(request.sandbox ?? { mode: "bubblewrap", network: "allow" }),
+      read_only_roots: [...(request.sandbox?.read_only_roots ?? []), hostMcp.hostRoot],
+    }
+  }
   let env: WorkerEnvironment
-  const callback = request.spawn_child_handler_command?.length
-    ? await startSpawnCallback(request.spawn_child_handler_command)
-    : undefined
+  let callback: Awaited<ReturnType<typeof startSpawnCallback>> | undefined
   try {
+    callback = request.spawn_child_handler_command?.length
+      ? await startSpawnCallback(request.spawn_child_handler_command)
+      : undefined
     env = await isolatedEnvironment(
       request,
       root,
@@ -911,6 +997,7 @@ export async function runRequest(request: RunnerRequest, cancelled: Promise<void
     )
   } catch (error) {
     callback?.stop()
+    await stopHostMcpBridges(hostMcp.bridges, hostMcp.hostRoot)
     throw asRunnerError("state_isolation_failed", error)
   }
   try {
@@ -918,6 +1005,11 @@ export async function runRequest(request: RunnerRequest, cancelled: Promise<void
     const password = env.OPENCODE_SERVER_PASSWORD
     const { server, baseUrl } = await startServer({ ...request, cwd }, env, root)
     try {
+      emit({
+        event: "isolation_verified",
+        server_port: Number(baseUrl.port),
+        auth_sha256: secretFingerprint(password),
+      })
       const api = new ApiClient(
         baseUrl,
         "metalanguage",
@@ -925,12 +1017,13 @@ export async function runRequest(request: RunnerRequest, cancelled: Promise<void
         cwd,
         seconds(request.startup_timeout_seconds, 15) * 1000,
       )
-      await runSession(api, request, translated, providerId, modelId, server.pid, cancelled)
+      await runSession(api, request, translated, providerId, modelId, cancelled)
     } finally {
       await stopServer(server)
     }
   } finally {
     callback?.stop()
+    await stopHostMcpBridges(hostMcp.bridges, hostMcp.hostRoot)
   }
 }
 

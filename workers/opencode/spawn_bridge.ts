@@ -9,25 +9,47 @@ export const TOOL_SOURCE = `export default {
   async execute(args, context) {
     const endpoint = process.env.METALANGUAGE_SPAWN_CHILD_ENDPOINT
     const token = process.env.METALANGUAGE_SPAWN_CHILD_TOKEN
-    if (!endpoint || !token) throw new Error("Metalanguage spawn_child bridge is not configured")
+    const failure = (error_code, error) => JSON.stringify({
+      success: false,
+      child_spawned: false,
+      parent_continues: true,
+      retryable: true,
+      error_code,
+      error,
+    })
+    if (!endpoint || !token) return failure("spawn_child_bridge_unavailable", "spawn_child bridge is unavailable")
     const payload = JSON.stringify({
       tool: "spawn_child",
       namespace: null,
       call_id: context.callID ?? null,
       arguments: args,
     })
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        authorization: \`Bearer \${token}\`,
-        "content-type": "application/json",
-      },
-      body: payload,
-      signal: context.abort,
-    })
-    const body = await response.text()
-    if (!response.ok) throw new Error(\`spawn_child bridge returned HTTP \${response.status}\`)
-    return JSON.stringify(JSON.parse(body))
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          authorization: \`Bearer \${token}\`,
+          "content-type": "application/json",
+        },
+        body: payload,
+        signal: context.abort,
+      })
+      const body = await response.text()
+      if (!response.ok) return failure("spawn_child_bridge_failed", "spawn_child bridge request failed")
+      let parsed
+      try {
+        parsed = JSON.parse(body)
+      } catch {
+        return failure("spawn_child_bridge_malformed_response", "spawn_child bridge returned a malformed response")
+      }
+      if (!parsed || typeof parsed !== "object" || typeof parsed.success !== "boolean") {
+        return failure("spawn_child_bridge_malformed_response", "spawn_child bridge returned a malformed response")
+      }
+      return JSON.stringify(parsed)
+    } catch (error) {
+      if (context.abort?.aborted) throw error
+      return failure("spawn_child_bridge_failed", "spawn_child bridge request failed")
+    }
   },
 }
 `
@@ -39,6 +61,19 @@ export const SYSTEM_PLUGIN_SOURCE = `export default async function metalanguageS
       const exact = process.env.METALANGUAGE_OPENCODE_SYSTEM_INSTRUCTIONS
       if (exact === undefined) return
       output.system.splice(0, output.system.length, exact)
+    },
+    "shell.env": async (_input, output) => {
+      const configured = process.env.METALANGUAGE_OPENCODE_PROVIDER_ENV_NAMES ?? "[]"
+      let names = []
+      try { names = JSON.parse(configured) } catch {}
+      for (const name of [
+        ...names,
+        "OPENCODE_AUTH_CONTENT",
+        "OPENCODE_SERVER_PASSWORD",
+        "METALANGUAGE_SPAWN_CHILD_TOKEN",
+      ]) {
+        if (typeof name === "string" && name) output.env[name] = ""
+      }
     },
   }
 }
@@ -55,29 +90,55 @@ function failure(code: string, message: string): Record<string, unknown> {
   }
 }
 
-export async function runHandler(command: string[], payload: unknown): Promise<unknown> {
-  if (!command.length) throw new Error("spawn_child handler command is empty")
+export async function runHandler(command: string[], payload: unknown, timeoutMs = 15_000): Promise<unknown> {
+  if (!command.length) return failure("spawn_child_handler_unavailable", "spawn_child handler command is empty")
   if (!isRecord(payload) || payload.tool !== "spawn_child") {
     return failure("unsupported_dynamic_tool", "spawn_child bridge only supports spawn_child")
   }
-  const child = Bun.spawn(command, { stdin: "pipe", stdout: "pipe", stderr: "pipe" })
+  let child: Bun.PipedSubprocess
+  try {
+    child = Bun.spawn(command, { stdin: "pipe", stdout: "pipe", stderr: "pipe" })
+  } catch {
+    return failure("spawn_child_handler_crashed", "spawn_child handler could not start")
+  }
   const terminate = () => child.kill("SIGTERM")
   process.once("SIGTERM", terminate)
   process.once("SIGINT", terminate)
   try {
     child.stdin.write(`${JSON.stringify(payload)}\n`)
     child.stdin.end()
-    const [stdout, stderr, code] = await Promise.all([
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-      child.exited,
-    ])
-    if (code !== 0) throw new Error(`spawn_child handler exited ${code}: ${stderr.trim()}`)
-    if (!stdout.trim()) throw new Error("spawn_child handler returned empty stdout")
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("timeout")), Math.max(1, timeoutMs))
+    })
+    let stdout: string
+    let code: number
     try {
-      return JSON.parse(stdout.trim())
-    } catch (error) {
-      throw new Error("parse spawn_child handler response", { cause: error })
+      ;[stdout, , code] = await Promise.race([
+        Promise.all([
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+          child.exited,
+        ]),
+        timeout,
+      ])
+    } catch {
+      child.kill("SIGKILL")
+      await child.exited
+      return failure("spawn_child_handler_timeout", "spawn_child handler timed out")
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+    if (code !== 0) return failure("spawn_child_handler_crashed", "spawn_child handler crashed")
+    if (!stdout.trim()) return failure("spawn_child_handler_malformed_response", "spawn_child handler returned an empty response")
+    try {
+      const parsed = JSON.parse(stdout.trim())
+      if (!isRecord(parsed) || typeof parsed.success !== "boolean") {
+        return failure("spawn_child_handler_malformed_response", "spawn_child handler returned a malformed response")
+      }
+      return parsed
+    } catch {
+      return failure("spawn_child_handler_malformed_response", "spawn_child handler returned a malformed response")
     }
   } finally {
     process.off("SIGTERM", terminate)
@@ -93,11 +154,6 @@ export async function runSpawnBridgeFromStdio(): Promise<void> {
     throw new Error("spawn_child handler command is invalid")
   }
   const payload = JSON.parse(await Bun.stdin.text())
-  let result: unknown
-  try {
-    result = await runHandler(command, payload)
-  } catch (error) {
-    result = failure("spawn_child_handler_failed", error instanceof Error ? error.message : String(error))
-  }
+  const result = await runHandler(command, payload)
   process.stdout.write(JSON.stringify(result))
 }

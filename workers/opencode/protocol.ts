@@ -2,28 +2,44 @@ import type {
   Event as OpenCodeEvent,
   McpStatus,
   Part,
+  SessionCreateData,
   SessionCreateResponse,
   SessionMessagesResponse,
+  SessionPromptData,
   SessionPromptResponse,
 } from "../../third_party/opencode/packages/sdk/js/src/gen/types.gen.ts"
-import type { Local as McpLocalConfig } from "../../third_party/opencode/packages/core/src/v1/config/mcp.ts"
-import type { Rule as PermissionRule } from "../../third_party/opencode/packages/schema/src/v1/permission.ts"
-import type { PromptInput as NativePromptInput } from "../../third_party/opencode/packages/opencode/src/session/prompt.ts"
-import type { CreateInput as NativeCreateInput } from "../../third_party/opencode/packages/opencode/src/session/session.ts"
 
 export type {
   McpStatus,
   OpenCodeEvent,
   Part,
-  PermissionRule,
   SessionCreateResponse,
   SessionMessagesResponse,
   SessionPromptResponse,
 }
 
-export type SessionCreateBody = NonNullable<NativeCreateInput>
+export type PermissionRule = {
+  permission: string
+  pattern: string
+  action: "allow" | "deny" | "ask"
+}
 
-export type SessionPromptBody = Omit<NativePromptInput, "sessionID">
+export type McpLocalConfig = {
+  type: "local"
+  command: string[]
+  cwd?: string
+  environment?: Record<string, string>
+  enabled?: boolean
+  timeout?: number
+}
+
+export type SessionCreateBody = NonNullable<SessionCreateData["body"]> & {
+  permission?: PermissionRule[]
+}
+
+export type SessionPromptBody = NonNullable<SessionPromptData["body"]> & {
+  variant?: string
+}
 
 export type McpServerInput = {
   command: string
@@ -53,6 +69,7 @@ export type RunnerRequest = {
   timeout_seconds?: number | null
   startup_timeout_seconds?: number | null
   auth_file?: string | null
+  provider_env_names?: string[]
   spawn_child_handler_command?: string[] | null
   mcp_servers?: Record<string, McpServerInput>
   sensitive_mcp_tools?: McpToolSelector[]
@@ -98,6 +115,7 @@ export function sanitizeIdentifier(value: string): string {
 export function translateMcp(
   servers: Record<string, McpServerInput>,
   sensitive: McpToolSelector[],
+  benchmarkPolicy = Object.keys(servers).length > 0,
 ): TranslatedMcp {
   const config: Record<string, McpLocalConfig> = {}
   const translated: TranslatedMcpServer[] = []
@@ -108,6 +126,13 @@ export function translateMcp(
     { permission: "*", pattern: "*", action: "allow" },
     { permission: "question", pattern: "*", action: "deny" },
     { permission: "task", pattern: "*", action: "deny" },
+    ...(benchmarkPolicy
+      ? [
+          { permission: "bash", pattern: "*", action: "deny" } as const,
+          { permission: "shell", pattern: "*", action: "deny" } as const,
+          { permission: "external_directory", pattern: "*", action: "deny" } as const,
+        ]
+      : []),
   ]
 
   for (const [sourceName, server] of Object.entries(servers).sort(([a], [b]) => a.localeCompare(b))) {
@@ -212,8 +237,6 @@ type PermissionAskedEvent = {
   properties: { sessionID?: string }
 }
 
-type OpenCodeWireEvent = OpenCodeEvent | PermissionAskedEvent | Record<string, unknown>
-
 export class EventNormalizer {
   private readonly toolStatus = new Map<string, string>()
   private readonly messageRoles = new Map<string, string>()
@@ -237,10 +260,11 @@ export class EventNormalizer {
       .join("\n")
   }
 
-  handle(event: OpenCodeWireEvent): { events: Record<string, unknown>[]; terminal: Terminal } {
+  handle(event: unknown): { events: Record<string, unknown>[]; terminal: Terminal } {
     const output: Record<string, unknown>[] = []
-    const eventType = typeof event.type === "string" ? event.type : ""
-    const properties = isRecord(event.properties) ? event.properties : {}
+    const record = isRecord(event) ? event : {}
+    const eventType = typeof record.type === "string" ? record.type : ""
+    const properties = isRecord(record.properties) ? record.properties : {}
 
     if (eventType === "session.status") {
       if (properties.sessionID !== this.sessionId) return { events: output, terminal: "continue" }

@@ -9,6 +9,7 @@ import re
 import select
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -46,6 +47,9 @@ _PATH_ENVIRONMENT_KINDS = {
     "SSL_CERT_FILE": "file",
 }
 _CREDENTIAL_MOUNT_ROOT = Path("/run/metalanguage/credentials")
+MAX_CREDENTIAL_FILES = 4096
+MAX_CREDENTIAL_BYTES = 64 * 1024 * 1024
+MAX_CREDENTIAL_DEPTH = 16
 _DURABLE_ERROR_CODES = {
     "APIError",
     "MessageAbortedError",
@@ -56,6 +60,10 @@ _DURABLE_ERROR_CODES = {
     "invalid_model",
     "invalid_sandbox_mount",
     "invalid_working_directory",
+    "benchmark_mcp_bridge_failed",
+    "benchmark_mcp_bridge_requires_sandbox",
+    "benchmark_mcp_bridge_timeout",
+    "benchmark_mcp_proxy_unavailable",
     "malformed_opencode_event",
     "malformed_opencode_response",
     "malformed_runner_output",
@@ -154,6 +162,47 @@ def resolve_bubblewrap_bin(value: Path | None) -> Path:
     return path
 
 
+def validate_opencode_host_primitives(bubblewrap_bin: Path) -> None:
+    if sys.platform != "linux":
+        raise RuntimeError("OpenCode bubblewrap containment requires Linux")
+    proc_status = Path("/proc/self/status")
+    if not proc_status.is_file() or not os.access(proc_status, os.R_OK):
+        raise RuntimeError("OpenCode containment requires a readable procfs")
+    try:
+        completed = subprocess.run(
+            [
+                str(bubblewrap_bin.resolve()),
+                "--die-with-parent",
+                "--new-session",
+                "--unshare-pid",
+                "--unshare-ipc",
+                "--unshare-uts",
+                "--unshare-cgroup-try",
+                "--ro-bind",
+                "/",
+                "/",
+                "--proc",
+                "/proc",
+                "--",
+                "/usr/bin/bash",
+                "-c",
+                "test -r /proc/1/status",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            timeout=5,
+            check=False,
+            env={"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8"},
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError("OpenCode bubblewrap/proc containment primitives are unavailable") from exc
+    if completed.returncode != 0:
+        raise RuntimeError("OpenCode bubblewrap/proc containment primitives are unavailable")
+
+
 def executable_version(path: Path) -> str:
     completed = subprocess.run(
         [str(path.resolve()), "--version"],
@@ -213,26 +262,72 @@ def text_sha256(value: str | None) -> str:
 def _path_content_fingerprint(path: Path, kind: str) -> str:
     digest = hashlib.sha256()
     if kind == "file":
+        info = path.stat()
+        if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_CREDENTIAL_BYTES:
+            raise ValueError("OpenCode credential file exceeds the bounded byte limit")
         digest.update(b"file\0")
-        digest.update(path.read_bytes())
+        read_bytes = 0
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                read_bytes += len(chunk)
+                if read_bytes > MAX_CREDENTIAL_BYTES:
+                    raise ValueError("OpenCode credential file exceeds the bounded byte limit")
+                digest.update(chunk)
         return digest.hexdigest()
     digest.update(b"directory\0")
-    for child in sorted(path.rglob("*")):
-        relative = child.relative_to(path)
-        if child.is_symlink():
-            raise ValueError(f"OpenCode credential directory contains a symlink: {child}")
-        if child.is_dir():
-            digest.update(b"dir\0")
+    file_count = 0
+    total_bytes = 0
+
+    def visit(directory: Path, relative_parent: Path, depth: int) -> None:
+        nonlocal file_count, total_bytes
+        if depth > MAX_CREDENTIAL_DEPTH:
+            raise ValueError("OpenCode credential directory exceeds the bounded depth limit")
+        try:
+            entries = sorted(os.scandir(directory), key=lambda entry: entry.name)
+        except OSError as exc:
+            raise ValueError("OpenCode credential directory is unreadable") from exc
+        for entry in entries:
+            relative = relative_parent / entry.name
+            try:
+                info = entry.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise ValueError("OpenCode credential directory changed during inspection") from exc
+            if stat.S_ISLNK(info.st_mode):
+                raise ValueError(f"OpenCode credential directory contains a symlink: {entry.path}")
+            if stat.S_ISDIR(info.st_mode):
+                digest.update(b"dir\0")
+                digest.update(str(relative).encode())
+                digest.update(b"\0")
+                visit(Path(entry.path), relative, depth + 1)
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError(f"OpenCode credential directory contains a non-file entry: {entry.path}")
+            file_count += 1
+            total_bytes += info.st_size
+            if file_count > MAX_CREDENTIAL_FILES:
+                raise ValueError("OpenCode credential directory exceeds the bounded file limit")
+            if total_bytes > MAX_CREDENTIAL_BYTES:
+                raise ValueError("OpenCode credential directory exceeds the bounded byte limit")
+            digest.update(b"file\0")
             digest.update(str(relative).encode())
             digest.update(b"\0")
-            continue
-        if not child.is_file():
-            raise ValueError(f"OpenCode credential directory contains a non-file entry: {child}")
-        digest.update(b"file\0")
-        digest.update(str(relative).encode())
-        digest.update(b"\0")
-        digest.update(child.read_bytes())
-        digest.update(b"\0")
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                descriptor = os.open(entry.path, flags)
+                with os.fdopen(descriptor, "rb") as stream:
+                    if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                        raise ValueError("OpenCode credential directory changed during inspection")
+                    observed = 0
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                        observed += len(chunk)
+                        if total_bytes - info.st_size + observed > MAX_CREDENTIAL_BYTES:
+                            raise ValueError("OpenCode credential directory exceeds the bounded byte limit")
+                        digest.update(chunk)
+            except OSError as exc:
+                raise ValueError("OpenCode credential directory changed during inspection") from exc
+            digest.update(b"\0")
+
+    visit(path, Path(), 1)
     return digest.hexdigest()
 
 
@@ -404,6 +499,13 @@ def _private_runtime_root(worker_state_dir: Path) -> Path:
     return root
 
 
+def _cleanup_host_mcp_roots(worker_state_dir: Path) -> None:
+    for path in worker_state_dir.glob(".opencode-mcp-host-*"):
+        if path.parent.resolve() != worker_state_dir.resolve():
+            raise RuntimeError("OpenCode MCP host root escaped the rollout state directory")
+        shutil.rmtree(path, ignore_errors=True)
+
+
 def _durable_request(request: dict[str, Any]) -> dict[str, Any]:
     """Return diagnostic request metadata without MCP credentials/arguments."""
     durable = json.loads(json.dumps(request))
@@ -517,6 +619,11 @@ def run_opencode_rollout(
     progress_callback: Callable[..., None] | None = None,
 ) -> dict[str, Any]:
     runtime_root = _private_runtime_root(worker_state_dir)
+    if sandbox_mode == "bubblewrap":
+        resolved_bubblewrap = resolve_bubblewrap_bin(bubblewrap_bin)
+        validate_opencode_host_primitives(resolved_bubblewrap)
+    else:
+        resolved_bubblewrap = None
     if provider_environment is None:
         provider_environment, inferred_mounts = prepare_provider_environment(
             provider_env_names,
@@ -538,6 +645,7 @@ def run_opencode_rollout(
         "initial_user_text": initial_user_text,
         "timeout_seconds": timeout_seconds,
         "startup_timeout_seconds": startup_timeout_seconds,
+        "provider_env_names": list(provider_env_names),
         "mcp_servers": benchmark_mcp_servers or {},
         "sensitive_mcp_tools": [
             {"server": server, "tool": tool} for server, tool in sensitive_mcp_tools
@@ -546,7 +654,7 @@ def run_opencode_rollout(
             "mode": sandbox_mode,
             "network": sandbox_network,
             "bubblewrap_bin": (
-                str(resolve_bubblewrap_bin(bubblewrap_bin))
+                str(resolved_bubblewrap)
                 if sandbox_mode == "bubblewrap"
                 else None
             ),
@@ -683,6 +791,9 @@ def run_opencode_rollout(
         if process is not None and process.stdout is not None:
             process.stdout.close()
         _kill_runtime_process_group(state["runtime_process_pid"])
+        for pid in state.get("mcp_process_pids", []):
+            _kill_runtime_process_group(pid)
+        _cleanup_host_mcp_roots(worker_state_dir)
         if runtime_root.parent.resolve() == worker_state_dir.resolve():
             shutil.rmtree(runtime_root, ignore_errors=True)
 

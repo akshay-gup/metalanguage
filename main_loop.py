@@ -54,6 +54,7 @@ from utils.opencode_runner import (
     resolve_opencode_worker_script,
     run_opencode_rollout,
     text_sha256,
+    validate_opencode_host_primitives,
 )
 from utils.openrouter import (
     OpenRouterAPIError,
@@ -949,7 +950,11 @@ def _validate_opencode_containment(
 
 
 def _worker_backend_resume_compatible(
-    record: dict[str, Any], args: argparse.Namespace
+    record: dict[str, Any],
+    args: argparse.Namespace,
+    *,
+    effective_initial_prompt: str | None = None,
+    require_effective_prompt: bool = False,
 ) -> bool:
     if record.get("worker_backend", "openrouter") != args.worker_backend:
         return False
@@ -1025,10 +1030,16 @@ def _worker_backend_resume_compatible(
         prompt_identity_matches = isinstance(effective_prompt_sha256, str) and bool(
             effective_prompt_sha256
         )
-        if record.get("bootstrap_seed_used") is True:
+        if effective_initial_prompt is not None:
+            prompt_identity_matches = effective_prompt_sha256 == text_sha256(
+                effective_initial_prompt
+            )
+        elif record.get("bootstrap_seed_used") is True:
             prompt_identity_matches = effective_prompt_sha256 == getattr(
                 args, "_opencode_configured_initial_prompt_sha256", None
             )
+        elif require_effective_prompt:
+            prompt_identity_matches = False
         return (
             record.get("opencode_base_instructions_mode", "opencode")
             == args.opencode_base_instructions_mode
@@ -2490,6 +2501,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             opencode_bubblewrap_bin = resolve_bubblewrap_bin(
                 Path(args.opencode_bubblewrap_bin)
             )
+            validate_opencode_host_primitives(opencode_bubblewrap_bin)
             opencode_bubblewrap_version = executable_version(opencode_bubblewrap_bin)
             opencode_bubblewrap_sha256 = file_sha256(opencode_bubblewrap_bin)
         opencode_runtime_version = executable_version(opencode_bin)
@@ -2622,6 +2634,52 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
 
         existing_records = [rec for rec in all_records if _matches_run(rec)]
 
+    if not args.no_resume and existing_records:
+        parent_pool = load_parent_pool(parent_pool_path)
+        preliminary_by_task: dict[int, dict[int, dict[str, Any]]] = {}
+        for record in existing_records:
+            task_idx = record.get("task_index")
+            rollout_idx = record.get("rollout_index")
+            if isinstance(task_idx, int) and isinstance(rollout_idx, int) and rollout_idx >= 0:
+                preliminary_by_task.setdefault(task_idx, {}).setdefault(rollout_idx, record)
+        partial_tasks: set[int] = set()
+        for task_idx, per_task in preliminary_by_task.items():
+            counts: list[int] = []
+            for record in per_task.values():
+                try:
+                    count = int(
+                        record.get(
+                            "task_rollout_count",
+                            record.get("scheduled_rollout_count", args.num_rollouts),
+                        )
+                    )
+                except (TypeError, ValueError):
+                    continue
+                if count > 0:
+                    counts.append(count)
+            if len(per_task) < (max(counts) if counts else args.num_rollouts):
+                partial_tasks.add(task_idx)
+
+        def _partial_prompt_matches(record: dict[str, Any]) -> bool:
+            if record.get("task_index") not in partial_tasks or args.worker_backend != "opencode":
+                return True
+            rollout_idx = record.get("rollout_index")
+            inherited_prompt = None
+            if record.get("bootstrap_seed_used") is not True:
+                if not isinstance(rollout_idx, int) or not 0 <= rollout_idx < len(parent_pool):
+                    return False
+                inherited_prompt = _slot_prompt(parent_pool[rollout_idx])
+                if inherited_prompt is None:
+                    return False
+            return _worker_backend_resume_compatible(
+                record,
+                args,
+                effective_initial_prompt=inherited_prompt,
+                require_effective_prompt=True,
+            )
+
+        existing_records = [record for record in existing_records if _partial_prompt_matches(record)]
+
     existing_by_task: dict[int, dict[int, dict[str, Any]]] = {}
     for rec in existing_records:
         task_idx = rec.get("task_index")
@@ -2634,9 +2692,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
         existing = per_task.get(rollout_idx)
         if existing is None:
             per_task[rollout_idx] = rec
-
-    if not args.no_resume and existing_records:
-        parent_pool = load_parent_pool(parent_pool_path)
 
     def _rollout_username(rollout_index: int) -> str:
         return f"rollout_user_{rollout_index:03d}"
@@ -3119,29 +3174,17 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                             sandbox_read_only_roots=tuple(
                                 path
                                 for path in (
-                                    PROJECT_ROOT,
                                     seed_output_dir,
-                                    task_store_dir,
                                 )
                                 if path.exists()
                             ),
-                            sandbox_read_only_mounts=(
-                                *opencode_credential_mounts,
-                                *tuple(
-                                    (path, path)
-                                    for path in opencode_mcp_control_dir.glob("*.json")
-                                    if path.is_file()
-                                ),
-                            ),
+                            sandbox_read_only_mounts=opencode_credential_mounts,
                             sandbox_writable_roots=tuple(
                                 path
                                 for path in (
                                     archive_worktree.path,
                                     archive_repo_dir / ".git",
                                     shared_workspace_dir,
-                                    opencode_mcp_control_dir,
-                                    rollout_state_dir / "arc_agi",
-                                    benchmark_events_path,
                                 )
                                 if path is not None and path.exists()
                             ),

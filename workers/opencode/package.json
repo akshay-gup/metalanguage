@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "packageManager": "bun@1.3.14",
+  "devDependencies": {
+    "@types/bun": "1.3.14",
+    "typescript": "5.9.3"
+  },
   "scripts": {
     "test": "bun test worker.test.ts",
     "build": "\"$npm_execpath\" build worker.ts --target=bun --outfile=/dev/null"
