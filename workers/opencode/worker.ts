@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 import { chmod, mkdir, readFile, realpath, writeFile } from "node:fs/promises"
-import { join } from "node:path"
+import { dirname, join, resolve } from "node:path"
 
 import {
   EventNormalizer,
@@ -9,12 +9,14 @@ import {
   cappedString,
   isRecord,
   parseModel,
+  safeErrorMessage,
   translateMcp,
   type McpStatus,
   type OpenCodeEvent,
   type RunnerRequest,
   type SessionCreateBody,
   type SessionCreateResponse,
+  type SessionMessagesResponse,
   type SessionPromptBody,
   type SessionPromptResponse,
   type Terminal,
@@ -97,6 +99,7 @@ class ApiClient {
     private readonly username: string,
     private readonly password: string,
     readonly directory: string,
+    private readonly defaultTimeoutMs: number,
   ) {}
 
   private url(path: string): URL {
@@ -111,28 +114,40 @@ class ApiClient {
     return headers
   }
 
-  async request(path: string, init: RequestInit = {}): Promise<Response> {
+  async request(path: string, init: RequestInit = {}, timeoutMs = this.defaultTimeoutMs): Promise<Response> {
     let response: Response
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), Math.max(1, timeoutMs))
+    const onAbort = () => controller.abort()
+    init.signal?.addEventListener("abort", onAbort, { once: true })
     try {
-      response = await fetch(this.url(path), { ...init, headers: this.headers(init.body !== undefined) })
+      response = await fetch(this.url(path), {
+        ...init,
+        headers: this.headers(init.body !== undefined),
+        signal: controller.signal,
+      })
     } catch (error) {
-      throw asRunnerError("opencode_http_error", error)
+      throw new RunnerError(
+        controller.signal.aborted ? "opencode_http_timeout" : "opencode_http_error",
+        controller.signal.aborted ? `OpenCode API ${path} timed out` : `OpenCode API ${path} failed`,
+        { cause: error },
+      )
+    } finally {
+      clearTimeout(timer)
+      init.signal?.removeEventListener("abort", onAbort)
     }
     if (!response.ok) {
-      const detail = cappedString(await response.text())
-      throw new RunnerError(
-        "opencode_http_error",
-        `OpenCode API ${path} returned ${response.status}: ${detail}`,
-      )
+      await response.body?.cancel().catch(() => undefined)
+      throw new RunnerError("opencode_http_error", `OpenCode API ${path} returned HTTP ${response.status}`)
     }
     return response
   }
 
-  async json<T>(method: string, path: string, body?: unknown): Promise<T> {
+  async json<T>(method: string, path: string, body?: unknown, timeoutMs?: number): Promise<T> {
     const response = await this.request(path, {
       method,
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    })
+    }, timeoutMs)
     const raw = await response.text()
     if (!raw) return null as T
     try {
@@ -147,11 +162,11 @@ class ApiClient {
   }
 
   async abort(sessionId: string): Promise<void> {
-    await this.json("POST", `/session/${sessionId}/abort`).catch(() => undefined)
+    await this.json("POST", `/session/${sessionId}/abort`, undefined, 3_000).catch(() => undefined)
   }
 
   async delete(sessionId: string): Promise<void> {
-    await this.json("DELETE", `/session/${sessionId}`).catch(() => undefined)
+    await this.json("DELETE", `/session/${sessionId}`, undefined, 3_000).catch(() => undefined)
   }
 }
 
@@ -160,27 +175,80 @@ async function prepareStateRoot(path: string): Promise<string> {
   await mkdir(path, { recursive: true, mode: 0o700 })
   await chmod(path, 0o700)
   const root = await realpath(path)
-  for (const relative of ["home", "config/tool", "config/plugin", "data", "state", "cache", "tmp"]) {
+  for (const relative of [
+    "home",
+    "config/opencode",
+    "config/tool",
+    "config/plugin",
+    "data",
+    "state",
+    "cache",
+    "tmp",
+  ]) {
     const directory = join(root, relative)
     await mkdir(directory, { recursive: true, mode: 0o700 })
     await chmod(directory, 0o700)
   }
   const toolPath = join(root, "config/tool/spawn_child.js")
   const pluginPath = join(root, "config/plugin/metalanguage_system.js")
+  const maskedFilePath = join(root, "masked-empty")
   await writeFile(toolPath, TOOL_SOURCE, { mode: 0o600 })
   await writeFile(pluginPath, SYSTEM_PLUGIN_SOURCE, { mode: 0o600 })
+  await writeFile(maskedFilePath, "", { mode: 0o600 })
   await chmod(toolPath, 0o600)
   await chmod(pluginPath, 0o600)
+  await chmod(maskedFilePath, 0o600)
+  for (const configRoot of [join(root, "config"), join(root, "config/opencode")]) {
+    const packagePath = join(configRoot, "package.json")
+    const packageLockPath = join(configRoot, "package-lock.json")
+    const gitignorePath = join(configRoot, ".gitignore")
+    await mkdir(join(configRoot, "node_modules"), { recursive: true, mode: 0o700 })
+    await writeFile(
+      packagePath,
+      `${JSON.stringify({ private: true, dependencies: { "@opencode-ai/plugin": "1.18.19" } }, null, 2)}\n`,
+      { mode: 0o600 },
+    )
+    await writeFile(
+      packageLockPath,
+      `${JSON.stringify({
+        name: "metalanguage-opencode-config",
+        lockfileVersion: 3,
+        requires: true,
+        packages: { "": { dependencies: { "@opencode-ai/plugin": "1.18.19" } } },
+      }, null, 2)}\n`,
+      { mode: 0o600 },
+    )
+    await writeFile(gitignorePath, "node_modules\npackage.json\npackage-lock.json\n.gitignore\n", { mode: 0o600 })
+    await chmod(packagePath, 0o600)
+    await chmod(packageLockPath, 0o600)
+    await chmod(gitignorePath, 0o600)
+  }
   return root
 }
 
-function opencodeConfig(translated: TranslatedMcp): Record<string, unknown> {
-  return {
+function proxyMcpChildren(translated: TranslatedMcp): void {
+  const proxy = join(import.meta.dir, "mcp_child_proxy.ts")
+  for (const config of Object.values(translated.config)) {
+    const command = config.command
+    const allowedNames = Object.keys(config.environment ?? {}).sort()
+    config.command = [process.execPath, proxy, JSON.stringify(command), JSON.stringify(allowedNames)]
+  }
+}
+
+function opencodeConfig(request: RunnerRequest, translated: TranslatedMcp): Record<string, unknown> {
+  const config: Record<string, unknown> = {
     autoupdate: false,
     share: "disabled",
     permission: { "*": "allow", question: "deny", task: "deny" },
     mcp: translated.config,
   }
+  if (request.test_provider_config !== undefined) {
+    if (process.env.METALANGUAGE_OPENCODE_OFFLINE_TEST !== "1") {
+      throw new RunnerError("test_provider_forbidden", "test provider configuration requires offline test mode")
+    }
+    config.provider = request.test_provider_config
+  }
+  return config
 }
 
 async function isolatedEnvironment(
@@ -217,6 +285,10 @@ async function isolatedEnvironment(
     OPENCODE_DISABLE_SHARE: "1",
     OPENCODE_PURE: "0",
     DO_NOT_TRACK: "1",
+    npm_config_offline: "true",
+    npm_config_audit: "false",
+    npm_config_fund: "false",
+    npm_config_update_notifier: "false",
     METALANGUAGE_OPENCODE_BUN_BIN: process.execPath,
     METALANGUAGE_OPENCODE_WORKER_SCRIPT: import.meta.path,
   })
@@ -270,7 +342,119 @@ async function verifyVersion(request: RunnerRequest, env: WorkerEnvironment): Pr
   emit({ event: "runtime_verified", runtime: "opencode", version })
 }
 
+function verifyBunVersion(request: RunnerRequest): void {
+  const version = Bun.version
+  if (request.allowed_bun_versions?.length && !request.allowed_bun_versions.includes(version)) {
+    throw new RunnerError(
+      "unsupported_bun_version",
+      `Bun version ${version} is not source-audited`,
+    )
+  }
+  emit({ event: "runtime_verified", runtime: "bun", version })
+}
+
 type ServerProcess = ReturnType<typeof Bun.spawn>
+
+function addParentDirectories(command: string[], path: string): void {
+  const missing: string[] = []
+  let current = dirname(path)
+  while (current !== "/" && !current.startsWith("/usr") && !current.startsWith("/etc")) {
+    missing.push(current)
+    current = dirname(current)
+  }
+  for (const directory of missing.reverse()) command.push("--dir", directory)
+}
+
+async function sandboxedServerCommand(request: RunnerRequest, root: string): Promise<string[]> {
+  const base = [request.opencode_bin, "serve", "--hostname=127.0.0.1", "--port=0", "--log-level=ERROR"]
+  const sandbox = request.sandbox ?? { mode: "none" as const, network: "allow" as const }
+  if (sandbox.mode === "none") return base
+  if (sandbox.network !== "allow") {
+    throw new RunnerError(
+      "unsupported_sandbox_network_mode",
+      "the HTTP worker boundary cannot reach a separately isolated network namespace",
+    )
+  }
+  const bwrap = sandbox.bubblewrap_bin ?? "/usr/bin/bwrap"
+  const command = [
+    bwrap,
+    "--die-with-parent",
+    "--new-session",
+    "--unshare-pid",
+    "--unshare-ipc",
+    "--unshare-uts",
+    "--unshare-cgroup-try",
+    "--ro-bind",
+    "/usr",
+    "/usr",
+    "--ro-bind",
+    "/etc",
+    "/etc",
+    "--symlink",
+    "usr/bin",
+    "/bin",
+    "--symlink",
+    "usr/lib",
+    "/lib",
+    "--symlink",
+    "usr/lib64",
+    "/lib64",
+    "--proc",
+    "/proc",
+    "--dev",
+    "/dev",
+    "--tmpfs",
+    "/tmp",
+  ]
+  const commandExecutables = [
+    ...Object.values(request.mcp_servers ?? {}).map((server) => server.command),
+    ...(request.spawn_child_handler_command?.length ? [request.spawn_child_handler_command[0]!] : []),
+  ]
+  const resolvedCommandRoots: string[] = []
+  for (const executable of commandExecutables) {
+    if (!executable.startsWith("/")) continue
+    const target = await realpath(executable)
+    resolvedCommandRoots.push(
+      dirname(target),
+      dirname(dirname(target)),
+      dirname(dirname(dirname(target))),
+    )
+  }
+  const readOnly = new Set([
+    resolve(import.meta.dir, "../.."),
+    dirname(request.opencode_bin),
+    dirname(process.execPath),
+    ...Object.values(request.mcp_servers ?? {}).flatMap((server) => [
+      dirname(server.command),
+      dirname(dirname(server.command)),
+    ]),
+    ...(request.spawn_child_handler_command?.length
+      ? [
+          dirname(request.spawn_child_handler_command[0]!),
+          dirname(dirname(request.spawn_child_handler_command[0]!)),
+        ]
+      : []),
+    ...resolvedCommandRoots,
+    ...(sandbox.read_only_roots ?? []),
+  ])
+  const writable = new Set([root, request.cwd, ...(sandbox.writable_roots ?? [])])
+  for (const path of [...readOnly].sort()) {
+    const real = await realpath(path)
+    addParentDirectories(command, real)
+    command.push("--ro-bind", real, real)
+  }
+  for (const path of [...writable].sort()) {
+    const real = await realpath(path)
+    addParentDirectories(command, real)
+    command.push("--bind", real, real)
+  }
+  for (const path of sandbox.masked_paths ?? []) {
+    const real = await realpath(path)
+    command.push("--ro-bind", join(root, "masked-empty"), real)
+  }
+  command.push("--chdir", request.cwd, "--", ...base)
+  return command
+}
 
 function signalGroup(pid: number, signal: NodeJS.Signals): void {
   try {
@@ -333,15 +517,11 @@ async function readServerUrl(server: ServerProcess, timeoutSeconds: number): Pro
 async function startServer(
   request: RunnerRequest,
   env: WorkerEnvironment,
+  root: string,
 ): Promise<{ server: ServerProcess; baseUrl: URL }> {
+  const command = await sandboxedServerCommand(request, root)
   const server = Bun.spawn(
-    [
-      request.opencode_bin,
-      "serve",
-      "--hostname=127.0.0.1",
-      "--port=0",
-      "--log-level=ERROR",
-    ],
+    command,
     {
       cwd: request.cwd,
       env,
@@ -362,8 +542,8 @@ async function startServer(
   }
 }
 
-async function startSse(api: ApiClient, queue: AsyncQueue<unknown>): Promise<void> {
-  const response = await api.request("/event")
+async function startSse(api: ApiClient, queue: AsyncQueue<unknown>, timeoutMs: number): Promise<void> {
+  const response = await api.request("/event", {}, timeoutMs)
   if (!response.body) throw new RunnerError("opencode_event_connect_failed", "OpenCode event body unavailable")
   void (async () => {
     const decoder = new SseDecoder()
@@ -385,7 +565,7 @@ async function validateMcp(api: ApiClient, translated: TranslatedMcp): Promise<v
   const started = Date.now()
   const connected = new Set<string>()
   while (true) {
-    const status = await api.json<Record<string, McpStatus>>("GET", "/mcp")
+    const status = await api.json<Record<string, McpStatus>>("GET", "/mcp", undefined, 2_000)
     for (const server of translated.servers) {
       if (status[server.configName]?.status === "connected") connected.add(server.configName)
     }
@@ -414,12 +594,29 @@ async function validateMcp(api: ApiClient, translated: TranslatedMcp): Promise<v
   })
 }
 
-function assistantText(response: SessionPromptResponse): string {
+function assistantText(response: SessionPromptResponse): string | undefined {
+  if (!response.info || response.info.role !== "assistant" || typeof response.info.id !== "string") return undefined
+  const messageID = response.info.id
   return response.parts
-    .filter((part) => part.type === "text")
+    .filter((part) => part.type === "text" && part.messageID === messageID)
     .map((part) => ("text" in part && typeof part.text === "string" ? part.text : ""))
     .filter(Boolean)
     .join("\n")
+}
+
+export function finalAssistantText(messages: SessionMessagesResponse): string | undefined {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]!
+    if (!message.info || message.info.role !== "assistant" || typeof message.info.id !== "string") continue
+    const messageID = message.info.id
+    const text = message.parts
+      .filter((part) => part.type === "text" && part.messageID === messageID)
+      .map((part) => ("text" in part && typeof part.text === "string" ? part.text : ""))
+      .filter(Boolean)
+      .join("\n")
+    return text
+  }
+  return undefined
 }
 
 async function runSession(
@@ -431,10 +628,11 @@ async function runSession(
   cancelled: Promise<void>,
 ): Promise<void> {
   const queue = new AsyncQueue<unknown>()
-  await startSse(api, queue)
+  const startupTimeoutMs = seconds(request.startup_timeout_seconds, 15) * 1000
+  await startSse(api, queue, startupTimeoutMs)
   const connected = await withTimeout(
     queue.next(),
-    5_000,
+    startupTimeoutMs,
     new RunnerError("opencode_event_timeout", "OpenCode event stream did not connect"),
   )
   if (!isRecord(connected) || connected.type !== "server.connected") {
@@ -446,7 +644,12 @@ async function runSession(
     title: "Metalanguage rollout",
     permission: translated.permissionRules,
   }
-  const session = await api.json<SessionCreateResponse>("POST", "/session", createBody)
+  const session = await api.json<SessionCreateResponse>(
+    "POST",
+    "/session",
+    createBody,
+    seconds(request.startup_timeout_seconds, 15) * 1000,
+  )
   if (!session || typeof session.id !== "string") {
     throw new RunnerError("malformed_opencode_response", "session.create omitted id")
   }
@@ -470,7 +673,12 @@ async function runSession(
   let promptResult: SessionPromptResponse | undefined
   let promptError: unknown
   const prompt = api
-    .json<SessionPromptResponse>("POST", `/session/${sessionId}/message`, body)
+    .json<SessionPromptResponse>(
+      "POST",
+      `/session/${sessionId}/message`,
+      body,
+      seconds(request.timeout_seconds, 3600) * 1000 + 5_000,
+    )
     .then((value) => {
       promptResult = value
     })
@@ -529,14 +737,27 @@ async function runSession(
       new RunnerError("opencode_prompt_timeout", "OpenCode prompt response did not finish after idle"),
     )
   }
-  await api.delete(sessionId)
-
   if (terminal === "error") {
     const [code, message] = normalizer.error ?? ["opencode_session_error", "OpenCode session failed"]
+    await api.delete(sessionId)
     throw new RunnerError(code, message)
   }
-  if (promptError) throw asRunnerError("opencode_prompt_failed", promptError)
-  const finalText = normalizer.finalText() || (promptResult ? assistantText(promptResult) : "")
+  if (promptError) {
+    await api.delete(sessionId)
+    throw asRunnerError("opencode_prompt_failed", promptError)
+  }
+  const messages = await api
+    .json<SessionMessagesResponse>("GET", `/session/${sessionId}/message`, undefined, 3_000)
+    .catch(() => [] as SessionMessagesResponse)
+  const listedFinalText = finalAssistantText(messages)
+  const promptFinalText = promptResult ? assistantText(promptResult) : undefined
+  const finalText =
+    listedFinalText !== undefined
+      ? listedFinalText
+      : promptFinalText !== undefined
+        ? promptFinalText
+        : normalizer.finalText()
+  await api.delete(sessionId)
   emit({ event: "turn_complete", final_text: finalText })
 }
 
@@ -554,6 +775,7 @@ function parseRequest(value: unknown): RunnerRequest {
 }
 
 export async function runRequest(request: RunnerRequest, cancelled: Promise<void>): Promise<void> {
+  verifyBunVersion(request)
   let cwd: string
   try {
     cwd = await realpath(request.cwd)
@@ -578,20 +800,27 @@ export async function runRequest(request: RunnerRequest, cancelled: Promise<void
   let translated: TranslatedMcp
   try {
     translated = translateMcp(request.mcp_servers ?? {}, request.sensitive_mcp_tools ?? [])
+    proxyMcpChildren(translated)
   } catch (error) {
     throw asRunnerError("invalid_mcp_configuration", error)
   }
   let env: WorkerEnvironment
   try {
-    env = await isolatedEnvironment(request, root, opencodeConfig(translated), randomSecret())
+    env = await isolatedEnvironment(request, root, opencodeConfig(request, translated), randomSecret())
   } catch (error) {
     throw asRunnerError("state_isolation_failed", error)
   }
   await verifyVersion(request, env)
   const password = env.OPENCODE_SERVER_PASSWORD
-  const { server, baseUrl } = await startServer({ ...request, cwd }, env)
+  const { server, baseUrl } = await startServer({ ...request, cwd }, env, root)
   try {
-    const api = new ApiClient(baseUrl, "metalanguage", password, cwd)
+    const api = new ApiClient(
+      baseUrl,
+      "metalanguage",
+      password,
+      cwd,
+      seconds(request.startup_timeout_seconds, 15) * 1000,
+    )
     await runSession(api, request, translated, providerId, modelId, cancelled)
   } finally {
     await stopServer(server)
@@ -618,7 +847,7 @@ export async function main(): Promise<void> {
     emit({
       event: "error",
       error_code: normalized.code,
-      error_message: cappedString(normalized.message),
+      error_message: safeErrorMessage(normalized.code),
     })
     process.exit(1)
   }

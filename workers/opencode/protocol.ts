@@ -3,6 +3,7 @@ import type {
   McpStatus,
   Part,
   SessionCreateResponse,
+  SessionMessagesResponse,
   SessionPromptResponse,
 } from "../../third_party/opencode/packages/sdk/js/src/gen/types.gen.ts"
 import type { Local as McpLocalConfig } from "../../third_party/opencode/packages/core/src/v1/config/mcp.ts"
@@ -16,6 +17,7 @@ export type {
   Part,
   PermissionRule,
   SessionCreateResponse,
+  SessionMessagesResponse,
   SessionPromptResponse,
 }
 
@@ -40,6 +42,7 @@ export type McpToolSelector = { server: string; tool: string }
 export type RunnerRequest = {
   opencode_bin: string
   allowed_versions?: string[]
+  allowed_bun_versions?: string[]
   model: string
   cwd: string
   state_root: string
@@ -53,6 +56,15 @@ export type RunnerRequest = {
   spawn_child_handler_command?: string[] | null
   mcp_servers?: Record<string, McpServerInput>
   sensitive_mcp_tools?: McpToolSelector[]
+  sandbox?: {
+    mode: "none" | "bubblewrap"
+    network: "allow" | "none"
+    bubblewrap_bin?: string | null
+    read_only_roots?: string[]
+    writable_roots?: string[]
+    masked_paths?: string[]
+  }
+  test_provider_config?: Record<string, unknown>
 }
 
 export type TranslatedMcpServer = {
@@ -181,7 +193,7 @@ export class SseDecoder {
           try {
             output.push(JSON.parse(payload))
           } catch (error) {
-            throw new Error(`malformed OpenCode SSE JSON: ${payload}`, { cause: error })
+            throw new Error(`malformed OpenCode SSE JSON (${payload.length} characters)`, { cause: error })
           }
         }
       } else if (line.startsWith("data:")) {
@@ -203,8 +215,10 @@ type OpenCodeWireEvent = OpenCodeEvent | PermissionAskedEvent | Record<string, u
 
 export class EventNormalizer {
   private readonly toolStatus = new Map<string, string>()
-  private readonly textOrder: string[] = []
-  private readonly textParts = new Map<string, string>()
+  private readonly messageRoles = new Map<string, string>()
+  private readonly assistantOrder: string[] = []
+  private readonly textOrderByMessage = new Map<string, string[]>()
+  private readonly textParts = new Map<string, { messageID: string; text: string }>()
   private turnStarted = false
   error?: [string, string]
 
@@ -214,7 +228,12 @@ export class EventNormalizer {
   ) {}
 
   finalText(): string {
-    return this.textOrder.map((id) => this.textParts.get(id)).filter((text) => text !== undefined).join("\n")
+    const messageID = this.assistantOrder.at(-1)
+    if (!messageID) return ""
+    return (this.textOrderByMessage.get(messageID) ?? [])
+      .map((id) => this.textParts.get(id)?.text)
+      .filter((text): text is string => text !== undefined)
+      .join("\n")
   }
 
   handle(event: OpenCodeWireEvent): { events: Record<string, unknown>[]; terminal: Terminal } {
@@ -241,16 +260,10 @@ export class EventNormalizer {
         return { events: output, terminal: "continue" }
       }
       const error = isRecord(properties.error) ? properties.error : {}
-      const data = isRecord(error.data) ? error.data : {}
       const code = typeof error.name === "string" ? error.name : "opencode_session_error"
-      const message =
-        typeof data.message === "string"
-          ? data.message
-          : typeof error.message === "string"
-            ? error.message
-            : "OpenCode session failed"
+      const message = safeErrorMessage(code)
       this.error = [code, message]
-      output.push({ event: "error", error_code: code, error_message: cappedString(message) })
+      output.push({ event: "error", error_code: code, error_message: message })
       return { events: output, terminal: "error" }
     }
 
@@ -264,15 +277,34 @@ export class EventNormalizer {
       return { events: output, terminal: "continue" }
     }
 
+    if (eventType === "message.updated") {
+      const info = isRecord(properties.info) ? properties.info : undefined
+      if (!info || info.sessionID !== this.sessionId || typeof info.id !== "string") {
+        return { events: output, terminal: "continue" }
+      }
+      const role = typeof info.role === "string" ? info.role : ""
+      this.messageRoles.set(info.id, role)
+      if (role === "assistant" && !this.assistantOrder.includes(info.id)) {
+        this.assistantOrder.push(info.id)
+      }
+      return { events: output, terminal: "continue" }
+    }
+
     if (eventType !== "message.part.updated") return { events: output, terminal: "continue" }
     const part = isRecord(properties.part) ? properties.part : undefined
     if (!part || part.sessionID !== this.sessionId) return { events: output, terminal: "continue" }
     const partId = typeof part.id === "string" ? part.id : ""
 
     if (part.type === "text" && typeof part.text === "string") {
-      if (!this.textParts.has(partId)) this.textOrder.push(partId)
-      this.textParts.set(partId, part.text)
-      if (isRecord(part.time) && part.time.end !== undefined) {
+      const messageID = typeof part.messageID === "string" ? part.messageID : ""
+      if (!partId || !messageID) return { events: output, terminal: "continue" }
+      if (!this.textParts.has(partId)) {
+        const order = this.textOrderByMessage.get(messageID) ?? []
+        order.push(partId)
+        this.textOrderByMessage.set(messageID, order)
+      }
+      this.textParts.set(partId, { messageID, text: part.text })
+      if (this.messageRoles.get(messageID) === "assistant" && isRecord(part.time) && part.time.end !== undefined) {
         output.push({ event: "agent_message", text: cappedString(part.text) })
       }
       return { events: output, terminal: "continue" }
@@ -323,7 +355,7 @@ function loggedPayload(value: unknown, sensitive: boolean): unknown {
 
 export function scrubValue(value: unknown): unknown {
   if (typeof value === "string") {
-    return value.startsWith("data:") || value.length > 4096
+    return value.startsWith("data:") || value.length > 4096 || looksSensitiveString(value)
       ? { redacted: true, characters: value.length }
       : value
   }
@@ -334,7 +366,7 @@ export function scrubValue(value: unknown): unknown {
         const lowered = key.toLowerCase()
         return [
           key,
-          ["authorization", "token", "apikey", "api_key", "password", "secret"].includes(lowered)
+          /(authorization|token|api.?key|password|secret|credential|cookie|session.?key|private.?key)/.test(lowered)
             ? { redacted: true }
             : scrubValue(item),
         ]
@@ -342,6 +374,16 @@ export function scrubValue(value: unknown): unknown {
     )
   }
   return value ?? null
+}
+
+function looksSensitiveString(value: string): boolean {
+  return /(?:^|[\s=:])(sk-[a-z0-9_-]{8,}|bearer\s+[a-z0-9._~-]{8,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)/i.test(
+    value,
+  )
+}
+
+export function safeErrorMessage(code: string): string {
+  return `OpenCode request failed (${cappedString(code.replaceAll(/[^a-zA-Z0-9_.-]/g, "_"), 128)})`
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
