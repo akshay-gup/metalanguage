@@ -51,6 +51,16 @@ describe("OpenCode native protocol adapter", () => {
       pattern: "*",
       action: "allow",
     })
+    expect(translated.permissionRules).toContainEqual({
+      permission: "bash",
+      pattern: "*",
+      action: "deny",
+    })
+    expect(translated.permissionRules).toContainEqual({
+      permission: "external_directory",
+      pattern: "*",
+      action: "deny",
+    })
   })
 
   test("preserves ARC native MCP naming and image-capable transport", () => {
@@ -302,6 +312,8 @@ describe("OpenCode native protocol adapter", () => {
     expect(TOOL_SOURCE).not.toContain("METALANGUAGE_OPENCODE_WORKER_SCRIPT")
     expect(SYSTEM_PLUGIN_SOURCE).toContain("experimental.chat.system.transform")
     expect(SYSTEM_PLUGIN_SOURCE).toContain("output.system.splice")
+    expect(SYSTEM_PLUGIN_SOURCE).toContain('"shell.env"')
+    expect(SYSTEM_PLUGIN_SOURCE).toContain("OPENCODE_AUTH_CONTENT")
   })
 })
 
@@ -346,12 +358,62 @@ describe("spawn_child supervisor bridge", () => {
     }
   })
 
-  test("reports handler process failure", async () => {
-    await expect(
-      runHandler(
-        ["python3", "-c", "import sys; print('boom', file=sys.stderr); raise SystemExit(7)"],
+  test("returns structured retryable crash, malformed, and timeout failures", async () => {
+    const cases = [
+      {
+        command: ["python3", "-c", "raise SystemExit(7)"],
+        timeout: 1_000,
+        code: "spawn_child_handler_crashed",
+      },
+      {
+        command: ["python3", "-c", "print('not-json')"],
+        timeout: 1_000,
+        code: "spawn_child_handler_malformed_response",
+      },
+      {
+        command: ["python3", "-c", "import time; time.sleep(30)"],
+        timeout: 25,
+        code: "spawn_child_handler_timeout",
+      },
+    ]
+    for (const item of cases) {
+      const result = await runHandler(
+        item.command,
         { tool: "spawn_child", arguments: {} },
-      ),
-    ).rejects.toThrow("boom")
+        item.timeout,
+      )
+      expect(result).toMatchObject({
+        success: false,
+        child_spawned: false,
+        parent_continues: true,
+        retryable: true,
+        error_code: item.code,
+      })
+    }
+  })
+
+  test("callback keeps handler failures on HTTP 200 for model retries", async () => {
+    const callback = await startSpawnCallback(
+      ["python3", "-c", "import time; time.sleep(30)"],
+      25,
+    )
+    try {
+      const response = await fetch(callback.endpoint, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${callback.token}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ tool: "spawn_child", arguments: {} }),
+      })
+      expect(response.status).toBe(200)
+      expect(await response.json()).toMatchObject({
+        parent_continues: true,
+        retryable: true,
+        error_code: "spawn_child_handler_timeout",
+      })
+    } finally {
+      callback.stop()
+    }
   })
 })

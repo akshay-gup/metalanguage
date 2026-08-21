@@ -11,10 +11,14 @@ import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from main_loop import WorkerResult, run_opencode_worker
 from utils.opencode_runner import (
+    MAX_CREDENTIAL_BYTES,
+    MAX_CREDENTIAL_DEPTH,
+    MAX_CREDENTIAL_FILES,
     _handle_runner_line,
     _rollout_environment,
     _terminate_process_group,
@@ -25,6 +29,7 @@ from utils.opencode_runner import (
     resolve_bun_bin,
     resolve_opencode_bin,
     run_opencode_rollout,
+    validate_opencode_host_primitives,
 )
 
 
@@ -90,6 +95,7 @@ class OpenCodeRunnerTests(unittest.TestCase):
         mode: str,
         tool: str = "spawn_child",
         arguments: dict[str, object] | None = None,
+        plan: list[dict[str, object]] | None = None,
     ) -> tuple[subprocess.Popen[str], str, Path]:
         capture = root / "provider_capture.jsonl"
         process = subprocess.Popen(
@@ -102,6 +108,7 @@ class OpenCodeRunnerTests(unittest.TestCase):
                 "FAKE_PROVIDER_MODE": mode,
                 "FAKE_PROVIDER_TOOL": tool,
                 "FAKE_PROVIDER_TOOL_ARGS": json.dumps(arguments or {}),
+                "FAKE_PROVIDER_TOOL_PLAN": json.dumps(plan or []),
             },
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -155,8 +162,6 @@ class OpenCodeRunnerTests(unittest.TestCase):
             provider_env_names=provider_env_names,
             extra_environment={"METALANGUAGE_OPENCODE_OFFLINE_TEST": "1"},
             test_provider_config=_test_provider_config(url),
-            sandbox_read_only_roots=(PROJECT_ROOT,),
-            sandbox_writable_roots=(root,),
         )
 
     def _spawn_context(self, root: Path) -> Path:
@@ -390,7 +395,7 @@ class OpenCodeRunnerTests(unittest.TestCase):
             )
             self.assertEqual(result["status"], "error")
             self.assertEqual(
-                result["error_code"], "required_mcp_server_unavailable"
+                result["error_code"], "benchmark_mcp_bridge_failed"
             )
 
         invalid = config(sys.executable, "submit_solution")
@@ -700,6 +705,72 @@ class OpenCodeRunnerTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "contains a symlink"):
                     prepare_provider_environment((), sandbox_mode="bubblewrap")
 
+    def test_credential_directory_bounds_loops_and_nested_valid_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            valid = root / "valid"
+            leaf = valid
+            for index in range(min(3, MAX_CREDENTIAL_DEPTH)):
+                leaf = leaf / f"d{index}"
+            leaf.mkdir(parents=True)
+            (leaf / "ca.pem").write_text("valid")
+            with patch.dict(os.environ, {"SSL_CERT_DIR": str(valid)}):
+                environment, mounts = prepare_provider_environment((), sandbox_mode="bubblewrap")
+            self.assertEqual(environment["SSL_CERT_DIR"], "/run/metalanguage/credentials/SSL_CERT_DIR")
+            self.assertEqual(mounts[0][0], valid.resolve())
+
+            too_deep = root / "deep"
+            leaf = too_deep
+            for index in range(MAX_CREDENTIAL_DEPTH + 1):
+                leaf = leaf / f"d{index}"
+            leaf.mkdir(parents=True)
+            with patch.dict(os.environ, {"SSL_CERT_DIR": str(too_deep)}):
+                with self.assertRaisesRegex(ValueError, "depth limit"):
+                    prepare_provider_environment((), sandbox_mode="bubblewrap")
+
+            too_many = root / "many"
+            too_many.mkdir()
+            for index in range(MAX_CREDENTIAL_FILES + 1):
+                (too_many / f"{index:05d}").touch()
+            with patch.dict(os.environ, {"SSL_CERT_DIR": str(too_many)}):
+                with self.assertRaisesRegex(ValueError, "file limit"):
+                    prepare_provider_environment((), sandbox_mode="bubblewrap")
+
+            too_large = root / "large"
+            too_large.mkdir()
+            with (too_large / "bundle").open("wb") as stream:
+                stream.truncate(MAX_CREDENTIAL_BYTES + 1)
+            with patch.dict(os.environ, {"SSL_CERT_DIR": str(too_large)}):
+                with self.assertRaisesRegex(ValueError, "byte limit"):
+                    prepare_provider_environment((), sandbox_mode="bubblewrap")
+
+            loop = root / "loop"
+            loop.mkdir()
+            (loop / "self").symlink_to(loop)
+            with patch.dict(os.environ, {"SSL_CERT_DIR": str(loop)}):
+                with self.assertRaisesRegex(ValueError, "contains a symlink"):
+                    prepare_provider_environment((), sandbox_mode="bubblewrap")
+
+            external = root / "external.pem"
+            external.write_text("external")
+            escaped = root / "escaped"
+            escaped.mkdir()
+            (escaped / "outside.pem").symlink_to(external)
+            with patch.dict(os.environ, {"SSL_CERT_DIR": str(escaped)}):
+                with self.assertRaisesRegex(ValueError, "contains a symlink"):
+                    prepare_provider_environment((), sandbox_mode="bubblewrap")
+
+    def test_linux_proc_and_bubblewrap_primitives_fail_closed(self) -> None:
+        with patch("utils.opencode_runner.sys.platform", "darwin"):
+            with self.assertRaisesRegex(RuntimeError, "requires Linux"):
+                validate_opencode_host_primitives(Path("/usr/bin/bwrap"))
+        with patch(
+            "utils.opencode_runner.subprocess.run",
+            return_value=SimpleNamespace(returncode=1),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "primitives are unavailable"):
+                validate_opencode_host_primitives(Path("/usr/bin/bwrap"))
+
     def test_production_wrapper_forwards_all_opencode_controls(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -835,6 +906,65 @@ class OpenCodeRunnerTests(unittest.TestCase):
                 self.assertEqual(len(auth), count)
                 self.assertEqual(len(homes), count)
 
+    def test_real_installed_opencode_two_and_eight_worker_concurrency(self) -> None:
+        for count in (2, 8):
+            with self.subTest(count=count), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                providers: list[subprocess.Popen[str]] = []
+                urls: list[str] = []
+                captures: list[Path] = []
+                try:
+                    for index in range(count):
+                        child = root / f"worker-{index}"
+                        child.mkdir()
+                        provider, url, capture = self._start_provider(child, mode="final")
+                        providers.append(provider)
+                        urls.append(url)
+                        captures.append(capture)
+
+                    def launch(index: int) -> dict[str, object]:
+                        child = root / f"worker-{index}"
+                        return self._run_real(
+                            child,
+                            url=urls[index],
+                            prompt=f"real concurrent worker {index}",
+                            timeout=30,
+                        )
+
+                    with ThreadPoolExecutor(max_workers=count) as executor:
+                        results = list(executor.map(launch, range(count)))
+                finally:
+                    for provider in providers:
+                        self._stop_provider(provider)
+
+                ports: set[int] = set()
+                auth: set[str] = set()
+                state_roots: set[str] = set()
+                runtime_pids: set[int] = set()
+                for index, result in enumerate(results):
+                    self.assertEqual(result["status"], "completed", result)
+                    self.assertEqual(result["final_text"], "offline final assistant")
+                    self.assertEqual(result["runtime_version"], "1.18.19")
+                    self.assertTrue(result["isolated_state_cleaned"])
+                    events = [
+                        json.loads(line)
+                        for line in Path(str(result["events_path"])).read_text().splitlines()
+                    ]
+                    isolation = next(event for event in events if event.get("event") == "isolation_verified")
+                    ports.add(int(isolation["server_port"]))
+                    auth.add(str(isolation["auth_sha256"]))
+                    runtime_pid = int(next(event["pid"] for event in events if event.get("event") == "runtime_process_started"))
+                    runtime_pids.add(runtime_pid)
+                    self._assert_pid_gone(runtime_pid)
+                    request = json.loads(Path(str(result["request_path"])).read_text())
+                    state_roots.add(str(request["state_root"]))
+                    self.assertFalse((root / f"worker-{index}/state/opencode_runtime").exists())
+                    self.assertTrue(captures[index].is_file())
+                self.assertEqual(len(ports), count)
+                self.assertEqual(len(auth), count)
+                self.assertEqual(len(state_roots), count)
+                self.assertEqual(len(runtime_pids), count)
+
     def test_real_opencode_offline_system_spawn_and_parent_continuation(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -865,6 +995,86 @@ class OpenCodeRunnerTests(unittest.TestCase):
             self.assertEqual(requests[0]["messages"][0], {"role": "system", "content": "EXACT OFFLINE SYSTEM"})
             self.assertEqual(requests[-1]["messages"][-1]["role"], "tool")
             self.assertIn('"success":true', requests[-1]["messages"][-1]["content"])
+
+    def test_real_opencode_spawn_retry_then_one_success_and_continuation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            process, url, capture = self._start_provider(
+                root,
+                mode="spawn",
+                plan=[
+                    {
+                        "tool": "spawn_child",
+                        "arguments": {"prompt": "retry child", "workspace_dir": "missing"},
+                    },
+                    {
+                        "tool": "spawn_child",
+                        "arguments": {"prompt": "successful child", "workspace_dir": "seed"},
+                    },
+                ],
+            )
+            try:
+                context = self._spawn_context(root)
+                result = self._run_real(
+                    root,
+                    url=url,
+                    prompt="retry spawn_child once",
+                    continuation=context,
+                )
+            finally:
+                self._stop_provider(process)
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(result["final_text"], "parent continued")
+            requests = [json.loads(line) for line in capture.read_text().splitlines()]
+            tool_results = [
+                message
+                for request in requests
+                for message in request.get("messages", [])
+                if message.get("role") == "tool"
+            ]
+            self.assertTrue(any('"retryable":true' in message["content"] for message in tool_results))
+            self.assertTrue(any('"success":true' in message["content"] for message in tool_results))
+            slots = json.loads((root / "spawn_slots.json").read_text())
+            self.assertEqual(slots["spawned_child_count"], 1)
+
+    def test_real_opencode_shell_children_receive_blank_provider_credentials(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, patch.dict(
+            os.environ,
+            {"OPENAI_API_KEY": "sk-PRIVATE-SHELL-INHERITANCE"},
+        ):
+            root = Path(temp)
+            process, url, capture = self._start_provider(
+                root,
+                mode="mcp",
+                tool="bash",
+                arguments={
+                    "command": (
+                        "python3 -c 'import os; "
+                        'print(repr(os.getenv("OPENAI_API_KEY")))\''
+                    )
+                },
+            )
+            try:
+                result = self._run_real(
+                    root,
+                    url=url,
+                    prompt="inspect child environment",
+                    provider_env_names=("OPENAI_API_KEY",),
+                )
+            finally:
+                self._stop_provider(process)
+            self.assertEqual(result["status"], "completed")
+            captured = capture.read_text()
+            self.assertNotIn("PRIVATE-SHELL-INHERITANCE", captured)
+            requests = [json.loads(line) for line in captured.splitlines()]
+            self.assertIn("bash", {tool["function"]["name"] for tool in requests[0]["tools"]})
+            self.assertTrue(
+                any(
+                    message.get("role") == "tool" and "''" in str(message.get("content"))
+                    for request in requests
+                    for message in request.get("messages", [])
+                )
+            )
 
     def test_real_opencode_offline_mcp_allowlist_image_and_redaction(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -925,6 +1135,10 @@ class OpenCodeRunnerTests(unittest.TestCase):
             self.assertNotIn("OPENCODE_SERVER_PASSWORD", mcp_environment)
             self.assertNotIn("OPENCODE_AUTH_CONTENT", mcp_environment)
             self.assertNotIn("OPENAI_API_KEY", mcp_environment)
+            status = (root / "mcp.status").read_text() if (root / "mcp.status").exists() else ""
+            if status:
+                parent = int(next(line.split()[1] for line in status.splitlines() if line.startswith("PPid:")))
+                self.assertNotEqual(parent, self._runtime_pid(result))
 
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -956,6 +1170,187 @@ class OpenCodeRunnerTests(unittest.TestCase):
             self.assertEqual(result["status"], "completed")
             self.assertNotIn("PRIVATE", events)
             self.assertIn('"redacted": true', events)
+
+    def test_real_opencode_external_supergpqa_scoring_and_private_root_denial(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            private = root / "private-answer.json"
+            private.write_text(
+                json.dumps(
+                    {
+                        "id": "task-one",
+                        "answer": "B",
+                        "answer_letter": "B",
+                        "options": ["alpha", "beta", "gamma"],
+                    }
+                )
+            )
+            events = root / "benchmark-events.jsonl"
+            events.touch(mode=0o600)
+            context = root / "supergpqa-context.json"
+            context.write_text(
+                json.dumps(
+                    {
+                        "instance_uuid": "offline-supergpqa",
+                        "benchmark_events_path": str(events),
+                        "generation": 0,
+                        "seed": 42,
+                        "task_index": 0,
+                        "rollout_index": 0,
+                        "rollout_username": "offline",
+                        "problem_pool_records": [
+                            {
+                                "task_index": 0,
+                                "task_id": "task-one",
+                                "problem_uid": "problem-one",
+                                "task_markdown": "Question without answer",
+                                "private_problem_path": str(private),
+                            }
+                        ],
+                    }
+                )
+            )
+            provider, url, capture = self._start_provider(
+                root,
+                mode="mcp",
+                tool="mcp__supergpqa__submit_solution",
+                arguments={"uuid": "problem-one", "answer": "B"},
+            )
+            mcp = {
+                "supergpqa": {
+                    "command": sys.executable,
+                    "args": ["-m", "utils.supergpqa_mcp"],
+                    "cwd": str(PROJECT_ROOT),
+                    "env": {"METALANGUAGE_SUPERGPQA_CONTEXT": str(context)},
+                    "required": True,
+                    "enabled_tools": ["submit_solution"],
+                    "default_tools_approval_mode": "approve",
+                    "startup_timeout_sec": 20,
+                    "tool_timeout_sec": 10,
+                }
+            }
+            try:
+                result = self._run_real(
+                    root,
+                    url=url,
+                    prompt="score the answer",
+                    mcp=mcp,
+                    sensitive=(("supergpqa", "submit_solution"),),
+                )
+            finally:
+                self._stop_provider(provider)
+            self.assertEqual(result["status"], "completed")
+            scored = [json.loads(line) for line in events.read_text().splitlines()]
+            self.assertEqual(len(scored), 1)
+            self.assertTrue(scored[0]["metadata"]["solved"])
+            requests = [json.loads(line) for line in capture.read_text().splitlines()]
+            tool_names = {item["function"]["name"] for item in requests[0]["tools"]}
+            self.assertNotIn("bash", tool_names)
+            self.assertIn("mcp__supergpqa__submit_solution", tool_names)
+            durable_request = json.loads(Path(str(result["request_path"])).read_text())
+            sandbox = durable_request["sandbox"]
+            self.assertNotIn(str(root), sandbox["read_only_roots"])
+            self.assertNotIn(str(private), json.dumps(sandbox))
+            self.assertNotIn(str(context), json.dumps(sandbox))
+            self.assertNotIn("private-answer", Path(str(result["events_path"])).read_text())
+
+    def test_real_opencode_benchmark_policy_denies_external_private_file_read(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            private = root / "host-private.txt"
+            private.write_text("SUPERGPQA_PRIVATE_SENTINEL")
+            provider, url, capture = self._start_provider(
+                root,
+                mode="mcp",
+                plan=[
+                    {"tool": "read", "arguments": {"filePath": str(private)}},
+                    {"tool": "mcp__fixture__echo", "arguments": {"text": "still connected"}},
+                ],
+            )
+            mcp = {
+                "fixture": {
+                    "command": sys.executable,
+                    "args": ["-B", str(FAKE_MCP)],
+                    "cwd": str(PROJECT_ROOT),
+                    "env": {},
+                    "required": True,
+                    "enabled_tools": ["echo"],
+                    "default_tools_approval_mode": "approve",
+                    "startup_timeout_sec": 20,
+                    "tool_timeout_sec": 10,
+                }
+            }
+            try:
+                result = self._run_real(root, url=url, prompt="attempt private read", mcp=mcp)
+            finally:
+                self._stop_provider(provider)
+            self.assertEqual(result["status"], "completed")
+            captured = capture.read_text()
+            self.assertNotIn("SUPERGPQA_PRIVATE_SENTINEL", captured)
+            requests = [json.loads(line) for line in captured.splitlines()]
+            self.assertNotIn("bash", {tool["function"]["name"] for tool in requests[0]["tools"]})
+            tool_messages = [
+                message
+                for request in requests
+                for message in request.get("messages", [])
+                if message.get("role") == "tool"
+            ]
+            self.assertGreaterEqual(len(tool_messages), 2)
+            self.assertNotIn("SUPERGPQA_PRIVATE_SENTINEL", json.dumps(tool_messages))
+            self.assertIn("echo:still connected", captured)
+
+    def test_real_opencode_fake_arc_exact_tools_images_resources_and_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            plan = [
+                {"tool": "mcp__arc_agi__RESET", "arguments": {"game_id": "fake-game"}},
+                *[
+                    {"tool": f"mcp__arc_agi__ACTION{index}", "arguments": {}}
+                    for index in range(1, 6)
+                ],
+                {"tool": "mcp__arc_agi__ACTION6", "arguments": {"x": 17, "y": 23}},
+                {"tool": "mcp__arc_agi__ACTION7", "arguments": {}},
+            ]
+            provider, url, capture = self._start_provider(root, mode="mcp", plan=plan)
+            calls = root / "arc-calls.jsonl"
+            mcp = {
+                "arc_agi": {
+                    "command": sys.executable,
+                    "args": ["-B", str(FAKE_MCP)],
+                    "cwd": str(PROJECT_ROOT),
+                    "env": {
+                        "FAKE_MCP_CALLS_FILE": str(calls),
+                        "FAKE_MCP_PID_FILE": str(root / "arc-mcp.pid"),
+                    },
+                    "required": True,
+                    "enabled_tools": ["RESET", *[f"ACTION{index}" for index in range(1, 8)]],
+                    "default_tools_approval_mode": "approve",
+                    "startup_timeout_sec": 20,
+                    "tool_timeout_sec": 10,
+                }
+            }
+            try:
+                result = self._run_real(root, url=url, prompt="exercise ARC", mcp=mcp, timeout=30)
+            finally:
+                self._stop_provider(provider)
+            self.assertEqual(result["status"], "completed")
+            actual = [json.loads(line) for line in calls.read_text().splitlines()]
+            self.assertEqual([row["tool"] for row in actual], ["RESET", *[f"ACTION{i}" for i in range(1, 8)]])
+            self.assertEqual(actual[6]["arguments"], {"x": 17, "y": 23})
+            requests = [json.loads(line) for line in capture.read_text().splitlines()]
+            schemas = {
+                item["function"]["name"]: item["function"]["parameters"]
+                for item in requests[0]["tools"]
+                if item["function"]["name"].startswith("mcp__arc_agi__")
+            }
+            self.assertEqual(set(schemas), {f"mcp__arc_agi__{name}" for name in ["RESET", *[f"ACTION{i}" for i in range(1, 8)]]})
+            self.assertEqual(set(schemas["mcp__arc_agi__ACTION6"]["required"]), {"x", "y"})
+            self.assertIn("data:image/png;base64", json.dumps(requests[-1]))
+            self.assertIn("resource fixture", json.dumps(requests[-1]))
+            durable = Path(str(result["events_path"])).read_text()
+            self.assertNotIn("iVBOR", durable)
+            for pid in result["mcp_process_pids"]:
+                self._assert_pid_gone(int(pid))
 
     def test_real_opencode_offline_mcp_timeout_cleans_process_tree(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

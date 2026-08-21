@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import shutil
 import tempfile
 import unittest
@@ -197,6 +198,36 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                 {**record, "opencode_worker_script": "/tmp/other-worker.ts"}, args
             )
         )
+        inherited = {
+            **record,
+            "bootstrap_seed_used": False,
+            "opencode_effective_initial_prompt_sha256": hashlib.sha256(
+                b"inherited child prompt"
+            ).hexdigest(),
+        }
+        self.assertTrue(
+            _worker_backend_resume_compatible(
+                inherited,
+                args,
+                effective_initial_prompt="inherited child prompt",
+                require_effective_prompt=True,
+            )
+        )
+        self.assertFalse(
+            _worker_backend_resume_compatible(
+                inherited,
+                args,
+                effective_initial_prompt="changed child prompt",
+                require_effective_prompt=True,
+            )
+        )
+        self.assertFalse(
+            _worker_backend_resume_compatible(
+                inherited,
+                args,
+                require_effective_prompt=True,
+            )
+        )
 
     def test_actual_opencode_orchestration_uses_custom_bootstrap_prompt(self) -> None:
         documents = Path.home() / "Documents"
@@ -271,6 +302,17 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
             self.assertNotIn(
                 str(runtime / "logs/rollout_control"),
                 [str(path) for path in calls[0]["sandbox_writable_roots"]],
+            )
+            self.assertNotIn(
+                str(Path(__file__).resolve().parents[1]),
+                [str(path) for path in calls[0]["sandbox_read_only_roots"]],
+            )
+            self.assertNotIn(
+                str(runtime / "logs/task_store"),
+                [str(path) for path in calls[0]["sandbox_read_only_roots"]],
+            )
+            self.assertFalse(
+                any("benchmark_events" in str(path) or "arc_agi" in str(path) for path in calls[0]["sandbox_writable_roots"])
             )
             handler_context = Path(str(calls[0]["continuation_context_path"]))
             mounted_sources = {

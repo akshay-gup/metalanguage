@@ -15,6 +15,7 @@ CAPTURE = Path(os.environ["FAKE_PROVIDER_CAPTURE"])
 MODE = os.environ.get("FAKE_PROVIDER_MODE", "final")
 TOOL_NAME = os.environ.get("FAKE_PROVIDER_TOOL", "spawn_child")
 TOOL_ARGS = json.loads(os.environ.get("FAKE_PROVIDER_TOOL_ARGS", "{}"))
+TOOL_PLAN = json.loads(os.environ.get("FAKE_PROVIDER_TOOL_PLAN", "[]"))
 
 
 def chunk(handler: BaseHTTPRequestHandler, payload: object) -> None:
@@ -51,8 +52,21 @@ class Handler(BaseHTTPRequestHandler):
             "created": int(time.time()),
             "model": "test-model",
         }
-        should_call_tool = MODE in {"spawn", "mcp"} and not has_tool_result
-        arguments = TOOL_ARGS
+        plan_entry = (
+            TOOL_PLAN[len(tool_results)]
+            if isinstance(TOOL_PLAN, list) and len(tool_results) < len(TOOL_PLAN)
+            else None
+        )
+        should_call_tool = (
+            isinstance(plan_entry, dict)
+            or MODE in {"spawn", "mcp"} and not has_tool_result
+        )
+        arguments = (
+            plan_entry.get("arguments", {}) if isinstance(plan_entry, dict) else TOOL_ARGS
+        )
+        tool_name = (
+            plan_entry.get("tool", TOOL_NAME) if isinstance(plan_entry, dict) else TOOL_NAME
+        )
         if should_call_tool:
             chunk(
                 self,
@@ -69,7 +83,7 @@ class Handler(BaseHTTPRequestHandler):
                                         "id": f"call_fixture_{len(tool_results)}",
                                         "type": "function",
                                         "function": {
-                                            "name": TOOL_NAME,
+                                            "name": tool_name,
                                             "arguments": json.dumps(arguments),
                                         },
                                     }
