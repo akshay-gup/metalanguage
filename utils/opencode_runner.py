@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import select
 import shutil
 import signal
@@ -18,6 +20,35 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 OPENCODE_WORKER_SCRIPT = PROJECT_ROOT / "workers" / "opencode" / "worker.ts"
 SOURCE_AUDITED_OPENCODE_VERSIONS = ("1.18.18", "1.18.19")
+SOURCE_AUDITED_BUN_VERSIONS = ("1.3.14",)
+DEFAULT_BUBBLEWRAP_BIN = Path("/usr/bin/bwrap")
+
+_BASE_ENVIRONMENT_NAMES = {
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "NO_COLOR",
+    "SSL_CERT_DIR",
+    "SSL_CERT_FILE",
+    "TERM",
+    "TZ",
+}
+_PROVIDER_ENVIRONMENT = {
+    "anthropic": {"ANTHROPIC_API_KEY"},
+    "cerebras": {"CEREBRAS_API_KEY"},
+    "deepseek": {"DEEPSEEK_API_KEY"},
+    "google": {"GEMINI_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY"},
+    "google-vertex": {
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "GOOGLE_CLOUD_PROJECT",
+        "GOOGLE_CLOUD_LOCATION",
+    },
+    "groq": {"GROQ_API_KEY"},
+    "mistral": {"MISTRAL_API_KEY"},
+    "openai": {"OPENAI_API_KEY", "OPENAI_ORG_ID", "OPENAI_PROJECT_ID"},
+    "openrouter": {"OPENROUTER_API_KEY"},
+    "xai": {"XAI_API_KEY"},
+}
 
 
 def opencode_worker_script_path() -> Path:
@@ -54,12 +85,117 @@ def resolve_opencode_bin(value: Path | None) -> Path:
     if value is None:
         resolved = shutil.which("opencode")
         if resolved is None:
+            fallback = Path.home() / ".opencode" / "bin" / "opencode"
+            if fallback.is_file() and os.access(fallback, os.X_OK):
+                resolved = str(fallback)
+        if resolved is None:
             raise FileNotFoundError("opencode was not found in PATH")
         value = Path(resolved)
     path = value.expanduser().resolve()
     if not path.is_file() or not os.access(path, os.X_OK):
         raise FileNotFoundError(f"OpenCode executable is not executable: {path}")
     return path
+
+
+def resolve_bubblewrap_bin(value: Path | None) -> Path:
+    path = (value or DEFAULT_BUBBLEWRAP_BIN).expanduser().resolve()
+    if not path.is_file() or not os.access(path, os.X_OK):
+        raise FileNotFoundError(f"bubblewrap executable is not executable: {path}")
+    return path
+
+
+def executable_version(path: Path) -> str:
+    completed = subprocess.run(
+        [str(path.resolve()), "--version"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        timeout=5,
+        check=False,
+        env={"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8"},
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(f"{path} --version exited {completed.returncode}")
+    return completed.stdout.strip()
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def opencode_worker_fingerprint(worker_script: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(worker_script.parent.glob("*.ts")):
+        digest.update(path.name.encode())
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    for name in ("package.json", "bun.lock", "tsconfig.json"):
+        path = worker_script.parent / name
+        if path.is_file():
+            digest.update(name.encode())
+            digest.update(b"\0")
+            digest.update(path.read_bytes())
+            digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def provider_environment_fingerprint(names: tuple[str, ...]) -> str:
+    digest = hashlib.sha256()
+    for name in sorted(names):
+        digest.update(name.encode())
+        digest.update(b"\0")
+        value = os.environ.get(name)
+        digest.update(b"present\0" if value is not None else b"absent\0")
+        if value is not None:
+            digest.update(value.encode())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def provider_environment_names(model: str, explicit: tuple[str, ...] = ()) -> tuple[str, ...]:
+    provider = model.split("/", 1)[0].strip().lower()
+    names = set(_PROVIDER_ENVIRONMENT.get(provider, set()))
+    for name in explicit:
+        if not name or not name.replace("_", "A").isalnum() or not name[0].isalpha():
+            raise ValueError(f"invalid OpenCode provider environment variable name: {name!r}")
+        if name in {"HOME", "PATH", "TMPDIR"} or name.startswith(("XDG_", "OPENCODE_", "METALANGUAGE_")):
+            raise ValueError(f"OpenCode provider environment variable is reserved: {name}")
+        names.add(name)
+    return tuple(sorted(names))
+
+
+def _rollout_environment(
+    *,
+    bun_bin: Path,
+    opencode_bin: Path,
+    provider_env_names: tuple[str, ...],
+    extra_environment: dict[str, str] | None = None,
+) -> dict[str, str]:
+    env = {
+        name: value
+        for name in _BASE_ENVIRONMENT_NAMES
+        if (value := os.environ.get(name)) is not None
+    }
+    env["PATH"] = os.pathsep.join(
+        dict.fromkeys(
+            [str(bun_bin.parent), str(opencode_bin.parent), "/usr/local/bin", "/usr/bin", "/bin"]
+        )
+    )
+    for name in provider_env_names:
+        value = os.environ.get(name)
+        if value is not None:
+            env[name] = value
+    if extra_environment:
+        env.update(extra_environment)
+    env.setdefault("LANG", "C.UTF-8")
+    return env
 
 
 def _terminate_process_group(
@@ -124,7 +260,47 @@ def _durable_request(request: dict[str, Any]) -> dict[str, Any]:
             server["env"] = {key: {"redacted": True} for key in env}
     if "auth_file" in durable:
         durable["auth_file"] = {"configured": True}
+    if "test_provider_config" in durable:
+        durable["test_provider_config"] = {"configured": True, "redacted": True}
     return durable
+
+
+def _scrub_durable_value(value: Any, *, preserve_text: bool = False) -> Any:
+    if isinstance(value, dict):
+        output: dict[str, Any] = {}
+        for key, item in value.items():
+            lowered = key.lower()
+            if re.search(
+                r"authorization|token|api.?key|password|secret|credential|cookie|private.?key",
+                lowered,
+            ):
+                output[key] = {"redacted": True}
+            else:
+                output[key] = _scrub_durable_value(item, preserve_text=preserve_text)
+        return output
+    if isinstance(value, list):
+        return [_scrub_durable_value(item, preserve_text=preserve_text) for item in value]
+    if isinstance(value, str) and not preserve_text:
+        if len(value) > 4096 or re.search(
+            r"(?:^|[\s=:])(sk-[A-Za-z0-9_-]{8,}|bearer\s+[A-Za-z0-9._~-]{8,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)",
+            value,
+            re.IGNORECASE,
+        ):
+            return {"redacted": True, "characters": len(value)}
+    return value
+
+
+def _durable_event(event: dict[str, Any]) -> dict[str, Any]:
+    name = event.get("event")
+    if name == "error":
+        code = re.sub(r"[^A-Za-z0-9_.-]", "_", str(event.get("error_code") or "unknown"))[:128]
+        return {
+            **{key: value for key, value in event.items() if key != "error_message"},
+            "error_message": f"OpenCode request failed ({code})",
+        }
+    if name in {"agent_message", "turn_complete"}:
+        return _scrub_durable_value(event, preserve_text=True)
+    return _scrub_durable_value(event)
 
 
 def run_opencode_rollout(
@@ -146,7 +322,17 @@ def run_opencode_rollout(
     agent: str | None = None,
     variant: str | None = None,
     allowed_versions: tuple[str, ...] = SOURCE_AUDITED_OPENCODE_VERSIONS,
+    allowed_bun_versions: tuple[str, ...] = SOURCE_AUDITED_BUN_VERSIONS,
     startup_timeout_seconds: int = 15,
+    provider_env_names: tuple[str, ...] = (),
+    sandbox_mode: str = "bubblewrap",
+    sandbox_network: str = "allow",
+    bubblewrap_bin: Path | None = None,
+    sandbox_read_only_roots: tuple[Path, ...] = (),
+    sandbox_writable_roots: tuple[Path, ...] = (),
+    sandbox_masked_paths: tuple[Path, ...] = (),
+    extra_environment: dict[str, str] | None = None,
+    test_provider_config: dict[str, Any] | None = None,
     progress_callback: Callable[..., None] | None = None,
 ) -> dict[str, Any]:
     runtime_root = _private_runtime_root(worker_state_dir)
@@ -158,6 +344,7 @@ def run_opencode_rollout(
     request: dict[str, Any] = {
         "opencode_bin": str(opencode_bin.resolve()),
         "allowed_versions": list(allowed_versions),
+        "allowed_bun_versions": list(allowed_bun_versions),
         "model": model,
         "cwd": str(workdir.resolve()),
         "state_root": str(runtime_root),
@@ -168,7 +355,29 @@ def run_opencode_rollout(
         "sensitive_mcp_tools": [
             {"server": server, "tool": tool} for server, tool in sensitive_mcp_tools
         ],
+        "sandbox": {
+            "mode": sandbox_mode,
+            "network": sandbox_network,
+            "bubblewrap_bin": (
+                str(resolve_bubblewrap_bin(bubblewrap_bin))
+                if sandbox_mode == "bubblewrap"
+                else None
+            ),
+            "read_only_roots": [str(path.expanduser().resolve()) for path in sandbox_read_only_roots],
+            "writable_roots": [str(path.expanduser().resolve()) for path in sandbox_writable_roots],
+            "masked_paths": [
+                str(path.expanduser().resolve())
+                for path in dict.fromkeys(
+                    (
+                        *((PROJECT_ROOT / ".env",) if (PROJECT_ROOT / ".env").is_file() else ()),
+                        *sandbox_masked_paths,
+                    )
+                )
+            ],
+        },
     }
+    if test_provider_config is not None:
+        request["test_provider_config"] = test_provider_config
     if system_instructions is not None and system_instructions.strip():
         request["system_instructions"] = system_instructions
     if continuation_context_path is not None:
@@ -198,6 +407,7 @@ def run_opencode_rollout(
         "error_code": "",
         "error_message": "",
         "runtime_version": "",
+        "bun_version": "",
         "runtime_process_pid": None,
         "malformed_output": False,
     }
@@ -214,7 +424,12 @@ def run_opencode_rollout(
             process = subprocess.Popen(
                 [str(bun_bin.resolve()), str(worker_script.resolve())],
                 cwd=PROJECT_ROOT,
-                env=os.environ.copy(),
+                env=_rollout_environment(
+                    bun_bin=bun_bin,
+                    opencode_bin=opencode_bin,
+                    provider_env_names=provider_env_names,
+                    extra_environment=extra_environment,
+                ),
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=stderr_stream,
@@ -269,6 +484,8 @@ def run_opencode_rollout(
             _terminate_process_group(process)
         raise
     finally:
+        if process is not None and process.stdout is not None:
+            process.stdout.close()
         _kill_runtime_process_group(state["runtime_process_pid"])
         if runtime_root.parent.resolve() == worker_state_dir.resolve():
             shutil.rmtree(runtime_root, ignore_errors=True)
@@ -277,6 +494,7 @@ def run_opencode_rollout(
         "thread_id": state["thread_id"] or None,
         "session_id": state["session_id"] or None,
         "runtime_version": state["runtime_version"] or None,
+        "bun_version": state["bun_version"] or None,
         "request_path": str(request_path),
         "stderr_path": str(stderr_path),
         "events_path": str(events_path),
@@ -347,11 +565,15 @@ def _handle_runner_line(
     if not isinstance(event, dict):
         state["malformed_output"] = True
         return None
+    event = _durable_event(event)
     events_stream.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
     events_stream.flush()
     name = event.get("event")
     if name == "runtime_verified":
-        state["runtime_version"] = str(event.get("version") or "")
+        if event.get("runtime") == "bun":
+            state["bun_version"] = str(event.get("version") or "")
+        elif event.get("runtime") == "opencode":
+            state["runtime_version"] = str(event.get("version") or "")
     elif name == "runtime_process_started":
         pid = event.get("pid")
         state["runtime_process_pid"] = pid if isinstance(pid, int) else None

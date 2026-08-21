@@ -39,7 +39,14 @@ from utils.benchmark_driver import (
 )
 from utils.codex_runner import resolve_codex_runner_bin, run_codex_rollout
 from utils.opencode_runner import (
+    SOURCE_AUDITED_BUN_VERSIONS,
     SOURCE_AUDITED_OPENCODE_VERSIONS,
+    executable_version,
+    file_sha256,
+    opencode_worker_fingerprint,
+    provider_environment_fingerprint,
+    provider_environment_names,
+    resolve_bubblewrap_bin,
     resolve_bun_bin,
     resolve_opencode_bin,
     resolve_opencode_worker_script,
@@ -922,6 +929,20 @@ def _validate_benchmark_backend(benchmark: str, worker_backend: str) -> None:
         )
 
 
+def _validate_opencode_containment(
+    benchmark: str, sandbox_mode: str, network_mode: str
+) -> None:
+    if sandbox_mode == "unsafe-none" and benchmark != "open-ended":
+        raise RuntimeError(
+            "OpenCode benchmark workers require --opencode-sandbox-mode=bubblewrap"
+        )
+    if network_mode != "allow":
+        raise RuntimeError(
+            "OpenCode's HTTP server boundary cannot safely use an isolated network namespace; "
+            "--opencode-network-mode=none is fail-closed"
+        )
+
+
 def _worker_backend_resume_compatible(
     record: dict[str, Any], args: argparse.Namespace
 ) -> bool:
@@ -954,6 +975,28 @@ def _worker_backend_resume_compatible(
         recorded_worker_script = record.get("opencode_worker_script")
         if recorded_worker_script is None:
             recorded_worker_script = record.get("opencode_runner_bin")
+        expected_fingerprint = {
+            "opencode_runtime_version": getattr(args, "_opencode_runtime_version", None),
+            "opencode_bin_sha256": getattr(args, "_opencode_bin_sha256", None),
+            "opencode_bun_version": getattr(args, "_opencode_bun_version", None),
+            "opencode_bun_sha256": getattr(args, "_opencode_bun_sha256", None),
+            "opencode_worker_sha256": getattr(args, "_opencode_worker_sha256", None),
+            "opencode_auth_sha256": getattr(args, "_opencode_auth_sha256", None),
+            "opencode_provider_env_sha256": getattr(
+                args, "_opencode_provider_env_sha256", None
+            ),
+            "opencode_allowed_bun_versions": list(
+                getattr(args, "_opencode_allowed_bun_versions", SOURCE_AUDITED_BUN_VERSIONS)
+            ),
+            "opencode_server_startup_timeout_seconds": getattr(
+                args, "opencode_server_startup_timeout_seconds", 15
+            ),
+            "opencode_sandbox_mode": getattr(args, "opencode_sandbox_mode", "bubblewrap"),
+            "opencode_network_mode": getattr(args, "opencode_network_mode", "allow"),
+            "opencode_provider_env_names": list(
+                getattr(args, "_opencode_provider_env_names", ())
+            ),
+        }
         return (
             record.get("opencode_base_instructions_mode", "opencode")
             == args.opencode_base_instructions_mode
@@ -980,6 +1023,7 @@ def _worker_backend_resume_compatible(
                 record.get("opencode_bun_bin") is None
                 or Path(record["opencode_bun_bin"]).resolve() == expected_bun_bin
             )
+            and all(record.get(key) == value for key, value in expected_fingerprint.items())
         )
     return True
 
@@ -2238,6 +2282,41 @@ def parse_args() -> argparse.Namespace:
         help="Maximum seconds for the private per-rollout OpenCode server to start.",
     )
     parser.add_argument(
+        "--opencode-allowed-bun-versions",
+        default=",".join(SOURCE_AUDITED_BUN_VERSIONS),
+        help="Comma-separated exact Bun versions accepted by the native OpenCode worker.",
+    )
+    parser.add_argument(
+        "--opencode-provider-env",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help=(
+            "Additional provider credential variable to pass to OpenCode. May be repeated; "
+            "unrelated host environment variables are not inherited."
+        ),
+    )
+    parser.add_argument(
+        "--opencode-sandbox-mode",
+        choices=["bubblewrap", "unsafe-none"],
+        default="bubblewrap",
+        help="OpenCode containment mode. Benchmarks require bubblewrap; unsafe-none is open-ended only.",
+    )
+    parser.add_argument(
+        "--opencode-network-mode",
+        choices=["allow", "none"],
+        default="allow",
+        help=(
+            "OpenCode sandbox network policy. The server boundary currently supports only explicit "
+            "'allow'; 'none' fails closed."
+        ),
+    )
+    parser.add_argument(
+        "--opencode-bubblewrap-bin",
+        default="/usr/bin/bwrap",
+        help="bubblewrap executable used for the OpenCode-only external sandbox.",
+    )
+    parser.add_argument(
         "--opencode-initial-prompt",
         default=READ_README_TASK_INSTRUCTIONS,
         help="Initial user text submitted to OpenCode for a non-inherited rollout.",
@@ -2308,9 +2387,25 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
         for version in args.opencode_allowed_versions.split(",")
         if version.strip()
     )
+    opencode_allowed_bun_versions = tuple(
+        version.strip()
+        for version in args.opencode_allowed_bun_versions.split(",")
+        if version.strip()
+    )
+    opencode_bubblewrap_bin: Path | None = None
+    opencode_runtime_version: str | None = None
+    opencode_bun_version: str | None = None
+    opencode_bin_sha256: str | None = None
+    opencode_bun_sha256: str | None = None
+    opencode_worker_sha256: str | None = None
+    opencode_auth_sha256: str | None = None
+    opencode_provider_env_names: tuple[str, ...] = ()
+    opencode_provider_env_sha256: str | None = None
     if args.worker_backend == "opencode":
         if not opencode_allowed_versions:
             raise ValueError("--opencode-allowed-versions must contain at least one version")
+        if not opencode_allowed_bun_versions:
+            raise ValueError("--opencode-allowed-bun-versions must contain at least one version")
         opencode_worker_script = resolve_opencode_worker_script(
             Path(args.opencode_worker_script) if args.opencode_worker_script else None,
         )
@@ -2326,6 +2421,42 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 raise FileNotFoundError(
                     f"OpenCode auth file does not exist: {opencode_auth_file}"
                 )
+        _validate_opencode_containment(
+            args.benchmark, args.opencode_sandbox_mode, args.opencode_network_mode
+        )
+        if args.opencode_sandbox_mode == "bubblewrap":
+            opencode_bubblewrap_bin = resolve_bubblewrap_bin(
+                Path(args.opencode_bubblewrap_bin)
+            )
+        opencode_runtime_version = executable_version(opencode_bin)
+        opencode_bun_version = executable_version(opencode_bun_bin)
+        if opencode_runtime_version not in opencode_allowed_versions:
+            raise RuntimeError(
+                f"OpenCode version {opencode_runtime_version} is not source-audited"
+            )
+        if opencode_bun_version not in opencode_allowed_bun_versions:
+            raise RuntimeError(f"Bun version {opencode_bun_version} is not source-audited")
+        opencode_bin_sha256 = file_sha256(opencode_bin)
+        opencode_bun_sha256 = file_sha256(opencode_bun_bin)
+        opencode_worker_sha256 = opencode_worker_fingerprint(opencode_worker_script)
+        opencode_auth_sha256 = (
+            file_sha256(opencode_auth_file) if opencode_auth_file is not None else None
+        )
+        opencode_provider_env_names = provider_environment_names(
+            args.model, tuple(args.opencode_provider_env)
+        )
+        opencode_provider_env_sha256 = provider_environment_fingerprint(
+            opencode_provider_env_names
+        )
+        args._opencode_runtime_version = opencode_runtime_version
+        args._opencode_bin_sha256 = opencode_bin_sha256
+        args._opencode_bun_version = opencode_bun_version
+        args._opencode_bun_sha256 = opencode_bun_sha256
+        args._opencode_worker_sha256 = opencode_worker_sha256
+        args._opencode_auth_sha256 = opencode_auth_sha256
+        args._opencode_provider_env_names = opencode_provider_env_names
+        args._opencode_provider_env_sha256 = opencode_provider_env_sha256
+        args._opencode_allowed_bun_versions = opencode_allowed_bun_versions
 
     runtime_root = _resolve_runtime_root(args.runtime_root)
     _claim_runtime_benchmark(runtime_root, args.benchmark)
@@ -2853,8 +2984,38 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                             agent=args.opencode_agent,
                             variant=args.opencode_variant,
                             allowed_versions=opencode_allowed_versions,
+                            allowed_bun_versions=opencode_allowed_bun_versions,
                             startup_timeout_seconds=(
                                 args.opencode_server_startup_timeout_seconds
+                            ),
+                            provider_env_names=opencode_provider_env_names,
+                            sandbox_mode=(
+                                "bubblewrap"
+                                if args.opencode_sandbox_mode == "bubblewrap"
+                                else "none"
+                            ),
+                            sandbox_network=args.opencode_network_mode,
+                            bubblewrap_bin=opencode_bubblewrap_bin,
+                            sandbox_read_only_roots=(
+                                PROJECT_ROOT,
+                                seed_output_dir,
+                                shared_workspace_dir,
+                            ),
+                            sandbox_writable_roots=tuple(
+                                path
+                                for path in (
+                                    temp_dir,
+                                    rollout_control_dir,
+                                    rollout_state_dir,
+                                    archive_repo_dir / ".git",
+                                    rollout_root,
+                                    progress_log_path,
+                                    benchmark_events_path,
+                                )
+                                if path is not None and path.exists()
+                            ),
+                            sandbox_masked_paths=(
+                                (DEFAULT_ENV_PATH,) if DEFAULT_ENV_PATH.is_file() else ()
                             ),
                             progress_callback=_progress,
                         )
@@ -3144,6 +3305,34 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                     if args.worker_backend == "opencode"
                     else None
                 ),
+                "opencode_allowed_bun_versions": (
+                    list(opencode_allowed_bun_versions)
+                    if args.worker_backend == "opencode"
+                    else None
+                ),
+                "opencode_runtime_version": opencode_runtime_version,
+                "opencode_bin_sha256": opencode_bin_sha256,
+                "opencode_bun_version": opencode_bun_version,
+                "opencode_bun_sha256": opencode_bun_sha256,
+                "opencode_worker_sha256": opencode_worker_sha256,
+                "opencode_auth_sha256": opencode_auth_sha256,
+                "opencode_provider_env_sha256": opencode_provider_env_sha256,
+                "opencode_server_startup_timeout_seconds": (
+                    args.opencode_server_startup_timeout_seconds
+                    if args.worker_backend == "opencode"
+                    else None
+                ),
+                "opencode_sandbox_mode": (
+                    args.opencode_sandbox_mode if args.worker_backend == "opencode" else None
+                ),
+                "opencode_network_mode": (
+                    args.opencode_network_mode if args.worker_backend == "opencode" else None
+                ),
+                "opencode_provider_env_names": (
+                    list(opencode_provider_env_names)
+                    if args.worker_backend == "opencode"
+                    else None
+                ),
                 "opencode_agent": (
                     args.opencode_agent if args.worker_backend == "opencode" else None
                 ),
@@ -3356,6 +3545,40 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                                         "opencode_system_instructions_chars": None,
                                         "opencode_allowed_versions": (
                                             list(opencode_allowed_versions)
+                                            if args.worker_backend == "opencode"
+                                            else None
+                                        ),
+                                        "opencode_allowed_bun_versions": (
+                                            list(opencode_allowed_bun_versions)
+                                            if args.worker_backend == "opencode"
+                                            else None
+                                        ),
+                                        "opencode_runtime_version": opencode_runtime_version,
+                                        "opencode_bin_sha256": opencode_bin_sha256,
+                                        "opencode_bun_version": opencode_bun_version,
+                                        "opencode_bun_sha256": opencode_bun_sha256,
+                                        "opencode_worker_sha256": opencode_worker_sha256,
+                                        "opencode_auth_sha256": opencode_auth_sha256,
+                                        "opencode_provider_env_sha256": (
+                                            opencode_provider_env_sha256
+                                        ),
+                                        "opencode_server_startup_timeout_seconds": (
+                                            args.opencode_server_startup_timeout_seconds
+                                            if args.worker_backend == "opencode"
+                                            else None
+                                        ),
+                                        "opencode_sandbox_mode": (
+                                            args.opencode_sandbox_mode
+                                            if args.worker_backend == "opencode"
+                                            else None
+                                        ),
+                                        "opencode_network_mode": (
+                                            args.opencode_network_mode
+                                            if args.worker_backend == "opencode"
+                                            else None
+                                        ),
+                                        "opencode_provider_env_names": (
+                                            list(opencode_provider_env_names)
                                             if args.worker_backend == "opencode"
                                             else None
                                         ),
