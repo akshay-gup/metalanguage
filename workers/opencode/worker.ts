@@ -6,6 +6,7 @@ import { basename, dirname, join, resolve } from "node:path"
 import {
   EventNormalizer,
   SseDecoder,
+  customProviderConfig,
   cappedString,
   isRecord,
   parseModel,
@@ -366,7 +367,19 @@ function opencodeConfig(request: RunnerRequest, translated: TranslatedMcp): Reco
     permission: { "*": "allow", question: "deny", task: "deny" },
     mcp: translated.config,
   }
+  let customProvider: Record<string, unknown> | undefined
+  try {
+    customProvider = customProviderConfig(request.model, request.custom_provider)
+  } catch (error) {
+    throw new RunnerError("invalid_custom_provider", "custom OpenCode provider configuration is invalid", {
+      cause: error,
+    })
+  }
+  if (customProvider) config.provider = customProvider
   if (request.test_provider_config !== undefined) {
+    if (customProvider) {
+      throw new RunnerError("invalid_custom_provider", "custom and test provider configuration cannot be combined")
+    }
     if (process.env.METALANGUAGE_OPENCODE_OFFLINE_TEST !== "1") {
       throw new RunnerError("test_provider_forbidden", "test provider configuration requires offline test mode")
     }

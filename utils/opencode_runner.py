@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -16,6 +17,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +25,32 @@ OPENCODE_WORKER_SCRIPT = PROJECT_ROOT / "workers" / "opencode" / "worker.ts"
 SOURCE_AUDITED_OPENCODE_VERSIONS = ("1.18.21",)
 SOURCE_AUDITED_BUN_VERSIONS = ("1.3.14",)
 DEFAULT_BUBBLEWRAP_BIN = Path("/usr/bin/bwrap")
+# Both entries are in pinned OpenCode 1.18.21's BUNDLED_PROVIDERS map. Keeping
+# this allowlist closed prevents the Npm.add() runtime-install fallback.
+SUPPORTED_CUSTOM_PROVIDER_NPM = {
+    "@ai-sdk/openai-compatible": "chat_completions",
+    "@ai-sdk/openai": "responses",
+}
+MAX_CUSTOM_PROVIDER_URL_LENGTH = 2048
+MAX_CUSTOM_PROVIDER_NAME_LENGTH = 128
+MAX_CUSTOM_PROVIDER_LIMIT = 100_000_000
+_CUSTOM_PROVIDER_ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}\Z")
+_CUSTOM_MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}\Z")
+_ENVIRONMENT_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,127}\Z")
+_HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}\Z")
+_UNSAFE_CUSTOM_HEADERS = {
+    "connection",
+    "content-length",
+    "host",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "proxy-connection",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+}
 
 _BASE_ENVIRONMENT_NAMES = {
     "LANG",
@@ -57,6 +85,7 @@ _DURABLE_ERROR_CODES = {
     "ProviderAuthError",
     "UnknownError",
     "invalid_mcp_configuration",
+    "invalid_custom_provider",
     "invalid_model",
     "invalid_sandbox_mount",
     "invalid_working_directory",
@@ -107,6 +136,171 @@ _PROVIDER_ENVIRONMENT = {
     "openrouter": {"OPENROUTER_API_KEY"},
     "xai": {"XAI_API_KEY"},
 }
+
+
+def _validate_provider_environment_name(name: str) -> str:
+    if not _ENVIRONMENT_NAME.fullmatch(name):
+        raise ValueError(f"invalid OpenCode provider environment variable name: {name!r}")
+    if name in {"HOME", "PATH", "TMPDIR"} or name.startswith(
+        ("XDG_", "OPENCODE_", "METALANGUAGE_")
+    ):
+        raise ValueError(f"OpenCode provider environment variable is reserved: {name}")
+    return name
+
+
+def _validate_custom_secret_environment_name(name: str) -> str:
+    validated = _validate_provider_environment_name(name)
+    if validated in _PATH_ENVIRONMENT_KINDS or validated in _BASE_ENVIRONMENT_NAMES:
+        raise ValueError(
+            f"custom OpenCode provider secret environment variable is transport-reserved: {validated}"
+        )
+    return validated
+
+
+def _custom_provider_base_url(value: str) -> str:
+    if not value or len(value) > MAX_CUSTOM_PROVIDER_URL_LENGTH:
+        raise ValueError("--opencode-custom-provider-base-url has an invalid length")
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("--opencode-custom-provider-base-url is invalid") from exc
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("--opencode-custom-provider-base-url must use HTTP or HTTPS with a host")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("--opencode-custom-provider-base-url must not include user information")
+    if parsed.query or parsed.fragment:
+        raise ValueError("--opencode-custom-provider-base-url must not include a query or fragment")
+    hostname = parsed.hostname.rstrip(".").lower()
+    loopback = hostname == "localhost"
+    try:
+        address = ipaddress.ip_address(hostname)
+        loopback = loopback or address.is_loopback
+    except ValueError:
+        labels = hostname.split(".")
+        if (
+            len(hostname) > 253
+            or any(
+                not label
+                or len(label) > 63
+                or not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", label)
+                for label in labels
+            )
+        ):
+            raise ValueError("--opencode-custom-provider-base-url has an invalid host") from None
+    if parsed.scheme == "http" and not loopback:
+        raise ValueError(
+            "--opencode-custom-provider-base-url requires HTTPS for non-loopback endpoints"
+        )
+    host = f"[{hostname}]" if ":" in hostname else hostname
+    netloc = f"{host}:{port}" if port is not None else host
+    path = parsed.path.rstrip("/") or ""
+    return urlunsplit((parsed.scheme, netloc, path, "", ""))
+
+
+def custom_provider_configuration(
+    *,
+    model: str,
+    provider_id: str | None,
+    name: str | None,
+    npm: str | None,
+    base_url: str | None,
+    api_key_env: str | None,
+    header_env: tuple[str, ...] = (),
+    context_limit: int | None = None,
+    output_limit: int | None = None,
+) -> dict[str, Any] | None:
+    values = (provider_id, name, npm, base_url, api_key_env)
+    configured = any(value is not None for value in values) or bool(header_env) or any(
+        value is not None for value in (context_limit, output_limit)
+    )
+    if not configured:
+        return None
+    required = {
+        "--opencode-custom-provider-id": provider_id,
+        "--opencode-custom-provider-name": name,
+        "--opencode-custom-provider-npm": npm,
+        "--opencode-custom-provider-base-url": base_url,
+        "--opencode-custom-provider-api-key-env": api_key_env,
+    }
+    missing = [flag for flag, value in required.items() if value is None or not str(value).strip()]
+    if missing:
+        raise ValueError(f"custom OpenCode provider configuration is incomplete: missing {', '.join(missing)}")
+    assert provider_id is not None and name is not None and npm is not None
+    assert base_url is not None and api_key_env is not None
+    if not _CUSTOM_PROVIDER_ID.fullmatch(provider_id):
+        raise ValueError("--opencode-custom-provider-id must be a lowercase safe identifier")
+    model_parts = model.split("/", 1)
+    if len(model_parts) != 2 or not model_parts[0] or not model_parts[1]:
+        raise ValueError("--model must use provider/model syntax for a custom OpenCode provider")
+    model_provider, model_id = model_parts
+    if model_provider != provider_id:
+        raise ValueError("--model provider ID must match --opencode-custom-provider-id")
+    if not _CUSTOM_MODEL_ID.fullmatch(model_id):
+        raise ValueError("custom OpenCode model ID contains unsupported characters or length")
+    if npm not in SUPPORTED_CUSTOM_PROVIDER_NPM:
+        supported = ", ".join(sorted(SUPPORTED_CUSTOM_PROVIDER_NPM))
+        raise ValueError(f"unsupported custom OpenCode provider package {npm!r}; supported: {supported}")
+    display_name = name.strip()
+    if (
+        not display_name
+        or len(display_name) > MAX_CUSTOM_PROVIDER_NAME_LENGTH
+        or any(ord(character) < 32 or ord(character) == 127 for character in display_name)
+    ):
+        raise ValueError("--opencode-custom-provider-name contains invalid characters or length")
+    api_key_name = _validate_custom_secret_environment_name(api_key_env)
+    headers: dict[str, str] = {}
+    normalized_headers: set[str] = set()
+    for item in header_env:
+        if "=" not in item:
+            raise ValueError("--opencode-custom-provider-header-env must use HEADER=ENV_VAR")
+        header, environment_name = item.split("=", 1)
+        if not _HEADER_NAME.fullmatch(header):
+            raise ValueError(f"invalid custom provider header name: {header!r}")
+        lowered = header.lower()
+        if lowered in _UNSAFE_CUSTOM_HEADERS:
+            raise ValueError(f"custom provider header is transport-controlled: {header}")
+        if lowered in normalized_headers:
+            raise ValueError(f"duplicate custom provider header: {header}")
+        normalized_headers.add(lowered)
+        headers[header] = _validate_custom_secret_environment_name(environment_name)
+    if (context_limit is None) != (output_limit is None):
+        raise ValueError("custom OpenCode context and output limits must be configured together")
+    limits: dict[str, int] | None = None
+    if context_limit is not None and output_limit is not None:
+        for flag, value in (
+            ("--opencode-custom-provider-context-limit", context_limit),
+            ("--opencode-custom-provider-output-limit", output_limit),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or not 0 < value <= MAX_CUSTOM_PROVIDER_LIMIT:
+                raise ValueError(f"{flag} must be a positive integer no greater than {MAX_CUSTOM_PROVIDER_LIMIT}")
+        limits = {"context": context_limit, "output": output_limit}
+    return {
+        "provider_id": provider_id,
+        "provider_name": display_name,
+        "npm": npm,
+        "api_mode": SUPPORTED_CUSTOM_PROVIDER_NPM[npm],
+        "base_url": _custom_provider_base_url(base_url),
+        "api_key_env": api_key_name,
+        "headers": dict(sorted(headers.items(), key=lambda item: item[0].lower())),
+        "model_id": model_id,
+        "limits": limits,
+    }
+
+
+def custom_provider_fingerprint(configuration: dict[str, Any] | None) -> str | None:
+    if configuration is None:
+        return None
+    payload = json.dumps(configuration, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def custom_provider_environment_names(configuration: dict[str, Any] | None) -> tuple[str, ...]:
+    if configuration is None:
+        return ()
+    names = {str(configuration["api_key_env"])}
+    names.update(str(value) for value in configuration.get("headers", {}).values())
+    return tuple(sorted(names))
 
 
 def opencode_worker_script_path() -> Path:
@@ -413,11 +607,7 @@ def provider_environment_names(model: str, explicit: tuple[str, ...] = ()) -> tu
     provider = model.split("/", 1)[0].strip().lower()
     names = set(_PROVIDER_ENVIRONMENT.get(provider, set()))
     for name in explicit:
-        if not name or not name.replace("_", "A").isalnum() or not name[0].isalpha():
-            raise ValueError(f"invalid OpenCode provider environment variable name: {name!r}")
-        if name in {"HOME", "PATH", "TMPDIR"} or name.startswith(("XDG_", "OPENCODE_", "METALANGUAGE_")):
-            raise ValueError(f"OpenCode provider environment variable is reserved: {name}")
-        names.add(name)
+        names.add(_validate_provider_environment_name(name))
     return tuple(sorted(names))
 
 
@@ -607,6 +797,7 @@ def run_opencode_rollout(
     startup_timeout_seconds: int = 15,
     provider_env_names: tuple[str, ...] = (),
     provider_environment: dict[str, str] | None = None,
+    custom_provider: dict[str, Any] | None = None,
     sandbox_mode: str = "bubblewrap",
     sandbox_network: str = "allow",
     bubblewrap_bin: Path | None = None,
@@ -630,6 +821,30 @@ def run_opencode_rollout(
             sandbox_mode=sandbox_mode,
         )
         sandbox_read_only_mounts = (*sandbox_read_only_mounts, *inferred_mounts)
+    else:
+        unexpected_provider_environment = sorted(
+            set(provider_environment) - set(provider_env_names)
+        )
+        if unexpected_provider_environment:
+            raise ValueError(
+                "OpenCode provider environment contains variables outside the named allowlist: "
+                + ", ".join(unexpected_provider_environment)
+            )
+    custom_secret_names = custom_provider_environment_names(custom_provider)
+    missing_custom_allowlist = sorted(set(custom_secret_names) - set(provider_env_names))
+    if missing_custom_allowlist:
+        raise ValueError(
+            "custom OpenCode provider variables are missing from the named allowlist: "
+            + ", ".join(missing_custom_allowlist)
+        )
+    missing_custom_values = [
+        name for name in custom_secret_names if name not in provider_environment
+    ]
+    if missing_custom_values:
+        raise ValueError(
+            "custom OpenCode provider environment variables are unset: "
+            + ", ".join(missing_custom_values)
+        )
     control_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(control_dir, 0o700)
     request_path = control_dir / "opencode_runner.request.json"
@@ -646,6 +861,7 @@ def run_opencode_rollout(
         "timeout_seconds": timeout_seconds,
         "startup_timeout_seconds": startup_timeout_seconds,
         "provider_env_names": list(provider_env_names),
+        "custom_provider": custom_provider,
         "mcp_servers": benchmark_mcp_servers or {},
         "sensitive_mcp_tools": [
             {"server": server, "tool": tool} for server, tool in sensitive_mcp_tools

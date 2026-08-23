@@ -55,6 +55,18 @@ export type McpServerInput = {
 
 export type McpToolSelector = { server: string; tool: string }
 
+export type CustomProviderInput = {
+  provider_id: string
+  provider_name: string
+  npm: "@ai-sdk/openai-compatible" | "@ai-sdk/openai"
+  api_mode: "chat_completions" | "responses"
+  base_url: string
+  api_key_env: string
+  headers: Record<string, string>
+  model_id: string
+  limits: { context: number; output: number } | null
+}
+
 export type RunnerRequest = {
   opencode_bin: string
   allowed_versions?: string[]
@@ -70,6 +82,7 @@ export type RunnerRequest = {
   startup_timeout_seconds?: number | null
   auth_file?: string | null
   provider_env_names?: string[]
+  custom_provider?: CustomProviderInput | null
   spawn_child_handler_command?: string[] | null
   mcp_servers?: Record<string, McpServerInput>
   sensitive_mcp_tools?: McpToolSelector[]
@@ -106,6 +119,143 @@ export function parseModel(value: string): [string, string] {
     throw new Error("OpenCode model must use non-empty provider/model syntax")
   }
   return [value.slice(0, separator), value.slice(separator + 1)]
+}
+
+const CUSTOM_PROVIDER_MODES = {
+  "@ai-sdk/openai-compatible": "chat_completions",
+  "@ai-sdk/openai": "responses",
+} as const
+
+const MAX_CUSTOM_PROVIDER_LIMIT = 100_000_000
+
+export function customProviderConfig(
+  model: string,
+  input: CustomProviderInput | null | undefined,
+): Record<string, unknown> | undefined {
+  if (!input) return undefined
+  if (!isRecord(input)) throw new Error("custom provider configuration is invalid")
+  if (
+    typeof input.provider_id !== "string" ||
+    typeof input.provider_name !== "string" ||
+    typeof input.npm !== "string" ||
+    typeof input.api_mode !== "string" ||
+    typeof input.base_url !== "string" ||
+    typeof input.api_key_env !== "string" ||
+    typeof input.model_id !== "string" ||
+    !isRecord(input.headers)
+  ) {
+    throw new Error("custom provider configuration is invalid")
+  }
+  const [providerID, modelID] = parseModel(model)
+  if (providerID !== input.provider_id || modelID !== input.model_id) {
+    throw new Error("custom provider identity does not match the requested model")
+  }
+  if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(input.provider_id)) {
+    throw new Error("custom provider ID is invalid")
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$/.test(input.model_id)) {
+    throw new Error("custom provider model ID is invalid")
+  }
+  const expectedMode = CUSTOM_PROVIDER_MODES[input.npm]
+  if (!expectedMode || input.api_mode !== expectedMode) {
+    throw new Error("custom provider package is not bundled for the requested API mode")
+  }
+  if (
+    !input.provider_name ||
+    input.provider_name !== input.provider_name.trim() ||
+    input.provider_name.length > 128 ||
+    [...input.provider_name].some((character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127)
+  ) {
+    throw new Error("custom provider name is invalid")
+  }
+  let endpoint: URL
+  try {
+    endpoint = new URL(input.base_url)
+  } catch {
+    throw new Error("custom provider base URL is invalid")
+  }
+  if (
+    input.base_url.length > 2048 ||
+    endpoint.username ||
+    endpoint.password ||
+    endpoint.search ||
+    endpoint.hash
+  ) {
+    throw new Error("custom provider base URL is invalid")
+  }
+  const hostname = endpoint.hostname.toLowerCase().replace(/^\[|\]$/g, "")
+  const loopback = hostname === "localhost" || hostname === "::1" || /^127(?:\.\d{1,3}){3}$/.test(hostname)
+  if (!(["http:", "https:"] as string[]).includes(endpoint.protocol) || (endpoint.protocol === "http:" && !loopback)) {
+    throw new Error("custom provider base URL requires HTTPS unless it is loopback")
+  }
+  const envName = /^[A-Za-z][A-Za-z0-9_]{0,127}$/
+  const transportEnvironment = new Set(["LANG", "LC_ALL", "LC_CTYPE", "NO_COLOR", "REQUESTS_CA_BUNDLE", "SSL_CERT_DIR", "SSL_CERT_FILE", "TERM", "TZ", "AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE", "AZURE_AUTH_LOCATION", "CURL_CA_BUNDLE", "GOOGLE_APPLICATION_CREDENTIALS"])
+  const validEnvironmentName = (value: unknown): value is string =>
+    typeof value === "string" &&
+    envName.test(value) &&
+    !transportEnvironment.has(value) &&
+    !["HOME", "PATH", "TMPDIR"].includes(value) &&
+    !value.startsWith("XDG_") &&
+    !value.startsWith("OPENCODE_") &&
+    !value.startsWith("METALANGUAGE_")
+  if (!validEnvironmentName(input.api_key_env)) throw new Error("custom provider API key environment name is invalid")
+  const headers: Record<string, string> = {}
+  const unsafeHeaders = new Set([
+    "connection",
+    "content-length",
+    "host",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "proxy-connection",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+  ])
+  const seenHeaders = new Set<string>()
+  for (const [name, environmentName] of Object.entries(input.headers)) {
+    const normalized = name.toLowerCase()
+    if (
+      !/^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$/.test(name) ||
+      !validEnvironmentName(environmentName) ||
+      unsafeHeaders.has(normalized) ||
+      seenHeaders.has(normalized)
+    ) {
+      throw new Error("custom provider header configuration is invalid")
+    }
+    seenHeaders.add(normalized)
+    headers[name] = `{env:${environmentName}}`
+  }
+  if (
+    input.limits !== null &&
+    (!isRecord(input.limits) ||
+      !Number.isSafeInteger(input.limits.context) ||
+      input.limits.context <= 0 ||
+      input.limits.context > MAX_CUSTOM_PROVIDER_LIMIT ||
+      !Number.isSafeInteger(input.limits.output) ||
+      input.limits.output <= 0 ||
+      input.limits.output > MAX_CUSTOM_PROVIDER_LIMIT)
+  ) {
+    throw new Error("custom provider limits are invalid")
+  }
+  return {
+    [input.provider_id]: {
+      npm: input.npm,
+      name: input.provider_name,
+      options: {
+        baseURL: input.base_url,
+        apiKey: `{env:${input.api_key_env}}`,
+        ...(Object.keys(headers).length ? { headers } : {}),
+      },
+      models: {
+        [input.model_id]: {
+          name: input.model_id,
+          ...(input.limits ? { limit: input.limits } : {}),
+        },
+      },
+    },
+  }
 }
 
 export function sanitizeIdentifier(value: string): string {

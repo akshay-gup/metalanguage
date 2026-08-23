@@ -43,6 +43,9 @@ from utils.opencode_runner import (
     SOURCE_AUDITED_OPENCODE_VERSIONS,
     executable_version,
     file_sha256,
+    custom_provider_configuration,
+    custom_provider_environment_names,
+    custom_provider_fingerprint,
     opencode_python_fingerprint,
     opencode_worker_fingerprint,
     prepare_provider_environment,
@@ -996,6 +999,12 @@ def _worker_backend_resume_compatible(
             "opencode_provider_env_sha256": getattr(
                 args, "_opencode_provider_env_sha256", None
             ),
+            "opencode_custom_provider_sha256": getattr(
+                args, "_opencode_custom_provider_sha256", None
+            ),
+            "opencode_custom_provider": getattr(
+                args, "_opencode_custom_provider", None
+            ),
             "opencode_allowed_bun_versions": list(
                 getattr(args, "_opencode_allowed_bun_versions", SOURCE_AUDITED_BUN_VERSIONS)
             ),
@@ -1766,6 +1775,7 @@ def run_opencode_worker(
     startup_timeout_seconds: int = 15,
     provider_env_names: tuple[str, ...] = (),
     provider_environment: dict[str, str] | None = None,
+    custom_provider: dict[str, Any] | None = None,
     sandbox_mode: str = "bubblewrap",
     sandbox_network: str = "allow",
     bubblewrap_bin: Path | None = None,
@@ -1799,6 +1809,7 @@ def run_opencode_worker(
         startup_timeout_seconds=startup_timeout_seconds,
         provider_env_names=provider_env_names,
         provider_environment=provider_environment,
+        custom_provider=custom_provider,
         sandbox_mode=sandbox_mode,
         sandbox_network=sandbox_network,
         bubblewrap_bin=bubblewrap_bin,
@@ -2362,6 +2373,55 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--opencode-custom-provider-id",
+        default=None,
+        help="Safe ID for a custom OpenAI-compatible provider; must match the provider in --model.",
+    )
+    parser.add_argument(
+        "--opencode-custom-provider-name",
+        default=None,
+        help="Display name for the custom OpenCode provider.",
+    )
+    parser.add_argument(
+        "--opencode-custom-provider-npm",
+        choices=["@ai-sdk/openai-compatible", "@ai-sdk/openai"],
+        default=None,
+        help=(
+            "Audited bundled AI SDK package: openai-compatible uses chat completions; "
+            "openai uses the Responses API."
+        ),
+    )
+    parser.add_argument(
+        "--opencode-custom-provider-base-url",
+        default=None,
+        help="Custom provider API base URL; non-loopback endpoints require HTTPS.",
+    )
+    parser.add_argument(
+        "--opencode-custom-provider-api-key-env",
+        default=None,
+        metavar="ENV_VAR",
+        help="Environment variable containing the custom provider API key; raw keys are not accepted.",
+    )
+    parser.add_argument(
+        "--opencode-custom-provider-header-env",
+        action="append",
+        default=[],
+        metavar="HEADER=ENV_VAR",
+        help="Custom request header sourced from an environment variable. May be repeated.",
+    )
+    parser.add_argument(
+        "--opencode-custom-provider-context-limit",
+        type=_positive_int_argument,
+        default=None,
+        help="Optional custom model context-token limit; requires the output limit.",
+    )
+    parser.add_argument(
+        "--opencode-custom-provider-output-limit",
+        type=_positive_int_argument,
+        default=None,
+        help="Optional custom model output-token limit; requires the context limit.",
+    )
+    parser.add_argument(
         "--opencode-sandbox-mode",
         choices=["bubblewrap", "unsafe-none"],
         default="bubblewrap",
@@ -2432,6 +2492,22 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
         raise SystemExit("error: --task-file is only valid with --benchmark open-ended")
 
     load_dotenv()
+    opencode_custom_provider = custom_provider_configuration(
+        model=args.model,
+        provider_id=args.opencode_custom_provider_id,
+        name=args.opencode_custom_provider_name,
+        npm=args.opencode_custom_provider_npm,
+        base_url=args.opencode_custom_provider_base_url,
+        api_key_env=args.opencode_custom_provider_api_key_env,
+        header_env=tuple(args.opencode_custom_provider_header_env),
+        context_limit=args.opencode_custom_provider_context_limit,
+        output_limit=args.opencode_custom_provider_output_limit,
+    )
+    if opencode_custom_provider is not None and args.worker_backend != "opencode":
+        raise ValueError("custom OpenCode provider flags require --worker-backend=opencode")
+    opencode_custom_provider_sha256 = custom_provider_fingerprint(
+        opencode_custom_provider
+    )
     api_key: str | None = os.environ.get("OPENROUTER_API_KEY")
     if args.worker_backend == "openrouter" and not api_key:
         raise RuntimeError(f"OPENROUTER_API_KEY is required. Set it in the environment or {DEFAULT_ENV_PATH}.")
@@ -2519,7 +2595,11 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             file_sha256(opencode_auth_file) if opencode_auth_file is not None else None
         )
         opencode_provider_env_names = provider_environment_names(
-            args.model, tuple(args.opencode_provider_env)
+            args.model,
+            (
+                *tuple(args.opencode_provider_env),
+                *custom_provider_environment_names(opencode_custom_provider),
+            ),
         )
         opencode_provider_environment, opencode_credential_mounts = (
             prepare_provider_environment(
@@ -2527,6 +2607,16 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 sandbox_mode=args.opencode_sandbox_mode,
             )
         )
+        missing_custom_provider_env = [
+            name
+            for name in custom_provider_environment_names(opencode_custom_provider)
+            if name not in opencode_provider_environment
+        ]
+        if missing_custom_provider_env:
+            raise ValueError(
+                "custom OpenCode provider environment variables are unset: "
+                + ", ".join(missing_custom_provider_env)
+            )
         opencode_provider_env_sha256 = provider_environment_fingerprint(
             opencode_provider_env_names,
             sandbox_mode=args.opencode_sandbox_mode,
@@ -2550,6 +2640,8 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
         args._opencode_auth_sha256 = opencode_auth_sha256
         args._opencode_provider_env_names = opencode_provider_env_names
         args._opencode_provider_env_sha256 = opencode_provider_env_sha256
+        args._opencode_custom_provider_sha256 = opencode_custom_provider_sha256
+        args._opencode_custom_provider = opencode_custom_provider
         args._opencode_allowed_bun_versions = opencode_allowed_bun_versions
         args._opencode_bubblewrap_bin = (
             str(opencode_bubblewrap_bin) if opencode_bubblewrap_bin is not None else None
@@ -3164,6 +3256,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                             ),
                             provider_env_names=opencode_provider_env_names,
                             provider_environment=opencode_provider_environment,
+                            custom_provider=opencode_custom_provider,
                             sandbox_mode=(
                                 "bubblewrap"
                                 if args.opencode_sandbox_mode == "bubblewrap"
@@ -3492,6 +3585,16 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 "opencode_python_sha256": opencode_python_sha256,
                 "opencode_auth_sha256": opencode_auth_sha256,
                 "opencode_provider_env_sha256": opencode_provider_env_sha256,
+                "opencode_custom_provider": (
+                    opencode_custom_provider
+                    if args.worker_backend == "opencode"
+                    else None
+                ),
+                "opencode_custom_provider_sha256": (
+                    opencode_custom_provider_sha256
+                    if args.worker_backend == "opencode"
+                    else None
+                ),
                 "opencode_server_startup_timeout_seconds": (
                     args.opencode_server_startup_timeout_seconds
                     if args.worker_backend == "opencode"
@@ -3764,6 +3867,16 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                                         "opencode_auth_sha256": opencode_auth_sha256,
                                         "opencode_provider_env_sha256": (
                                             opencode_provider_env_sha256
+                                        ),
+                                        "opencode_custom_provider": (
+                                            opencode_custom_provider
+                                            if args.worker_backend == "opencode"
+                                            else None
+                                        ),
+                                        "opencode_custom_provider_sha256": (
+                                            opencode_custom_provider_sha256
+                                            if args.worker_backend == "opencode"
+                                            else None
                                         ),
                                         "opencode_server_startup_timeout_seconds": (
                                             args.opencode_server_startup_timeout_seconds
