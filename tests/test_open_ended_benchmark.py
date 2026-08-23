@@ -25,6 +25,7 @@ from utils.open_ended_benchmark import (
     OpenEndedConfig,
     resolve_open_ended_task,
 )
+from utils.opencode_runner import custom_provider_configuration, custom_provider_fingerprint
 
 
 class OpenEndedBenchmarkTests(unittest.TestCase):
@@ -59,11 +60,14 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
             args = parse_args()
         self.assertEqual(args.worker_backend, "opencode")
         self.assertEqual(args.opencode_base_instructions_mode, "read-readme")
-        self.assertEqual(args.opencode_allowed_versions, "1.18.19")
+        self.assertEqual(args.opencode_allowed_versions, "1.18.21")
         self.assertEqual(args.opencode_allowed_bun_versions, "1.3.14")
         self.assertEqual(args.opencode_sandbox_mode, "bubblewrap")
         self.assertEqual(args.opencode_network_mode, "allow")
         self.assertEqual(args.opencode_provider_env, [])
+        self.assertIsNone(args.opencode_custom_provider_id)
+        self.assertIsNone(args.opencode_custom_provider_npm)
+        self.assertEqual(args.opencode_custom_provider_header_env, [])
         self.assertIsNone(args.opencode_worker_script)
         self.assertIsNone(args.opencode_bun_bin)
 
@@ -80,7 +84,144 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
             compatible = parse_args()
         self.assertEqual(compatible.opencode_worker_script, "/tmp/legacy-worker.ts")
 
+    def test_actual_main_loop_forwards_custom_provider_without_persisting_secrets(self) -> None:
+        documents = Path.home() / "Documents"
+        documents.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=documents) as temp:
+            root = Path(temp)
+            runtime = root / "runtime"
+            task = root / "task.md"
+            task.write_text("# Custom provider dispatch\n")
+            fake_opencode = root / "opencode"
+            shutil.copyfile(Path(__file__).parent / "fixtures/fake_opencode.py", fake_opencode)
+            fake_opencode.chmod(0o755)
+            argv = [
+                "main_loop.py",
+                "--benchmark",
+                "open-ended",
+                "--task-file",
+                str(task),
+                "--runtime-root",
+                str(runtime),
+                "--worker-backend",
+                "opencode",
+                "--model",
+                "fixture/model-one",
+                "--num-rollouts",
+                "1",
+                "--step",
+                "--opencode-bin",
+                str(fake_opencode),
+                "--opencode-custom-provider-id",
+                "fixture",
+                "--opencode-custom-provider-name",
+                "Fixture Provider",
+                "--opencode-custom-provider-npm",
+                "@ai-sdk/openai-compatible",
+                "--opencode-custom-provider-base-url",
+                "http://127.0.0.1:18080/v1",
+                "--opencode-custom-provider-api-key-env",
+                "CUSTOM_API_KEY",
+                "--opencode-custom-provider-header-env",
+                "X-Custom=CUSTOM_HEADER",
+                "--opencode-custom-provider-context-limit",
+                "8192",
+                "--opencode-custom-provider-output-limit",
+                "1024",
+            ]
+            calls: list[dict[str, object]] = []
+
+            def worker(**kwargs: object) -> WorkerResult:
+                calls.append(kwargs)
+                return WorkerResult("offline", "completed", "final_message")
+
+            with patch.dict(
+                "os.environ",
+                {
+                    "CUSTOM_API_KEY": "sk-DISPATCH-PRIVATE",
+                    "CUSTOM_HEADER": "header-DISPATCH-PRIVATE",
+                },
+            ), patch("sys.argv", argv), patch(
+                "main_loop.run_opencode_worker", side_effect=worker
+            ):
+                _run_main([])
+            self.assertEqual(len(calls), 1)
+            configuration = calls[0]["custom_provider"]
+            self.assertEqual(configuration["provider_id"], "fixture")
+            self.assertEqual(configuration["model_id"], "model-one")
+            self.assertEqual(configuration["limits"], {"context": 8192, "output": 1024})
+            self.assertEqual(
+                calls[0]["provider_env_names"],
+                ("CUSTOM_API_KEY", "CUSTOM_HEADER"),
+            )
+            run_log = (runtime / "logs/runs.jsonl").read_text()
+            self.assertNotIn("DISPATCH-PRIVATE", run_log)
+            record = json.loads(run_log)
+            self.assertEqual(record["opencode_custom_provider"], configuration)
+            self.assertTrue(record["opencode_custom_provider_sha256"])
+
+    def test_custom_provider_defaults_do_not_change_codex_or_openrouter_dispatch(self) -> None:
+        documents = Path.home() / "Documents"
+        documents.mkdir(exist_ok=True)
+        for backend in ("codex", "openrouter"):
+            with self.subTest(backend=backend), tempfile.TemporaryDirectory(dir=documents) as temp:
+                root = Path(temp)
+                task = root / "task.md"
+                task.write_text(f"# {backend} regression\n")
+                argv = [
+                    "main_loop.py",
+                    "--benchmark",
+                    "open-ended",
+                    "--task-file",
+                    str(task),
+                    "--runtime-root",
+                    str(root / "runtime"),
+                    "--worker-backend",
+                    backend,
+                    "--model",
+                    "fixture/model",
+                    "--num-rollouts",
+                    "1",
+                    "--step",
+                ]
+                if backend == "codex":
+                    argv.extend(["--codex-runner-bin", "/bin/true", "--codex-home", str(root / "codex-home")])
+                codex_calls: list[dict[str, object]] = []
+                openrouter_calls: list[dict[str, object]] = []
+
+                def codex_worker(**kwargs: object) -> WorkerResult:
+                    codex_calls.append(kwargs)
+                    return WorkerResult("offline", "completed", "final_message")
+
+                def openrouter_worker(**kwargs: object) -> WorkerResult:
+                    openrouter_calls.append(kwargs)
+                    return WorkerResult("offline", "completed", "final_message")
+
+                with patch.dict("os.environ", {"OPENROUTER_API_KEY": "test-only-key"}), patch(
+                    "sys.argv", argv
+                ), patch("main_loop.run_codex_worker", side_effect=codex_worker), patch(
+                    "main_loop.run_worker", side_effect=openrouter_worker
+                ), patch(
+                    "main_loop.run_opencode_worker",
+                    side_effect=AssertionError("OpenCode dispatch must remain inactive"),
+                ):
+                    _run_main([])
+                self.assertEqual(len(codex_calls), 1 if backend == "codex" else 0)
+                self.assertEqual(len(openrouter_calls), 1 if backend == "openrouter" else 0)
+
     def test_opencode_resume_requires_matching_backend_configuration(self) -> None:
+        custom_provider = custom_provider_configuration(
+            model="fixture/model-one",
+            provider_id="fixture",
+            name="Fixture Provider",
+            npm="@ai-sdk/openai-compatible",
+            base_url="https://provider.example/v1",
+            api_key_env="CUSTOM_API_KEY",
+            header_env=("X-Custom=CUSTOM_HEADER",),
+            context_limit=8192,
+            output_limit=1024,
+        )
+        custom_provider_sha256 = custom_provider_fingerprint(custom_provider)
         args = Namespace(
             worker_backend="opencode",
             opencode_base_instructions_mode="read-readme",
@@ -90,7 +231,7 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
             worker_timeout_seconds=3600,
             opencode_sandbox_mode="bubblewrap",
             opencode_network_mode="allow",
-            _opencode_runtime_version="1.18.19",
+            _opencode_runtime_version="1.18.21",
             _opencode_bin_sha256="opencode-sha",
             _opencode_bun_version="1.3.14",
             _opencode_bun_sha256="bun-sha",
@@ -99,6 +240,8 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
             _opencode_auth_sha256=None,
             _opencode_provider_env_names=("OPENAI_API_KEY",),
             _opencode_provider_env_sha256="provider-env-sha",
+            _opencode_custom_provider_sha256=custom_provider_sha256,
+            _opencode_custom_provider=custom_provider,
             _opencode_allowed_bun_versions=("1.3.14",),
             _opencode_bubblewrap_bin="/usr/bin/bwrap",
             _opencode_bubblewrap_version="bubblewrap 0.11.0",
@@ -111,7 +254,7 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
             "opencode_base_instructions_mode": "read-readme",
             "opencode_agent": "build",
             "opencode_variant": None,
-            "opencode_runtime_version": "1.18.19",
+            "opencode_runtime_version": "1.18.21",
             "opencode_bin_sha256": "opencode-sha",
             "opencode_bun_version": "1.3.14",
             "opencode_bun_sha256": "bun-sha",
@@ -119,6 +262,8 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
             "opencode_python_sha256": "python-sha",
             "opencode_auth_sha256": None,
             "opencode_provider_env_sha256": "provider-env-sha",
+            "opencode_custom_provider": custom_provider,
+            "opencode_custom_provider_sha256": custom_provider_sha256,
             "opencode_allowed_bun_versions": ["1.3.14"],
             "opencode_server_startup_timeout_seconds": 15,
             "opencode_worker_timeout_seconds": 3600,
@@ -178,6 +323,42 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                 {**record, "opencode_provider_env_sha256": "changed"}, args
             )
         )
+        custom_variants = (
+            {
+                "model": "other/model-one",
+                "provider_id": "other",
+            },
+            {"npm": "@ai-sdk/openai"},
+            {"base_url": "https://other.example/v1"},
+            {"model": "fixture/model-two"},
+            {"context_limit": 16384},
+            {"header_env": ("X-Other=CUSTOM_HEADER",)},
+        )
+        base_custom = {
+            "model": "fixture/model-one",
+            "provider_id": "fixture",
+            "name": "Fixture Provider",
+            "npm": "@ai-sdk/openai-compatible",
+            "base_url": "https://provider.example/v1",
+            "api_key_env": "CUSTOM_API_KEY",
+            "header_env": ("X-Custom=CUSTOM_HEADER",),
+            "context_limit": 8192,
+            "output_limit": 1024,
+        }
+        for overrides in custom_variants:
+            with self.subTest(custom_provider_overrides=overrides):
+                values = {**base_custom, **overrides}
+                changed = custom_provider_configuration(**values)
+                self.assertFalse(
+                    _worker_backend_resume_compatible(
+                        {
+                            **record,
+                            "opencode_custom_provider": changed,
+                            "opencode_custom_provider_sha256": custom_provider_fingerprint(changed),
+                        },
+                        args,
+                    )
+                )
         self.assertFalse(
             _worker_backend_resume_compatible(
                 {**record, "opencode_allowed_bun_versions": ["1.3.13"]}, args

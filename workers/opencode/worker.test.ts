@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test"
 import {
   EventNormalizer,
   SseDecoder,
+  customProviderConfig,
   safeErrorCode,
   translateMcp,
   type McpServerInput,
@@ -25,6 +26,77 @@ function mcpServer(): McpServerInput {
 }
 
 describe("OpenCode native protocol adapter", () => {
+  test("builds exact offline custom provider configs for chat and responses modes", () => {
+    const base = {
+      provider_id: "fixture",
+      provider_name: "Fixture Provider",
+      base_url: "http://127.0.0.1:8000/v1",
+      api_key_env: "FIXTURE_API_KEY",
+      headers: { "X-Fixture": "FIXTURE_HEADER" },
+      model_id: "model-one",
+      limits: { context: 8192, output: 1024 },
+    }
+    const chat = customProviderConfig("fixture/model-one", {
+      ...base,
+      npm: "@ai-sdk/openai-compatible",
+      api_mode: "chat_completions",
+    })
+    expect(chat).toEqual({
+      fixture: {
+        npm: "@ai-sdk/openai-compatible",
+        name: "Fixture Provider",
+        options: {
+          baseURL: "http://127.0.0.1:8000/v1",
+          apiKey: "{env:FIXTURE_API_KEY}",
+          headers: { "X-Fixture": "{env:FIXTURE_HEADER}" },
+        },
+        models: {
+          "model-one": {
+            name: "model-one",
+            limit: { context: 8192, output: 1024 },
+          },
+        },
+      },
+    })
+    expect(
+      customProviderConfig("fixture/model-one", {
+        ...base,
+        npm: "@ai-sdk/openai",
+        api_mode: "responses",
+      }),
+    ).toHaveProperty("fixture.npm", "@ai-sdk/openai")
+    expect(() =>
+      customProviderConfig("other/model-one", {
+        ...base,
+        npm: "@ai-sdk/openai-compatible",
+        api_mode: "chat_completions",
+      }),
+    ).toThrow("does not match")
+    expect(() =>
+      customProviderConfig("fixture/model-one", {
+        ...base,
+        npm: "@ai-sdk/openai",
+        api_mode: "chat_completions",
+      }),
+    ).toThrow("not bundled")
+    expect(() =>
+      customProviderConfig("fixture/model-one", {
+        ...base,
+        headers: { "Proxy-Authorization": "FIXTURE_HEADER" },
+        npm: "@ai-sdk/openai-compatible",
+        api_mode: "chat_completions",
+      }),
+    ).toThrow("header configuration")
+    expect(() =>
+      customProviderConfig("fixture/model-one", {
+        ...base,
+        limits: { context: 100_000_001, output: 1024 },
+        npm: "@ai-sdk/openai-compatible",
+        api_mode: "chat_completions",
+      }),
+    ).toThrow("limits")
+  })
+
   test("translates MCP names, native config, permissions, and sensitive selectors", () => {
     const translated = translateMcp(
       { supergpqa: mcpServer() },

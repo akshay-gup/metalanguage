@@ -270,6 +270,52 @@ Useful flags include `--opencode-bin`, `--opencode-bun-bin`,
 `--opencode-base-instructions-mode read-readme|opencode`. Provider environment
 credentials are selected from a reviewed provider-specific allowlist; additional
 names must be explicit. Unrelated host environment variables are not inherited.
+
+The native worker supports a narrow form of the official OpenCode
+[custom-provider configuration](https://opencode.ai/docs/providers/#custom-provider)
+for generic OpenAI-compatible endpoints. The provider portion of `--model`
+must equal `--opencode-custom-provider-id`. The audited package allowlist is
+`@ai-sdk/openai-compatible` for `/v1/chat/completions` and `@ai-sdk/openai` for
+`/v1/responses`. Both packages are bundled by pinned OpenCode `1.18.21`, so the
+worker never installs provider packages at runtime; any other package fails
+before launch.
+
+A complete custom configuration requires provider ID, display name, package,
+base URL, and an API-key environment-variable name. Optional headers use
+repeatable `--opencode-custom-provider-header-env HEADER=ENV_VAR`; literal key
+or header values are not accepted. Context and output limits are optional but
+must be supplied together. Plain HTTP is accepted only for loopback endpoints;
+non-loopback endpoints require HTTPS.
+
+The private config emits the documented `provider.<id>.npm`, `name`, `models`,
+`options.baseURL`, `options.apiKey: "{env:VAR}"`, `options.headers`, and
+per-model `limit.context`/`limit.output` fields.
+
+For example:
+
+```bash
+export MY_PROVIDER_API_KEY='replace-me'
+export MY_PROVIDER_TENANT='replace-me'
+python3 main_loop.py \
+  --worker-backend opencode \
+  --model local-ai/my-model \
+  --opencode-custom-provider-id local-ai \
+  --opencode-custom-provider-name 'Local AI' \
+  --opencode-custom-provider-npm @ai-sdk/openai-compatible \
+  --opencode-custom-provider-base-url http://127.0.0.1:8000/v1 \
+  --opencode-custom-provider-api-key-env MY_PROVIDER_API_KEY \
+  --opencode-custom-provider-header-env X-Tenant=MY_PROVIDER_TENANT \
+  --opencode-custom-provider-context-limit 32768 \
+  --opencode-custom-provider-output-limit 4096
+```
+
+Only environment-variable names and other nonsecret settings enter the private
+disposable config and run metadata. Secret values travel through the existing
+allowlisted environment/fingerprint pipeline; run records contain their
+aggregate fingerprint, not their values. Model-controlled shell children still
+receive those variables blanked, while benchmark MCP children retain the
+separate host-bridge environment policy.
+
 Known path-valued credentials and certificate settings, including
 `GOOGLE_APPLICATION_CREDENTIALS`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, and
 `REQUESTS_CA_BUNDLE`, are validated and rebound read-only at stable per-variable

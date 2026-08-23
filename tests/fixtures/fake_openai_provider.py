@@ -12,6 +12,11 @@ from pathlib import Path
 
 
 CAPTURE = Path(os.environ["FAKE_PROVIDER_CAPTURE"])
+TRANSPORT_CAPTURE = (
+    Path(os.environ["FAKE_PROVIDER_TRANSPORT_CAPTURE"])
+    if os.environ.get("FAKE_PROVIDER_TRANSPORT_CAPTURE")
+    else None
+)
 MODE = os.environ.get("FAKE_PROVIDER_MODE", "final")
 TOOL_NAME = os.environ.get("FAKE_PROVIDER_TOOL", "spawn_child")
 TOOL_ARGS = json.loads(os.environ.get("FAKE_PROVIDER_TOOL_ARGS", "{}"))
@@ -30,13 +35,124 @@ class Handler(BaseHTTPRequestHandler):
         return
 
     def do_POST(self) -> None:  # noqa: N802
-        if self.path != "/v1/chat/completions":
+        if self.path not in {"/v1/chat/completions", "/v1/responses"}:
             self.send_error(404)
             return
         length = int(self.headers.get("Content-Length", "0"))
         request = json.loads(self.rfile.read(length))
         with CAPTURE.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(request, sort_keys=True) + "\n")
+        if TRANSPORT_CAPTURE is not None:
+            with TRANSPORT_CAPTURE.open("a", encoding="utf-8") as stream:
+                stream.write(
+                    json.dumps(
+                        {
+                            "path": self.path,
+                            "headers": {
+                                name.lower(): value for name, value in self.headers.items()
+                            },
+                            "model": request.get("model"),
+                        },
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
+
+        if MODE == "error":
+            reflected = (
+                f"provider rejected {self.headers.get('Authorization', '')} "
+                f"{self.headers.get('X-Custom-Secret', '')}"
+            )
+            body = json.dumps({"error": {"message": reflected, "type": "fixture_error"}}).encode()
+            self.send_response(401)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+            self.wfile.flush()
+            return
+
+        if self.path == "/v1/responses":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            response_id = "resp_fixture"
+            item_id = "msg_fixture"
+            for payload in (
+                {
+                    "type": "response.created",
+                    "response": {
+                        "id": response_id,
+                        "created_at": int(time.time()),
+                        "model": request.get("model"),
+                        "service_tier": None,
+                    },
+                },
+                {
+                    "type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": {
+                        "type": "message",
+                        "id": item_id,
+                        "status": "in_progress",
+                        "role": "assistant",
+                        "content": [],
+                    },
+                },
+                {
+                    "type": "response.content_part.added",
+                    "item_id": item_id,
+                    "output_index": 0,
+                    "content_index": 0,
+                    "part": {"type": "output_text", "text": "", "annotations": []},
+                },
+                {
+                    "type": "response.output_text.delta",
+                    "item_id": item_id,
+                    "output_index": 0,
+                    "content_index": 0,
+                    "delta": "offline final assistant",
+                    "logprobs": None,
+                },
+                {
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": {
+                        "type": "message",
+                        "id": item_id,
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "offline final assistant",
+                                "annotations": [],
+                            }
+                        ],
+                    },
+                },
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": response_id,
+                        "incomplete_details": None,
+                        "service_tier": None,
+                        "usage": {
+                            "input_tokens": 1,
+                            "input_tokens_details": None,
+                            "output_tokens": 1,
+                            "output_tokens_details": None,
+                        },
+                    },
+                },
+            ):
+                chunk(self, payload)
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.flush()
+            return
 
         messages = request.get("messages", [])
         tool_results = [message for message in messages if message.get("role") == "tool"]

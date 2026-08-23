@@ -19,9 +19,13 @@ from utils.opencode_runner import (
     MAX_CREDENTIAL_BYTES,
     MAX_CREDENTIAL_DEPTH,
     MAX_CREDENTIAL_FILES,
+    MAX_CUSTOM_PROVIDER_LIMIT,
     _handle_runner_line,
     _rollout_environment,
     _terminate_process_group,
+    custom_provider_configuration,
+    custom_provider_environment_names,
+    custom_provider_fingerprint,
     opencode_worker_script_path,
     normalize_error_code,
     prepare_provider_environment,
@@ -66,6 +70,22 @@ def _test_provider_config(url: str) -> dict[str, object]:
     }
 
 
+def _custom_provider(**overrides: object) -> dict[str, object] | None:
+    values: dict[str, object] = {
+        "model": "fixture/model-one",
+        "provider_id": "fixture",
+        "name": "Fixture Provider",
+        "npm": "@ai-sdk/openai-compatible",
+        "base_url": "http://127.0.0.1:8000/v1",
+        "api_key_env": "FIXTURE_API_KEY",
+        "header_env": ("X-Fixture=FIXTURE_HEADER",),
+        "context_limit": 8192,
+        "output_limit": 1024,
+    }
+    values.update(overrides)
+    return custom_provider_configuration(**values)  # type: ignore[arg-type]
+
+
 class Buffer:
     def __init__(self) -> None:
         self.value = ""
@@ -78,9 +98,147 @@ class Buffer:
 
 
 class OpenCodeRunnerTests(unittest.TestCase):
+    audited_opencode_version = "1.18.21"
+
     def setUp(self) -> None:
         self.worker_script = opencode_worker_script_path()
         self.bun_bin = resolve_bun_bin(None)
+
+    def test_custom_provider_validation_and_secret_name_collection(self) -> None:
+        self.assertIsNone(
+            custom_provider_configuration(
+                model="openai/model",
+                provider_id=None,
+                name=None,
+                npm=None,
+                base_url=None,
+                api_key_env=None,
+            )
+        )
+        configured = _custom_provider()
+        assert configured is not None
+        self.assertEqual(configured["provider_id"], "fixture")
+        self.assertEqual(configured["api_mode"], "chat_completions")
+        self.assertEqual(configured["base_url"], "http://127.0.0.1:8000/v1")
+        self.assertEqual(
+            custom_provider_environment_names(configured),
+            ("FIXTURE_API_KEY", "FIXTURE_HEADER"),
+        )
+        self.assertEqual(custom_provider_fingerprint(configured), custom_provider_fingerprint(dict(configured)))
+        self.assertNotEqual(
+            custom_provider_fingerprint(configured),
+            custom_provider_fingerprint({**configured, "base_url": "https://example.test/v1"}),
+        )
+
+    def test_custom_provider_rejects_partial_identity_and_package_mismatches(self) -> None:
+        required = ("provider_id", "name", "npm", "base_url", "api_key_env")
+        for field in required:
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "incomplete"):
+                _custom_provider(**{field: None})
+        for overrides, message in (
+            ({"provider_id": "Bad Provider"}, "safe identifier"),
+            ({"model": "other/model-one"}, "must match"),
+            ({"model": "fixture/model with space"}, "unsupported characters"),
+            ({"npm": "@vendor/unaudited"}, "unsupported"),
+            ({"name": "bad\nname"}, "invalid characters"),
+            ({"name": "x" * 129}, "invalid characters"),
+        ):
+            with self.subTest(overrides=overrides), self.assertRaisesRegex(ValueError, message):
+                _custom_provider(**overrides)
+
+    def test_custom_provider_url_policy(self) -> None:
+        for url in (
+            "http://localhost:8000/v1/",
+            "http://127.1.2.3:8000/v1",
+            "http://[::1]:8000/v1",
+            "https://provider.example/v1/",
+        ):
+            with self.subTest(url=url):
+                configured = _custom_provider(base_url=url)
+                assert configured is not None
+                self.assertFalse(str(configured["base_url"]).endswith("/"))
+        for url, message in (
+            ("http://provider.example/v1", "requires HTTPS"),
+            ("ftp://provider.example/v1", "HTTP or HTTPS"),
+            ("https:///v1", "with a host"),
+            ("https://bad_host/v1", "invalid host"),
+            ("https://user:pass@provider.example/v1", "user information"),
+            ("https://provider.example/v1?secret=x", "query or fragment"),
+            ("https://provider.example/v1#fragment", "query or fragment"),
+            ("https://" + "x" * 2050, "invalid length"),
+        ):
+            with self.subTest(url=url), self.assertRaisesRegex(ValueError, message):
+                _custom_provider(base_url=url)
+
+    def test_custom_provider_header_environment_and_limit_policy(self) -> None:
+        for headers, message in (
+            (("missing-separator",), "HEADER=ENV_VAR"),
+            (("bad header=FIXTURE_HEADER",), "header name"),
+            (("Host=FIXTURE_HEADER",), "transport-controlled"),
+            (("Proxy-Authorization=FIXTURE_HEADER",), "transport-controlled"),
+            (("X-One=FIXTURE_HEADER", "x-one=OTHER_SECRET"), "duplicate"),
+            (("X-One=1INVALID",), "environment variable name"),
+            (("X-One=OPENCODE_TOKEN",), "reserved"),
+        ):
+            with self.subTest(headers=headers), self.assertRaisesRegex(ValueError, message):
+                _custom_provider(header_env=headers)
+        for environment_name, message in (
+            ("1INVALID", "environment variable name"),
+            ("METALANGUAGE_SECRET", "reserved"),
+            ("SSL_CERT_FILE", "transport-reserved"),
+            ("X" * 129, "environment variable name"),
+        ):
+            with self.subTest(environment_name=environment_name), self.assertRaisesRegex(ValueError, message):
+                _custom_provider(api_key_env=environment_name)
+        for overrides, message in (
+            ({"context_limit": None}, "configured together"),
+            ({"output_limit": None}, "configured together"),
+            ({"context_limit": 0}, "positive integer"),
+            ({"output_limit": True}, "positive integer"),
+            ({"context_limit": MAX_CUSTOM_PROVIDER_LIMIT + 1}, "no greater"),
+        ):
+            with self.subTest(overrides=overrides), self.assertRaisesRegex(ValueError, message):
+                _custom_provider(**overrides)
+
+    def test_custom_provider_direct_runner_requires_exact_named_secret_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            configuration = _custom_provider()
+            base = {
+                "worker_script": root / "worker.ts",
+                "bun_bin": root / "bun",
+                "opencode_bin": root / "opencode",
+                "model": "fixture/model-one",
+                "workdir": root / "workdir",
+                "control_dir": root / "control",
+                "worker_state_dir": root / "state",
+                "timeout_seconds": 1,
+                "initial_user_text": "test",
+                "sandbox_mode": "unsafe-none",
+                "custom_provider": configuration,
+            }
+            with self.assertRaisesRegex(ValueError, "missing from the named allowlist"):
+                run_opencode_rollout(
+                    **base,
+                    provider_env_names=("FIXTURE_API_KEY",),
+                    provider_environment={"FIXTURE_API_KEY": "secret"},
+                )
+            with self.assertRaisesRegex(ValueError, "outside the named allowlist"):
+                run_opencode_rollout(
+                    **base,
+                    provider_env_names=("FIXTURE_API_KEY", "FIXTURE_HEADER"),
+                    provider_environment={
+                        "FIXTURE_API_KEY": "secret",
+                        "FIXTURE_HEADER": "header",
+                        "UNEXPECTED_SECRET": "unexpected",
+                    },
+                )
+            with self.assertRaisesRegex(ValueError, "variables are unset"):
+                run_opencode_rollout(
+                    **base,
+                    provider_env_names=("FIXTURE_API_KEY", "FIXTURE_HEADER"),
+                    provider_environment={"FIXTURE_API_KEY": "secret"},
+                )
 
     def _fake_cli(self, root: Path) -> Path:
         target = root / "opencode"
@@ -105,6 +263,7 @@ class OpenCodeRunnerTests(unittest.TestCase):
                 "PATH": "/usr/bin:/bin",
                 "LANG": "C.UTF-8",
                 "FAKE_PROVIDER_CAPTURE": str(capture),
+                "FAKE_PROVIDER_TRANSPORT_CAPTURE": str(root / "provider_transport.jsonl"),
                 "FAKE_PROVIDER_MODE": mode,
                 "FAKE_PROVIDER_TOOL": tool,
                 "FAKE_PROVIDER_TOOL_ARGS": json.dumps(arguments or {}),
@@ -140,6 +299,10 @@ class OpenCodeRunnerTests(unittest.TestCase):
         sensitive: tuple[tuple[str, str], ...] = (),
         timeout: int = 30,
         provider_env_names: tuple[str, ...] = (),
+        provider_environment: dict[str, str] | None = None,
+        custom_provider: dict[str, object] | None = None,
+        model: str = "test/test-model",
+        allowed_versions: tuple[str, ...] | None = None,
     ) -> dict[str, object]:
         workdir = root / "workdir"
         workdir.mkdir(exist_ok=True)
@@ -147,7 +310,7 @@ class OpenCodeRunnerTests(unittest.TestCase):
             worker_script=self.worker_script,
             bun_bin=self.bun_bin,
             opencode_bin=resolve_opencode_bin(None),
-            model="test/test-model",
+            model=model,
             workdir=workdir,
             control_dir=root / "control",
             worker_state_dir=root / "state",
@@ -157,11 +320,13 @@ class OpenCodeRunnerTests(unittest.TestCase):
             continuation_context_path=continuation,
             benchmark_mcp_servers=mcp,
             sensitive_mcp_tools=sensitive,
-            allowed_versions=("1.18.19",),
+            allowed_versions=allowed_versions or (self.audited_opencode_version,),
             startup_timeout_seconds=30,
             provider_env_names=provider_env_names,
+            provider_environment=provider_environment,
+            custom_provider=custom_provider,
             extra_environment={"METALANGUAGE_OPENCODE_OFFLINE_TEST": "1"},
-            test_provider_config=_test_provider_config(url),
+            test_provider_config=(None if custom_provider is not None else _test_provider_config(url)),
         )
 
     def _spawn_context(self, root: Path) -> Path:
@@ -244,7 +409,7 @@ class OpenCodeRunnerTests(unittest.TestCase):
             sensitive_mcp_tools=sensitive,
             agent=agent,
             variant=variant,
-            allowed_versions=("1.18.19",),
+            allowed_versions=("1.18.21",),
             startup_timeout_seconds=2,
             provider_env_names=provider_env_names,
             extra_environment={
@@ -264,7 +429,7 @@ class OpenCodeRunnerTests(unittest.TestCase):
             result = self._run(root, agent="build", variant="high")
             self.assertEqual(result["status"], "completed")
             self.assertEqual(result["final_text"], "fixture final")
-            self.assertEqual(result["runtime_version"], "1.18.19")
+            self.assertEqual(result["runtime_version"], "1.18.21")
             self.assertTrue(result["isolated_state_cleaned"])
             prompt = json.loads((root / "workdir/fake_prompt.json").read_text())
             self.assertEqual(prompt["system"], "exact system instruction")
@@ -451,7 +616,7 @@ class OpenCodeRunnerTests(unittest.TestCase):
                 worker_state_dir=root / "state",
                 timeout_seconds=2,
                 initial_user_text="ordinary prompt",
-                allowed_versions=("1.18.19",),
+                allowed_versions=("1.18.21",),
                 allowed_bun_versions=("9.9.9",),
                 startup_timeout_seconds=2,
             )
@@ -483,7 +648,7 @@ class OpenCodeRunnerTests(unittest.TestCase):
             workdir.mkdir()
             request = {
                 "opencode_bin": str(self._fake_cli(root)),
-                "allowed_versions": ["1.18.19"],
+                "allowed_versions": ["1.18.21"],
                 "model": "fixture/model",
                 "cwd": str(workdir),
                 "state_root": str(root / "state"),
@@ -536,7 +701,7 @@ class OpenCodeRunnerTests(unittest.TestCase):
             workdir.mkdir()
             request = {
                 "opencode_bin": str(self._fake_cli(root)),
-                "allowed_versions": ["1.18.19"],
+                "allowed_versions": ["1.18.21"],
                 "allowed_bun_versions": ["1.3.14"],
                 "model": "fixture/model",
                 "cwd": str(workdir),
@@ -791,6 +956,7 @@ class OpenCodeRunnerTests(unittest.TestCase):
                 "error_code": None,
                 "error_message": None,
             }
+            custom_provider = _custom_provider()
             with patch("main_loop.run_opencode_rollout", return_value=expected) as rollout:
                 result = run_opencode_worker(
                     **paths,
@@ -798,11 +964,12 @@ class OpenCodeRunnerTests(unittest.TestCase):
                     timeout_seconds=17,
                     initial_user_text="exact prompt",
                     system_instructions="exact system",
-                    allowed_versions=("1.18.19",),
+                    allowed_versions=("1.18.21",),
                     allowed_bun_versions=("1.3.14",),
                     startup_timeout_seconds=19,
                     provider_env_names=("OPENAI_API_KEY",),
                     provider_environment={"OPENAI_API_KEY": "secret"},
+                    custom_provider=custom_provider,
                     sandbox_mode="bubblewrap",
                     sandbox_network="allow",
                     sandbox_read_only_roots=(root / "readonly",),
@@ -816,6 +983,7 @@ class OpenCodeRunnerTests(unittest.TestCase):
                 "allowed_bun_versions",
                 "provider_env_names",
                 "provider_environment",
+                "custom_provider",
                 "sandbox_mode",
                 "sandbox_network",
                 "bubblewrap_bin",
@@ -826,6 +994,7 @@ class OpenCodeRunnerTests(unittest.TestCase):
             ):
                 self.assertIn(key, kwargs)
             self.assertEqual(kwargs["sandbox_read_only_mounts"], (mount,))
+            self.assertEqual(kwargs["custom_provider"], custom_provider)
 
     def test_malformed_runner_stdout_is_not_persisted(self) -> None:
         stream = Buffer()
@@ -944,7 +1113,7 @@ class OpenCodeRunnerTests(unittest.TestCase):
                 for index, result in enumerate(results):
                     self.assertEqual(result["status"], "completed", result)
                     self.assertEqual(result["final_text"], "offline final assistant")
-                    self.assertEqual(result["runtime_version"], "1.18.19")
+                    self.assertEqual(result["runtime_version"], self.audited_opencode_version)
                     self.assertTrue(result["isolated_state_cleaned"])
                     events = [
                         json.loads(line)
@@ -964,6 +1133,157 @@ class OpenCodeRunnerTests(unittest.TestCase):
                 self.assertEqual(len(auth), count)
                 self.assertEqual(len(state_roots), count)
                 self.assertEqual(len(runtime_pids), count)
+
+    def test_real_installed_opencode_custom_provider_chat_and_responses_modes(self) -> None:
+        for npm, expected_mode, expected_path in (
+            ("@ai-sdk/openai-compatible", "chat_completions", "/v1/chat/completions"),
+            ("@ai-sdk/openai", "responses", "/v1/responses"),
+        ):
+            with self.subTest(npm=npm), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                provider, url, _capture = self._start_provider(root, mode="final")
+                configuration = _custom_provider(
+                    npm=npm,
+                    base_url=url,
+                    api_key_env="CUSTOM_API_KEY",
+                    header_env=("X-Custom-Secret=CUSTOM_HEADER_SECRET",),
+                    context_limit=16384,
+                    output_limit=2048,
+                )
+                assert configuration is not None
+                self.assertEqual(configuration["api_mode"], expected_mode)
+                secrets = {
+                    "CUSTOM_API_KEY": "sk-CUSTOM-PROVIDER-PRIVATE",
+                    "CUSTOM_HEADER_SECRET": "header-CUSTOM-PROVIDER-PRIVATE",
+                }
+                try:
+                    with patch.dict(os.environ, secrets):
+                        result = self._run_real(
+                            root,
+                            url=url,
+                            prompt="custom provider final response",
+                            model="fixture/model-one",
+                            provider_env_names=tuple(secrets),
+                            custom_provider=configuration,
+                        )
+                finally:
+                    self._stop_provider(provider)
+                self.assertEqual(result["status"], "completed", result)
+                self.assertEqual(result["final_text"], "offline final assistant")
+                transport = [
+                    json.loads(line)
+                    for line in (root / "provider_transport.jsonl").read_text().splitlines()
+                ]
+                self.assertEqual(transport[0]["path"], expected_path)
+                self.assertEqual(transport[0]["model"], "model-one")
+                self.assertEqual(
+                    transport[0]["headers"]["authorization"],
+                    "Bearer sk-CUSTOM-PROVIDER-PRIVATE",
+                )
+                self.assertEqual(
+                    transport[0]["headers"]["x-custom-secret"],
+                    "header-CUSTOM-PROVIDER-PRIVATE",
+                )
+                for artifact_key in ("request_path", "events_path", "stderr_path"):
+                    durable = Path(str(result[artifact_key])).read_text()
+                    self.assertNotIn("CUSTOM-PROVIDER-PRIVATE", durable)
+                request = json.loads(Path(str(result["request_path"])).read_text())
+                self.assertEqual(request["custom_provider"], configuration)
+                self.assertTrue(result["isolated_state_cleaned"])
+                self._assert_pid_gone(self._runtime_pid(result))
+
+    def test_two_concurrent_real_custom_provider_rollouts_are_isolated(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            providers: list[subprocess.Popen[str]] = []
+            urls: list[str] = []
+            try:
+                for index in range(2):
+                    child = root / f"worker-{index}"
+                    child.mkdir()
+                    provider, url, _capture = self._start_provider(child, mode="final")
+                    providers.append(provider)
+                    urls.append(url)
+
+                def launch(index: int) -> dict[str, object]:
+                    child = root / f"worker-{index}"
+                    api_name = f"CUSTOM_API_KEY_{index}"
+                    header_name = f"CUSTOM_HEADER_{index}"
+                    configuration = _custom_provider(
+                        base_url=urls[index],
+                        api_key_env=api_name,
+                        header_env=(f"X-Worker={header_name}",),
+                    )
+                    assert configuration is not None
+                    return self._run_real(
+                        child,
+                        url=urls[index],
+                        prompt=f"custom concurrent worker {index}",
+                        model="fixture/model-one",
+                        provider_env_names=(api_name, header_name),
+                        provider_environment={
+                            api_name: f"sk-worker-{index}",
+                            header_name: f"header-worker-{index}",
+                        },
+                        custom_provider=configuration,
+                    )
+
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    results = list(executor.map(launch, range(2)))
+            finally:
+                for provider in providers:
+                    self._stop_provider(provider)
+            ports: set[int] = set()
+            auth: set[str] = set()
+            for index, result in enumerate(results):
+                self.assertEqual(result["status"], "completed", result)
+                events = [
+                    json.loads(line)
+                    for line in Path(str(result["events_path"])).read_text().splitlines()
+                ]
+                isolation = next(event for event in events if event.get("event") == "isolation_verified")
+                ports.add(int(isolation["server_port"]))
+                auth.add(str(isolation["auth_sha256"]))
+                transport = json.loads(
+                    (root / f"worker-{index}/provider_transport.jsonl").read_text().splitlines()[0]
+                )
+                self.assertEqual(transport["headers"]["x-worker"], f"header-worker-{index}")
+                self.assertNotIn(f"header-worker-{1 - index}", json.dumps(transport))
+                self._assert_pid_gone(self._runtime_pid(result))
+            self.assertEqual(len(ports), 2)
+            self.assertEqual(len(auth), 2)
+
+    def test_real_custom_provider_http_error_redacts_secret_values(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            provider, url, _capture = self._start_provider(root, mode="error")
+            configuration = _custom_provider(
+                base_url=url,
+                api_key_env="CUSTOM_API_KEY",
+                header_env=("X-Custom-Secret=CUSTOM_HEADER_SECRET",),
+            )
+            assert configuration is not None
+            secrets = {
+                "CUSTOM_API_KEY": "sk-REFLECTED-PRIVATE",
+                "CUSTOM_HEADER_SECRET": "header-REFLECTED-PRIVATE",
+            }
+            try:
+                result = self._run_real(
+                    root,
+                    url=url,
+                    prompt="trigger provider error",
+                    model="fixture/model-one",
+                    provider_env_names=tuple(secrets),
+                    provider_environment=secrets,
+                    custom_provider=configuration,
+                )
+            finally:
+                self._stop_provider(provider)
+            self.assertEqual(result["status"], "error", result)
+            for artifact_key in ("request_path", "events_path", "stderr_path"):
+                durable = Path(str(result[artifact_key])).read_text()
+                self.assertNotIn("REFLECTED-PRIVATE", durable)
+            self._assert_pid_gone(self._runtime_pid(result))
 
     def test_real_opencode_offline_system_spawn_and_parent_continuation(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
