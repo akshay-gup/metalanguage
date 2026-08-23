@@ -19,7 +19,7 @@ from urllib.parse import parse_qs, urlparse
 
 
 if "--version" in sys.argv:
-    print(os.environ.get("FAKE_OPENCODE_VERSION", "1.18.19"))
+    print(os.environ.get("FAKE_OPENCODE_VERSION", "1.18.21"))
     raise SystemExit(0)
 
 

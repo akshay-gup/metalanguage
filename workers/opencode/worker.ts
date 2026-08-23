@@ -206,7 +206,7 @@ async function prepareStateRoot(path: string): Promise<string> {
     await mkdir(join(configRoot, "node_modules"), { recursive: true, mode: 0o700 })
     await writeFile(
       packagePath,
-      `${JSON.stringify({ private: true, dependencies: { "@opencode-ai/plugin": "1.18.19" } }, null, 2)}\n`,
+      `${JSON.stringify({ private: true, dependencies: { "@opencode-ai/plugin": "1.18.21" } }, null, 2)}\n`,
       { mode: 0o600 },
     )
     await writeFile(
@@ -215,7 +215,7 @@ async function prepareStateRoot(path: string): Promise<string> {
         name: "metalanguage-opencode-config",
         lockfileVersion: 3,
         requires: true,
-        packages: { "": { dependencies: { "@opencode-ai/plugin": "1.18.19" } } },
+        packages: { "": { dependencies: { "@opencode-ai/plugin": "1.18.21" } } },
       }, null, 2)}\n`,
       { mode: 0o600 },
     )

@@ -284,7 +284,8 @@ adapter/orchestration sources, exact effective system/configured initial prompt
 content, relevant provider/auth inputs, and all exposed worker/startup sandbox
 settings. A partial resume recomputes inherited effective prompt identity from
 the current parent-pool child prompt and rejects a missing or mismatched hash.
-Only pinned OpenCode `1.18.19` is source-audited.
+Only pinned OpenCode `1.18.21` is source-audited (official tag `v1.18.21`,
+commit `826d9ad46a22bef0294998e08daa3c4904fea28f`).
 
 Host-side MCP commands receive only a small fixed base environment plus that
 server's explicitly configured environment. OpenCode server credentials, auth

@@ -20,7 +20,7 @@ from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 OPENCODE_WORKER_SCRIPT = PROJECT_ROOT / "workers" / "opencode" / "worker.ts"
-SOURCE_AUDITED_OPENCODE_VERSIONS = ("1.18.19",)
+SOURCE_AUDITED_OPENCODE_VERSIONS = ("1.18.21",)
 SOURCE_AUDITED_BUN_VERSIONS = ("1.3.14",)
 DEFAULT_BUBBLEWRAP_BIN = Path("/usr/bin/bwrap")
 
