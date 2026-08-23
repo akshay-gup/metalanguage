@@ -1,6 +1,6 @@
 [submodule "third_party/codex"]
 	path = third_party/codex
-	url = git@github.com:akshay-gup/codex.git
+	url = https://github.com/openai/codex.git
 [submodule "third_party/opencode"]
 	path = third_party/opencode
 	url = https://github.com/anomalyco/opencode.git
