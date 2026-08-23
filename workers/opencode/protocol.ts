@@ -5,8 +5,7 @@ import type {
   SessionCreateData,
   SessionCreateResponse,
   SessionMessagesResponse,
-  SessionPromptData,
-  SessionPromptResponse,
+  SessionPromptAsyncData,
 } from "../../third_party/opencode/packages/sdk/js/src/gen/types.gen.ts"
 
 export type {
@@ -15,7 +14,6 @@ export type {
   Part,
   SessionCreateResponse,
   SessionMessagesResponse,
-  SessionPromptResponse,
 }
 
 export type PermissionRule = {
@@ -37,7 +35,7 @@ export type SessionCreateBody = NonNullable<SessionCreateData["body"]> & {
   permission?: PermissionRule[]
 }
 
-export type SessionPromptBody = NonNullable<SessionPromptData["body"]> & {
+export type SessionPromptBody = NonNullable<SessionPromptAsyncData["body"]> & {
   variant?: string
 }
 
@@ -424,7 +422,7 @@ export class EventNormalizer {
         output.push({ event: "turn_started" })
       } else if (status === "retry") {
         output.push({ event: "warning", message: "OpenCode provider request is retrying" })
-      } else if (status === "idle") {
+      } else if (status === "idle" && this.turnStarted) {
         return { events: output, terminal: "idle" }
       }
       return { events: output, terminal: "continue" }

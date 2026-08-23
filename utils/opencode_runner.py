@@ -103,6 +103,8 @@ _DURABLE_ERROR_CODES = {
     "opencode_http_error",
     "opencode_http_timeout",
     "opencode_prompt_failed",
+    "opencode_prompt_submit_failed",
+    "opencode_prompt_submit_timeout",
     "opencode_prompt_timeout",
     "opencode_session_error",
     "opencode_start_failed",

@@ -20,7 +20,6 @@ import {
   type SessionCreateResponse,
   type SessionMessagesResponse,
   type SessionPromptBody,
-  type SessionPromptResponse,
   type Terminal,
   type TranslatedMcp,
 } from "./protocol.ts"
@@ -159,6 +158,21 @@ class ApiClient {
         "malformed_opencode_response",
         `OpenCode API ${path} returned malformed JSON`,
         { cause: error },
+      )
+    }
+  }
+
+  async noContent(method: string, path: string, body: unknown, timeoutMs: number): Promise<void> {
+    const response = await this.request(
+      path,
+      { method, body: JSON.stringify(body) },
+      timeoutMs,
+    )
+    if (response.status !== 204) {
+      await response.body?.cancel().catch(() => undefined)
+      throw new RunnerError(
+        "malformed_opencode_response",
+        `OpenCode API ${path} returned HTTP ${response.status}; expected 204`,
       )
     }
   }
@@ -728,21 +742,25 @@ async function verifyProcfs(): Promise<void> {
   }
 }
 
-function assistantText(response: SessionPromptResponse): string | undefined {
-  if (!response.info || response.info.role !== "assistant" || typeof response.info.id !== "string") return undefined
-  const messageID = response.info.id
-  return response.parts
-    .filter((part) => part.type === "text" && part.messageID === messageID)
-    .map((part) => ("text" in part && typeof part.text === "string" ? part.text : ""))
-    .filter(Boolean)
-    .join("\n")
-}
-
-export function finalAssistantText(messages: SessionMessagesResponse): string | undefined {
+export function finalAssistantText(messages: SessionMessagesResponse, userMessageId: string): string | undefined {
+  const submittedUser = messages.some(
+    (message) => message.info?.role === "user" && message.info.id === userMessageId,
+  )
+  if (!submittedUser) return undefined
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index]!
-    if (!message.info || message.info.role !== "assistant" || typeof message.info.id !== "string") continue
+    if (
+      !message.info ||
+      message.info.role !== "assistant" ||
+      typeof message.info.id !== "string" ||
+      message.info.parentID !== userMessageId ||
+      message.info.error !== undefined ||
+      typeof message.info.finish !== "string" ||
+      message.info.finish === "tool-calls" ||
+      message.info.finish === "unknown"
+    ) continue
     const messageID = message.info.id
+    if (!Array.isArray(message.parts)) return undefined
     const text = message.parts
       .filter((part) => part.type === "text" && part.messageID === messageID)
       .map((part) => ("text" in part && typeof part.text === "string" ? part.text : ""))
@@ -751,6 +769,11 @@ export function finalAssistantText(messages: SessionMessagesResponse): string | 
     return text
   }
   return undefined
+}
+
+function messageId(): string {
+  const encodedTime = (BigInt(Date.now()) * 0x1000n).toString(16).padStart(12, "0").slice(-12)
+  return `msg_${encodedTime}${randomSecret().slice(0, 14)}`
 }
 
 async function runSession(
@@ -799,101 +822,77 @@ async function runSession(
   })
 
   const body: SessionPromptBody = {
+    messageID: messageId(),
     model: { providerID: providerId, modelID: modelId },
     parts: [{ type: "text", text: request.initial_user_text ?? "Read README.md." }],
     ...(request.system_instructions?.trim() ? { system: request.system_instructions } : {}),
     ...(request.agent ? { agent: request.agent } : {}),
     ...(request.variant ? { variant: request.variant } : {}),
   }
-  let promptResult: SessionPromptResponse | undefined
-  let promptError: unknown
-  const prompt = api
-    .json<SessionPromptResponse>(
-      "POST",
-      `/session/${sessionId}/message`,
-      body,
-      seconds(request.timeout_seconds, 3600) * 1000 + 5_000,
-    )
-    .then((value) => {
-      promptResult = value
-    })
-    .catch((error) => {
-      promptError = error
-    })
-
   const timeoutSeconds = seconds(request.timeout_seconds, 3600)
   const deadline = sleep(timeoutSeconds * 1000).then(() => "timeout" as const)
   const cancellation = cancelled.then(() => "cancel" as const)
   const normalizer = new EventNormalizer(sessionId, translated.sensitiveToolIds)
   let terminal: Terminal = "continue"
-  let eventPromise = queue.next()
-  void eventPromise.catch(() => undefined)
-  let promptPending = true
+  let completed = false
+  try {
+    try {
+      await api.noContent(
+        "POST",
+        `/session/${sessionId}/prompt_async`,
+        body,
+        Math.min(startupTimeoutMs, 10_000),
+      )
+    } catch (error) {
+      const code = error instanceof RunnerError && error.code === "opencode_http_timeout"
+        ? "opencode_prompt_submit_timeout"
+        : "opencode_prompt_submit_failed"
+      throw new RunnerError(code, `OpenCode async prompt submission failed (${code})`, { cause: error })
+    }
 
-  while (terminal === "continue") {
-    const outcome = await Promise.race([
-      eventPromise.then((event) => ({ kind: "event" as const, event })),
-      ...(promptPending ? [prompt.then(() => ({ kind: "prompt" as const }))] : []),
-      deadline.then((kind) => ({ kind })),
-      cancellation.then((kind) => ({ kind })),
-    ])
-    if (outcome.kind === "timeout") {
-      await api.abort(sessionId)
-      await api.delete(sessionId)
-      throw new RunnerError("worker_timeout", `OpenCode rollout exceeded ${timeoutSeconds} seconds`)
-    }
-    if (outcome.kind === "cancel") {
-      await api.abort(sessionId)
-      await api.delete(sessionId)
-      throw new RunnerError("worker_cancelled", "OpenCode rollout was cancelled")
-    }
-    if (outcome.kind === "prompt") {
-      promptPending = false
-      if (promptError) {
-        await api.abort(sessionId)
-        await api.delete(sessionId)
-        throw asRunnerError("opencode_prompt_failed", promptError)
+    while (terminal === "continue") {
+      const outcome = await Promise.race([
+        queue.next().then((event) => ({ kind: "event" as const, event })),
+        deadline.then((kind) => ({ kind })),
+        cancellation.then((kind) => ({ kind })),
+      ])
+      if (outcome.kind === "timeout") {
+        throw new RunnerError("worker_timeout", `OpenCode rollout exceeded ${timeoutSeconds} seconds`)
       }
-      continue
+      if (outcome.kind === "cancel") {
+        throw new RunnerError("worker_cancelled", "OpenCode rollout was cancelled")
+      }
+      const reduced = normalizer.handle(outcome.event as OpenCodeEvent)
+      for (const event of reduced.events) emit(event)
+      terminal = reduced.terminal
     }
-    eventPromise = queue.next()
-    void eventPromise.catch(() => undefined)
-    const reduced = normalizer.handle(outcome.event as OpenCodeEvent)
-    for (const event of reduced.events) emit(event)
-    terminal = reduced.terminal
-  }
 
-  if (terminal === "error") {
-    await api.abort(sessionId)
-  } else if (promptPending) {
-    await withTimeout(
-      prompt,
-      5_000,
-      new RunnerError("opencode_prompt_timeout", "OpenCode prompt response did not finish after idle"),
+    if (terminal === "error") {
+      const [code, message] = normalizer.error ?? ["opencode_session_error", "OpenCode session failed"]
+      throw new RunnerError(code, message)
+    }
+    const messages = await api.json<SessionMessagesResponse>(
+      "GET",
+      `/session/${sessionId}/message`,
+      undefined,
+      3_000,
     )
-  }
-  if (terminal === "error") {
-    const [code, message] = normalizer.error ?? ["opencode_session_error", "OpenCode session failed"]
+    if (!Array.isArray(messages)) {
+      throw new RunnerError("malformed_opencode_response", "session.messages did not return a list")
+    }
+    const finalText = finalAssistantText(messages, body.messageID!)
+    if (finalText === undefined) {
+      throw new RunnerError(
+        "malformed_opencode_response",
+        "session.messages omitted the completed assistant response for the submitted turn",
+      )
+    }
+    completed = true
+    emit({ event: "turn_complete", final_text: finalText })
+  } finally {
+    if (!completed) await api.abort(sessionId)
     await api.delete(sessionId)
-    throw new RunnerError(code, message)
   }
-  if (promptError) {
-    await api.delete(sessionId)
-    throw asRunnerError("opencode_prompt_failed", promptError)
-  }
-  const messages = await api
-    .json<SessionMessagesResponse>("GET", `/session/${sessionId}/message`, undefined, 3_000)
-    .catch(() => [] as SessionMessagesResponse)
-  const listedFinalText = finalAssistantText(messages)
-  const promptFinalText = promptResult ? assistantText(promptResult) : undefined
-  const finalText =
-    listedFinalText !== undefined
-      ? listedFinalText
-      : promptFinalText !== undefined
-        ? promptFinalText
-        : normalizer.finalText()
-  await api.delete(sessionId)
-  emit({ event: "turn_complete", final_text: finalText })
 }
 
 function randomSecret(): string {
