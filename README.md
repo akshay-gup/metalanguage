@@ -230,8 +230,10 @@ temporary roots. The TypeScript worker connects through OpenCode's authenticated
 HTTP/SSE server boundary, validates source-audited CLI versions, injects exact
 system instructions through a private config-scoped hook, translates benchmark
 MCP servers and enforces tool allowlists with session permission rules,
-redacts sensitive MCP payloads, and removes the private OpenCode state after
-normalizing the result. `spawn_child` is an isolated config-scoped tool that
+submits model turns through OpenCode's nonblocking `prompt_async` route, follows
+their busy/idle/error lifecycle over SSE, retrieves the matching final assistant
+message, redacts sensitive MCP payloads, and removes the private OpenCode state
+after normalizing the result. `spawn_child` is an isolated config-scoped tool that
 synchronously calls the existing Python supervisor; its result returns to the
 same parent turn.
 

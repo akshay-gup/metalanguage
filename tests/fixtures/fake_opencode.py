@@ -25,6 +25,8 @@ if "--version" in sys.argv:
 
 events: queue.Queue[str | None] = queue.Queue()
 config = json.loads(os.environ.get("OPENCODE_CONFIG_CONTENT", "{}"))
+messages: list[dict[str, object]] = []
+messages_lock = threading.Lock()
 
 
 def host_pid(pid: int | None = None) -> int:
@@ -44,6 +46,18 @@ def json_response(handler: BaseHTTPRequestHandler, payload: object, status: int 
     handler.wfile.write(body)
 
 
+def no_content(handler: BaseHTTPRequestHandler) -> None:
+    handler.send_response(204)
+    handler.send_header("Content-Length", "0")
+    handler.end_headers()
+    handler.wfile.flush()
+
+
+def record_request(directory: Path, method: str, path: str) -> None:
+    with (directory / "fake_http_requests.jsonl").open("a") as stream:
+        stream.write(json.dumps({"method": method, "path": path}) + "\n")
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -54,6 +68,8 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authorized():
             return
         path = urlparse(self.path).path
+        directory = Path(self._directory())
+        record_request(directory, "GET", path)
         if path == "/event":
             if os.environ.get("FAKE_OPENCODE_SSE_HANG") == "1":
                 time.sleep(60)
@@ -69,6 +85,7 @@ class Handler(BaseHTTPRequestHandler):
             while True:
                 item = events.get()
                 if item is None:
+                    self.close_connection = True
                     return
                 self.wfile.write(f"data: {item}\n\n".encode())
                 self.wfile.flush()
@@ -82,6 +99,9 @@ class Handler(BaseHTTPRequestHandler):
                     **({"error": "fixture failure"} if failed else {}),
                 }
             json_response(self, status)
+        elif path == "/session/ses_fixture/message":
+            with messages_lock:
+                json_response(self, list(messages))
         else:
             json_response(self, {"error": "not found"}, 404)
 
@@ -89,16 +109,18 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authorized():
             return
         path = urlparse(self.path).path
+        directory = Path(self._directory())
+        record_request(directory, "POST", path)
         length = int(self.headers.get("Content-Length", "0"))
         payload = json.loads(self.rfile.read(length) or b"{}")
         if path == "/session":
-            directory = Path(self._directory())
             (directory / "fake_session.json").write_text(
                 json.dumps(payload, sort_keys=True)
             )
             json_response(self, {"id": "ses_fixture", "directory": self._directory()})
             return
         if path.endswith("/abort"):
+            (directory / "fake_abort").write_text("aborted")
             events.put(
                 json.dumps(
                     {
@@ -110,7 +132,10 @@ class Handler(BaseHTTPRequestHandler):
             json_response(self, True)
             return
         if path == "/session/ses_fixture/message":
-            directory = Path(self._directory())
+            (directory / "fake_sync_message_used").write_text("used")
+            json_response(self, {"error": "synchronous message route forbidden"}, 405)
+            return
+        if path == "/session/ses_fixture/prompt_async":
             (directory / "fake_prompt.json").write_text(json.dumps(payload, sort_keys=True))
             (directory / "fake_server.pid").write_text(str(host_pid()))
             state = {
@@ -191,6 +216,23 @@ class Handler(BaseHTTPRequestHandler):
             )
             (directory / "fake_state.json").write_text(json.dumps(state, sort_keys=True))
             text = payload["parts"][0]["text"]
+            if text == "__HTTP_ERROR__":
+                json_response(self, {"secret": "sk-PRIVATE-HTTP-BODY"}, 500)
+                return
+            if text == "__SUBMIT_HANG__":
+                time.sleep(60)
+                return
+            (directory / "fake_prompt_accepted_at").write_text(str(time.monotonic()))
+            no_content(self)
+            if text == "__INITIAL_IDLE__":
+                events.put(
+                    json.dumps(
+                        {
+                            "type": "session.status",
+                            "properties": {"sessionID": "ses_fixture", "status": {"type": "idle"}},
+                        }
+                    )
+                )
             events.put(
                 json.dumps(
                     {
@@ -243,10 +285,9 @@ class Handler(BaseHTTPRequestHandler):
                 )
             if text == "__MALFORMED__":
                 events.put('{"secret":"sk-PRIVATE-MALFORMED"')
-                time.sleep(60)
                 return
-            if text == "__HTTP_ERROR__":
-                json_response(self, {"secret": "sk-PRIVATE-HTTP-BODY"}, 500)
+            if text == "__SSE_DISCONNECT__":
+                events.put(None)
                 return
             if text == "__PROVIDER_ERROR__":
                 events.put(
@@ -263,11 +304,11 @@ class Handler(BaseHTTPRequestHandler):
                         }
                     )
                 )
-                json_response(self, {"info": {}, "parts": []})
                 return
             if text == "__TIMEOUT__":
-                time.sleep(60)
                 return
+            if text == "__LONG_ASYNC__":
+                time.sleep(1.2)
             if text == "__DESCENDANT__":
                 descendant = subprocess.Popen(
                     [sys.executable, "-c", "import time; time.sleep(60)"]
@@ -367,6 +408,63 @@ class Handler(BaseHTTPRequestHandler):
                         )
                     )
             final = "parent continued" if text == "__SPAWN__" else "fixture final"
+            user_message_id = payload["messageID"]
+            with messages_lock:
+                messages[:] = [
+                    {
+                        "info": {
+                            "id": user_message_id,
+                            "sessionID": "ses_fixture",
+                            "role": "user",
+                        },
+                        "parts": [
+                            {
+                                "id": "text_user",
+                                "messageID": user_message_id,
+                                "sessionID": "ses_fixture",
+                                "type": "text",
+                                "text": text,
+                            }
+                        ],
+                    },
+                    {
+                        "info": {
+                            "id": "msg_fixture",
+                            "parentID": user_message_id,
+                            "sessionID": "ses_fixture",
+                            "role": "assistant",
+                            "finish": "stop",
+                            "time": {"created": 1, "completed": 2},
+                        },
+                        "parts": [
+                            {
+                                "id": "text_fixture",
+                                "messageID": "msg_fixture",
+                                "sessionID": "ses_fixture",
+                                "type": "text",
+                                "text": final,
+                            }
+                        ],
+                    },
+                    {
+                        "info": {
+                            "id": "msg_unrelated",
+                            "parentID": "msg_other_turn",
+                            "sessionID": "ses_fixture",
+                            "role": "assistant",
+                            "finish": "stop",
+                        },
+                        "parts": [
+                            {
+                                "id": "text_unrelated",
+                                "messageID": "msg_unrelated",
+                                "sessionID": "ses_fixture",
+                                "type": "text",
+                                "text": "wrong turn response",
+                            }
+                        ],
+                    },
+                ]
             events.put(
                 json.dumps(
                     {
@@ -406,31 +504,16 @@ class Handler(BaseHTTPRequestHandler):
                     }
                 )
             )
-            json_response(
-                self,
-                {
-                    "info": {
-                        "id": "msg_fixture",
-                        "sessionID": "ses_fixture",
-                        "role": "assistant",
-                    },
-                    "parts": [
-                        {
-                            "id": "text_fixture",
-                            "messageID": "msg_fixture",
-                            "sessionID": "ses_fixture",
-                            "type": "text",
-                            "text": final,
-                        }
-                    ],
-                },
-            )
+            (directory / "fake_prompt_completed_at").write_text(str(time.monotonic()))
             return
         json_response(self, {"error": "not found"}, 404)
 
     def do_DELETE(self) -> None:  # noqa: N802
         if not self._authorized():
             return
+        directory = Path(self._directory())
+        record_request(directory, "DELETE", urlparse(self.path).path)
+        (directory / "fake_delete").write_text("deleted")
         json_response(self, True)
 
     def _authorized(self) -> bool:

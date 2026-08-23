@@ -233,6 +233,28 @@ describe("OpenCode native protocol adapter", () => {
     expect(terminal).toBe("idle")
   })
 
+  test("ignores an initial idle status until the submitted turn becomes busy", () => {
+    const normalizer = new EventNormalizer("ses_test", new Set())
+    expect(
+      normalizer.handle({
+        type: "session.status",
+        properties: { sessionID: "ses_test", status: { type: "idle" } },
+      }).terminal,
+    ).toBe("continue")
+    expect(
+      normalizer.handle({
+        type: "session.status",
+        properties: { sessionID: "ses_test", status: { type: "busy" } },
+      }),
+    ).toEqual({ events: [{ event: "turn_started" }], terminal: "continue" })
+    expect(
+      normalizer.handle({
+        type: "session.status",
+        properties: { sessionID: "ses_test", status: { type: "idle" } },
+      }).terminal,
+    ).toBe("idle")
+  })
+
   test("normalizes provider errors and redacts image payloads", () => {
     const normalizer = new EventNormalizer("ses_test", new Set())
     const attachment = normalizer.handle({
@@ -325,37 +347,40 @@ describe("OpenCode native protocol adapter", () => {
     expect(normalizer.finalText()).toBe("FINAL")
   })
 
-  test("selects the last assistant from the synchronous message list", () => {
+  test("selects only the completed assistant response parented by the submitted user message", () => {
     const messages = [
       {
         info: { id: "u1", role: "user" },
         parts: [{ id: "up", messageID: "u1", type: "text", text: "USER" }],
       },
       {
-        info: { id: "a1", role: "assistant" },
+        info: { id: "a1", role: "assistant", parentID: "u1", finish: "tool-calls" },
         parts: [{ id: "ap1", messageID: "a1", type: "text", text: "INTERMEDIATE" }],
       },
       {
-        info: { id: "a2", role: "assistant" },
-        parts: [{ id: "tool", messageID: "a2", type: "tool" }],
+        info: { id: "a2", role: "assistant", parentID: "other", finish: "stop" },
+        parts: [{ id: "wrong", messageID: "a2", type: "text", text: "WRONG TURN" }],
       },
       {
-        info: { id: "a3", role: "assistant" },
+        info: { id: "a3", role: "assistant", parentID: "u1", finish: "stop" },
         parts: [{ id: "ap3", messageID: "a3", type: "text", text: "FINAL" }],
       },
     ]
-    expect(finalAssistantText(messages as never)).toBe("FINAL")
+    expect(finalAssistantText(messages as never, "u1")).toBe("FINAL")
+    expect(finalAssistantText(messages as never, "missing")).toBeUndefined()
+    expect(finalAssistantText(messages.slice(0, 3) as never, "u1")).toBeUndefined()
     expect(
       finalAssistantText(
         [
           ...messages,
           {
-            info: { id: "a4", role: "assistant" },
+            info: { id: "a4", role: "assistant", parentID: "other", finish: "stop" },
             parts: [{ id: "tool-final", messageID: "a4", type: "tool" }],
           },
         ] as never,
+        "u1",
       ),
-    ).toBe("")
+    ).toBe("FINAL")
   })
 
   test("malformed SSE errors and generic scrubber do not retain secrets", () => {

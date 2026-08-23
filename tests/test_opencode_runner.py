@@ -390,6 +390,7 @@ class OpenCodeRunnerTests(unittest.TestCase):
         agent: str | None = None,
         variant: str | None = None,
         provider_env_names: tuple[str, ...] = (),
+        startup_timeout: int = 2,
     ) -> dict[str, object]:
         workdir = root / "workdir"
         workdir.mkdir()
@@ -410,7 +411,7 @@ class OpenCodeRunnerTests(unittest.TestCase):
             agent=agent,
             variant=variant,
             allowed_versions=("1.18.21",),
-            startup_timeout_seconds=2,
+            startup_timeout_seconds=startup_timeout,
             provider_env_names=provider_env_names,
             extra_environment={
                 name: value
@@ -438,6 +439,25 @@ class OpenCodeRunnerTests(unittest.TestCase):
             )
             self.assertEqual(prompt["agent"], "build")
             self.assertEqual(prompt["variant"], "high")
+            self.assertTrue(prompt["messageID"].startswith("msg_"))
+            requests = [
+                json.loads(line)
+                for line in (root / "workdir/fake_http_requests.jsonl").read_text().splitlines()
+            ]
+            self.assertIn(
+                {"method": "POST", "path": "/session/ses_fixture/prompt_async"},
+                requests,
+            )
+            self.assertIn(
+                {"method": "GET", "path": "/session/ses_fixture/message"},
+                requests,
+            )
+            self.assertNotIn(
+                {"method": "POST", "path": "/session/ses_fixture/message"},
+                requests,
+            )
+            self.assertFalse((root / "workdir/fake_sync_message_used").exists())
+            self.assertTrue((root / "workdir/fake_delete").is_file())
             state = json.loads((root / "workdir/fake_state.json").read_text())
             self.assertTrue(state["spawn_child_tool"])
             self.assertTrue(state["system_plugin"])
@@ -574,7 +594,9 @@ class OpenCodeRunnerTests(unittest.TestCase):
         for prompt, expected_status, expected_code in [
             ("__PROVIDER_ERROR__", "error", "ProviderAuthError"),
             ("__MALFORMED__", "error", "malformed_opencode_event"),
-            ("__HTTP_ERROR__", "error", "opencode_http_error"),
+            ("__HTTP_ERROR__", "error", "opencode_prompt_submit_failed"),
+            ("__SUBMIT_HANG__", "error", "opencode_prompt_submit_timeout"),
+            ("__SSE_DISCONNECT__", "error", "opencode_event_closed"),
             ("__TIMEOUT__", "timeout", "worker_timeout"),
         ]:
             with self.subTest(prompt=prompt), tempfile.TemporaryDirectory() as temp:
@@ -585,6 +607,8 @@ class OpenCodeRunnerTests(unittest.TestCase):
                 durable = Path(str(result["events_path"])).read_text()
                 self.assertNotIn("PRIVATE", durable)
                 if prompt == "__TIMEOUT__":
+                    self.assertTrue((Path(temp) / "workdir/fake_abort").is_file())
+                    self.assertTrue((Path(temp) / "workdir/fake_delete").is_file())
                     self._assert_pid_gone(self._runtime_pid(result))
 
         with tempfile.TemporaryDirectory() as temp:
@@ -593,6 +617,29 @@ class OpenCodeRunnerTests(unittest.TestCase):
             self.assertEqual(result["final_text"], "parent continued")
             events = Path(str(result["events_path"])).read_text()
             self.assertLess(events.index('"tool": "spawn_child"'), events.index("parent continued"))
+
+    def test_async_submission_outlives_request_threshold_and_ignores_initial_idle(self) -> None:
+        for prompt in ("__LONG_ASYNC__", "__INITIAL_IDLE__"):
+            with self.subTest(prompt=prompt), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                started = time.monotonic()
+                result = self._run(
+                    root,
+                    prompt=prompt,
+                    timeout=3,
+                    startup_timeout=1 if prompt == "__LONG_ASYNC__" else 2,
+                )
+                self.assertEqual(result["status"], "completed", result)
+                self.assertEqual(result["final_text"], "fixture final")
+                accepted = float((root / "workdir/fake_prompt_accepted_at").read_text())
+                completed = float((root / "workdir/fake_prompt_completed_at").read_text())
+                self.assertGreaterEqual(accepted, started)
+                if prompt == "__LONG_ASYNC__":
+                    self.assertGreaterEqual(completed - accepted, 1.1)
+                events = Path(str(result["events_path"])).read_text()
+                self.assertEqual(events.count('"event": "turn_started"'), 1)
+                self.assertNotIn("wrong turn response", events)
+                self.assertFalse((root / "workdir/fake_sync_message_used").exists())
 
     def test_version_guard_and_graceful_cancellation(self) -> None:
         with tempfile.TemporaryDirectory() as temp, patch.dict(
