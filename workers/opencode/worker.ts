@@ -23,7 +23,13 @@ import {
   type Terminal,
   type TranslatedMcp,
 } from "./protocol.ts"
-import { runHandler, runSpawnBridgeFromStdio, SYSTEM_PLUGIN_SOURCE, TOOL_SOURCE } from "./spawn_bridge.ts"
+import {
+  runHandler,
+  runSpawnBridgeFromStdio,
+  SEND_MESSAGE_TOOL_SOURCE,
+  SYSTEM_PLUGIN_SOURCE,
+  TOOL_SOURCE,
+} from "./spawn_bridge.ts"
 
 class RunnerError extends Error {
   constructor(
@@ -186,7 +192,7 @@ class ApiClient {
   }
 }
 
-async function prepareStateRoot(path: string): Promise<string> {
+async function prepareStateRoot(path: string, includePeerCommunication: boolean): Promise<string> {
   if (!path) throw new Error("state_root is empty")
   await mkdir(path, { recursive: true, mode: 0o700 })
   await chmod(path, 0o700)
@@ -205,13 +211,26 @@ async function prepareStateRoot(path: string): Promise<string> {
     await mkdir(directory, { recursive: true, mode: 0o700 })
     await chmod(directory, 0o700)
   }
+  const toolDirectory = join(root, "config/tool")
+  for (const entry of await readdir(toolDirectory)) {
+    if (entry.endsWith(".js")) await rm(join(toolDirectory, entry), { force: true })
+  }
   const toolPath = join(root, "config/tool/spawn_child.js")
+  const sendMessageToolPath = join(root, "config/tool/send_message.js")
   const pluginPath = join(root, "config/plugin/metalanguage_system.js")
   const maskedFilePath = join(root, "masked-empty")
   await writeFile(toolPath, TOOL_SOURCE, { mode: 0o600 })
+  if (includePeerCommunication) {
+    await writeFile(sendMessageToolPath, SEND_MESSAGE_TOOL_SOURCE, { mode: 0o600 })
+  } else {
+    await rm(sendMessageToolPath, { force: true })
+  }
   await writeFile(pluginPath, SYSTEM_PLUGIN_SOURCE, { mode: 0o600 })
   await writeFile(maskedFilePath, "", { mode: 0o600 })
   await chmod(toolPath, 0o600)
+  if (includePeerCommunication) {
+    await chmod(sendMessageToolPath, 0o600)
+  }
   await chmod(pluginPath, 0o600)
   await chmod(maskedFilePath, 0o600)
   for (const configRoot of [join(root, "config"), join(root, "config/opencode")]) {
@@ -358,6 +377,7 @@ async function startHostMcpBridges(
           "OPENCODE_AUTH_CONTENT",
           "OPENCODE_SERVER_PASSWORD",
           "METALANGUAGE_SPAWN_CHILD_TOKEN",
+          "METALANGUAGE_PEER_COMMUNICATION_ENABLED",
         ].map((name) => [name, ""]),
       )
     }
@@ -445,6 +465,9 @@ async function isolatedEnvironment(
   if (callback) {
     env.METALANGUAGE_SPAWN_CHILD_ENDPOINT = callback.endpoint
     env.METALANGUAGE_SPAWN_CHILD_TOKEN = callback.token
+  }
+  if (request.peer_communication_handler_command?.length) {
+    env.METALANGUAGE_PEER_COMMUNICATION_ENABLED = "1"
   }
   env.METALANGUAGE_OPENCODE_PROVIDER_ENV_NAMES = JSON.stringify(request.provider_env_names ?? [])
   if (request.sandbox?.masked_paths?.[0]) {
@@ -776,6 +799,44 @@ function messageId(): string {
   return `msg_${encodedTime}${randomSecret().slice(0, 14)}`
 }
 
+type PreparedPeerDelivery = {
+  delivery_id: string
+  injection: string
+  message_count: number
+  through_id: number
+  has_more: boolean
+}
+
+async function preparePeerDelivery(request: RunnerRequest): Promise<PreparedPeerDelivery | undefined> {
+  const command = request.peer_communication_handler_command
+  if (!command?.length) return undefined
+  const result = await runHandler(command, {
+    tool: "_peer_delivery_prepare",
+    namespace: null,
+    arguments: {},
+  })
+  if (!isRecord(result) || result.success !== true) {
+    throw new RunnerError("peer_delivery_prepare_failed", "peer delivery supervisor rejected preparation")
+  }
+  if (result.pending !== true) return undefined
+  if (
+    typeof result.delivery_id !== "string" || !result.delivery_id ||
+    typeof result.injection !== "string" || !result.injection ||
+    new TextEncoder().encode(result.injection).byteLength > 8_192 ||
+    !Number.isSafeInteger(result.message_count) || Number(result.message_count) <= 0 ||
+    !Number.isSafeInteger(result.through_id) || Number(result.through_id) <= 0
+  ) {
+    throw new RunnerError("peer_delivery_prepare_failed", "peer delivery supervisor returned malformed preparation")
+  }
+  return {
+    delivery_id: result.delivery_id,
+    injection: result.injection,
+    message_count: Number(result.message_count),
+    through_id: Number(result.through_id),
+    has_more: result.has_more === true,
+  }
+}
+
 async function runSession(
   api: ApiClient,
   request: RunnerRequest,
@@ -821,71 +882,82 @@ async function runSession(
     cwd: api.directory,
   })
 
-  const body: SessionPromptBody = {
-    messageID: messageId(),
-    model: { providerID: providerId, modelID: modelId },
-    parts: [{ type: "text", text: request.initial_user_text ?? "Read README.md." }],
-    ...(request.system_instructions?.trim() ? { system: request.system_instructions } : {}),
-    ...(request.agent ? { agent: request.agent } : {}),
-    ...(request.variant ? { variant: request.variant } : {}),
-  }
   const timeoutSeconds = seconds(request.timeout_seconds, 3600)
   const deadline = sleep(timeoutSeconds * 1000).then(() => "timeout" as const)
   const cancellation = cancelled.then(() => "cancel" as const)
-  const normalizer = new EventNormalizer(sessionId, translated.sensitiveToolIds)
-  let terminal: Terminal = "continue"
   let completed = false
+  let nextPrompt = request.initial_user_text ?? "Read README.md."
+  let firstPrompt = true
+  let finalText = ""
   try {
-    try {
-      await api.noContent(
-        "POST",
-        `/session/${sessionId}/prompt_async`,
-        body,
-        Math.min(startupTimeoutMs, 10_000),
-      )
-    } catch (error) {
-      const code = error instanceof RunnerError && error.code === "opencode_http_timeout"
-        ? "opencode_prompt_submit_timeout"
-        : "opencode_prompt_submit_failed"
-      throw new RunnerError(code, `OpenCode async prompt submission failed (${code})`, { cause: error })
-    }
-
-    while (terminal === "continue") {
-      const outcome = await Promise.race([
-        queue.next().then((event) => ({ kind: "event" as const, event })),
-        deadline.then((kind) => ({ kind })),
-        cancellation.then((kind) => ({ kind })),
-      ])
-      if (outcome.kind === "timeout") {
-        throw new RunnerError("worker_timeout", `OpenCode rollout exceeded ${timeoutSeconds} seconds`)
+    while (true) {
+      const body: SessionPromptBody = {
+        messageID: messageId(),
+        model: { providerID: providerId, modelID: modelId },
+        parts: [{ type: "text", text: nextPrompt }],
+        ...(firstPrompt && request.system_instructions?.trim() ? { system: request.system_instructions } : {}),
+        ...(request.agent ? { agent: request.agent } : {}),
+        ...(request.variant ? { variant: request.variant } : {}),
       }
-      if (outcome.kind === "cancel") {
-        throw new RunnerError("worker_cancelled", "OpenCode rollout was cancelled")
+      const normalizer = new EventNormalizer(sessionId, translated.sensitiveToolIds)
+      let terminal: Terminal = "continue"
+      try {
+        await api.noContent(
+          "POST",
+          `/session/${sessionId}/prompt_async`,
+          body,
+          Math.min(startupTimeoutMs, 10_000),
+        )
+      } catch (error) {
+        const code = error instanceof RunnerError && error.code === "opencode_http_timeout"
+          ? "opencode_prompt_submit_timeout"
+          : "opencode_prompt_submit_failed"
+        throw new RunnerError(code, `OpenCode async prompt submission failed (${code})`, { cause: error })
       }
-      const reduced = normalizer.handle(outcome.event as OpenCodeEvent)
-      for (const event of reduced.events) emit(event)
-      terminal = reduced.terminal
-    }
-
-    if (terminal === "error") {
-      const [code, message] = normalizer.error ?? ["opencode_session_error", "OpenCode session failed"]
-      throw new RunnerError(code, message)
-    }
-    const messages = await api.json<SessionMessagesResponse>(
-      "GET",
-      `/session/${sessionId}/message`,
-      undefined,
-      3_000,
-    )
-    if (!Array.isArray(messages)) {
-      throw new RunnerError("malformed_opencode_response", "session.messages did not return a list")
-    }
-    const finalText = finalAssistantText(messages, body.messageID!)
-    if (finalText === undefined) {
-      throw new RunnerError(
-        "malformed_opencode_response",
-        "session.messages omitted the completed assistant response for the submitted turn",
+      while (terminal === "continue") {
+        const outcome = await Promise.race([
+          queue.next().then((event) => ({ kind: "event" as const, event })),
+          deadline.then((kind) => ({ kind })),
+          cancellation.then((kind) => ({ kind })),
+        ])
+        if (outcome.kind === "timeout") {
+          throw new RunnerError("worker_timeout", `OpenCode rollout exceeded ${timeoutSeconds} seconds`)
+        }
+        if (outcome.kind === "cancel") {
+          throw new RunnerError("worker_cancelled", "OpenCode rollout was cancelled")
+        }
+        const reduced = normalizer.handle(outcome.event as OpenCodeEvent)
+        for (const event of reduced.events) emit(event)
+        terminal = reduced.terminal
+      }
+      if (terminal === "error") {
+        const [code, message] = normalizer.error ?? ["opencode_session_error", "OpenCode session failed"]
+        throw new RunnerError(code, message)
+      }
+      const messages = await api.json<SessionMessagesResponse>(
+        "GET",
+        `/session/${sessionId}/message`,
+        undefined,
+        3_000,
       )
+      if (!Array.isArray(messages)) {
+        throw new RunnerError("malformed_opencode_response", "session.messages did not return a list")
+      }
+      const turnText = finalAssistantText(messages, body.messageID!)
+      if (turnText === undefined) {
+        throw new RunnerError(
+          "malformed_opencode_response",
+          "session.messages omitted the completed assistant response for the submitted turn",
+        )
+      }
+      finalText = turnText
+      const finalDelivery = await preparePeerDelivery(request)
+      if (!finalDelivery) break
+      // This is only the documented post-final race-reduction follow-up. The
+      // config-scoped messages transform prepares, inserts, and acknowledges
+      // the same durable lease immediately before OpenCode's provider call.
+      nextPrompt = "Continue after considering any automatically delivered peer content."
+      firstPrompt = false
     }
     completed = true
     emit({ event: "turn_complete", final_text: finalText })
@@ -909,6 +981,16 @@ export async function startSpawnCallback(command: string[], handlerTimeoutMs = 1
   token: string
   stop: () => void
 }> {
+  return startDynamicToolCallback({ spawn_child: command }, handlerTimeoutMs)
+}
+
+export async function startDynamicToolCallback(
+  commands: { spawn_child?: string[] | null; peer_communication?: string[] | null },
+  handlerTimeoutMs = 15_000,
+): Promise<{ endpoint: string; token: string; stop: () => void }> {
+  if (commands.peer_communication && commands.peer_communication.length === 0) {
+    throw new Error("peer_communication capability was requested without a handler command")
+  }
   const token = randomSecret()
   const server = Bun.serve({
     hostname: "127.0.0.1",
@@ -927,17 +1009,31 @@ export async function startSpawnCallback(command: string[], handlerTimeoutMs = 1
       try {
         const raw = await request.text()
         if (raw.length > 64 * 1024) return new Response("request too large", { status: 413 })
-        const result = await runHandler(command, JSON.parse(raw), handlerTimeoutMs)
+        const payload = JSON.parse(raw)
+        const tool = isRecord(payload) && typeof payload.tool === "string" ? payload.tool : ""
+        const command = tool === "spawn_child"
+          ? commands.spawn_child
+          : [
+              "send_message",
+              "_peer_delivery_prepare",
+              "_peer_delivery_ack",
+              "_peer_delivery_claim",
+              "_peer_delivery_ack_boundary",
+              "_peer_delivery_cycle_started",
+            ].includes(tool)
+            ? commands.peer_communication
+            : undefined
+        const result = command
+          ? await runHandler(command, payload, handlerTimeoutMs)
+          : { success: false, retryable: false, error_code: "unsupported_dynamic_tool", error: "dynamic tool is not configured" }
         return Response.json(result)
       } catch {
         return Response.json(
           {
             success: false,
-            child_spawned: false,
-            parent_continues: true,
             retryable: true,
-            error_code: "spawn_child_bridge_invalid_request",
-            error: "spawn_child bridge request was invalid",
+            error_code: "dynamic_tool_bridge_invalid_request",
+            error: "dynamic tool bridge request was invalid",
           },
         )
       }
@@ -968,7 +1064,10 @@ export async function runRequest(request: RunnerRequest, cancelled: Promise<void
   }
   let root: string
   try {
-    root = await prepareStateRoot(request.state_root)
+    root = await prepareStateRoot(
+      request.state_root,
+      Boolean(request.peer_communication_handler_command),
+    )
   } catch (error) {
     throw asRunnerError("state_isolation_failed", error)
   }
@@ -995,10 +1094,13 @@ export async function runRequest(request: RunnerRequest, cancelled: Promise<void
     }
   }
   let env: WorkerEnvironment
-  let callback: Awaited<ReturnType<typeof startSpawnCallback>> | undefined
+  let callback: Awaited<ReturnType<typeof startDynamicToolCallback>> | undefined
   try {
-    callback = request.spawn_child_handler_command?.length
-      ? await startSpawnCallback(request.spawn_child_handler_command)
+    callback = request.spawn_child_handler_command?.length || request.peer_communication_handler_command?.length
+      ? await startDynamicToolCallback({
+          spawn_child: request.spawn_child_handler_command,
+          peer_communication: request.peer_communication_handler_command,
+        })
       : undefined
     env = await isolatedEnvironment(
       request,

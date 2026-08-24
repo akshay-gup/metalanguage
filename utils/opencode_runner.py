@@ -714,6 +714,8 @@ def _durable_request(request: dict[str, Any]) -> dict[str, Any]:
         durable["auth_file"] = {"configured": True}
     if "spawn_child_handler_command" in durable:
         durable["spawn_child_handler_command"] = {"configured": True}
+    if "peer_communication_handler_command" in durable:
+        durable["peer_communication_handler_command"] = {"configured": True}
     sandbox = durable.get("sandbox")
     if isinstance(sandbox, dict) and "read_only_mounts" in sandbox:
         sandbox["read_only_mounts"] = [
@@ -901,12 +903,38 @@ def run_opencode_rollout(
     if system_instructions is not None and system_instructions.strip():
         request["system_instructions"] = system_instructions
     if continuation_context_path is not None:
-        request["spawn_child_handler_command"] = [
+        handler_command = [
             sys.executable,
             str(PROJECT_ROOT / "main_loop.py"),
             "--child-tool-handler",
             str(continuation_context_path),
         ]
+        request["spawn_child_handler_command"] = handler_command
+        try:
+            continuation_context = json.loads(
+                continuation_context_path.read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            continuation_context = {}
+        if not isinstance(continuation_context, dict):
+            continuation_context = {}
+        peer_endpoint = continuation_context.get("peer_communication_endpoint")
+        peer_token = continuation_context.get("peer_communication_token")
+        if (peer_endpoint is None) != (peer_token is None):
+            raise RuntimeError(
+                "peer communication capability has incomplete supervisor credentials"
+            )
+        if peer_endpoint is not None:
+            if (
+                not isinstance(peer_endpoint, str)
+                or not peer_endpoint
+                or not isinstance(peer_token, str)
+                or not peer_token
+            ):
+                raise RuntimeError(
+                    "peer communication capability has invalid supervisor credentials"
+                )
+            request["peer_communication_handler_command"] = handler_command
     if auth_file is not None:
         request["auth_file"] = str(auth_file.resolve())
     if agent:

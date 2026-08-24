@@ -82,6 +82,7 @@ export type RunnerRequest = {
   provider_env_names?: string[]
   custom_provider?: CustomProviderInput | null
   spawn_child_handler_command?: string[] | null
+  peer_communication_handler_command?: string[] | null
   mcp_servers?: Record<string, McpServerInput>
   sensitive_mcp_tools?: McpToolSelector[]
   sandbox?: {
@@ -489,7 +490,7 @@ export class EventNormalizer {
       const status = typeof state.status === "string" ? state.status : "unknown"
       if (this.toolStatus.get(partId) === status) return { events: output, terminal: "continue" }
       this.toolStatus.set(partId, status)
-      const sensitive = this.sensitiveToolIds.has(tool)
+      const sensitive = tool === "send_message" || this.sensitiveToolIds.has(tool)
       if (status === "pending" || status === "running") {
         output.push({
           event: "tool_begin",

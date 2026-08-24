@@ -13,6 +13,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from utils.peer_communication import peer_communication_handler_command
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUNNER_CRATE_DIR = PROJECT_ROOT / "crates" / "metalanguage-codex-runner"
@@ -230,12 +232,43 @@ def run_codex_rollout(
         "additional_writable_roots": additional_writable_roots,
     }
     if spawn_child_handler_context_path is not None:
-        request["spawn_child_handler_command"] = [
+        handler_command = [
             sys.executable,
             str(PROJECT_ROOT / "main_loop.py"),
             "--child-tool-handler",
             str(spawn_child_handler_context_path),
         ]
+        request["spawn_child_handler_command"] = handler_command
+        try:
+            continuation_context = json.loads(
+                spawn_child_handler_context_path.read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            continuation_context = {}
+        if not isinstance(continuation_context, dict):
+            continuation_context = {}
+        peer_endpoint = continuation_context.get("peer_communication_endpoint")
+        peer_token = continuation_context.get("peer_communication_token")
+        if (peer_endpoint is None) != (peer_token is None):
+            raise RuntimeError(
+                "peer communication capability has incomplete supervisor credentials"
+            )
+        if peer_endpoint is not None:
+            if (
+                not isinstance(peer_endpoint, str)
+                or not peer_endpoint
+                or not isinstance(peer_token, str)
+                or not peer_token
+            ):
+                raise RuntimeError(
+                    "peer communication capability has invalid supervisor credentials"
+                )
+            request["peer_communication_handler_command"] = (
+                peer_communication_handler_command(
+                    spawn_child_handler_context_path,
+                    python_executable=sys.executable,
+                )
+            )
     if benchmark_mcp_servers:
         request["mcp_servers"] = benchmark_mcp_servers
     if sensitive_mcp_tools:
@@ -347,6 +380,7 @@ def run_codex_rollout(
                     final_text = str(event.get("final_text") or "")
 
         return_code = proc.wait()
+        proc.stdout.close()
     thread_id = thread_id or state.get("thread_id") or None
     session_id = session_id or state.get("session_id") or None
     final_text = final_text or state.get("final_text", "")

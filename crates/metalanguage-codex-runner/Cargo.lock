@@ -7077,6 +7077,7 @@ dependencies = [
  "codex-config",
  "codex-core",
  "codex-core-api",
+ "codex-hooks",
  "codex-protocol",
  "serde",
  "serde_json",
