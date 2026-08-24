@@ -84,3 +84,8 @@ preserving those themes.
   rollout's reserved next-iteration slot and stores its prompt. Invalid or
   failed attempts can be retried; after one successful spawn, further calls
   from this rollout fail while the parent continues.
+- `send_message(message, receiver)` sends a bounded non-empty UTF-8 direct
+  message to a named peer in the current batch. The receiver must exactly match
+  a peer name in `runtime.md`. Delivery is automatic before a subsequent
+  supported inference, including the next supported tool-cycle boundary.
+  Messages sent after the recipient's final inference can remain undelivered.
