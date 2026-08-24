@@ -35,6 +35,16 @@ from utils.opencode_runner import (
     run_opencode_rollout,
     validate_opencode_host_primitives,
 )
+from utils.peer_communication import (
+    LEGACY_PEER_COMMUNICATION_TOOL_NAME,
+    PEER_ROLLOUT_COUNT,
+    SAFE_ENGLISH_FIRST_NAMES,
+    SEND_MESSAGE_INPUT_SCHEMA,
+    SEND_MESSAGE_TOOL_NAME,
+    PeerCommunicationBridge,
+    PeerCommunicationScope,
+    PeerCommunicationStore,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -254,21 +264,27 @@ class OpenCodeRunnerTests(unittest.TestCase):
         tool: str = "spawn_child",
         arguments: dict[str, object] | None = None,
         plan: list[dict[str, object]] | None = None,
+        release_after_capture: Path | None = None,
     ) -> tuple[subprocess.Popen[str], str, Path]:
         capture = root / "provider_capture.jsonl"
+        environment = {
+            "PATH": "/usr/bin:/bin",
+            "LANG": "C.UTF-8",
+            "FAKE_PROVIDER_CAPTURE": str(capture),
+            "FAKE_PROVIDER_TRANSPORT_CAPTURE": str(root / "provider_transport.jsonl"),
+            "FAKE_PROVIDER_MODE": mode,
+            "FAKE_PROVIDER_TOOL": tool,
+            "FAKE_PROVIDER_TOOL_ARGS": json.dumps(arguments or {}),
+            "FAKE_PROVIDER_TOOL_PLAN": json.dumps(plan or []),
+        }
+        if release_after_capture is not None:
+            environment["FAKE_PROVIDER_RELEASE_AFTER_CAPTURE"] = str(
+                release_after_capture
+            )
         process = subprocess.Popen(
             [sys.executable, "-B", str(FAKE_PROVIDER)],
             cwd=PROJECT_ROOT,
-            env={
-                "PATH": "/usr/bin:/bin",
-                "LANG": "C.UTF-8",
-                "FAKE_PROVIDER_CAPTURE": str(capture),
-                "FAKE_PROVIDER_TRANSPORT_CAPTURE": str(root / "provider_transport.jsonl"),
-                "FAKE_PROVIDER_MODE": mode,
-                "FAKE_PROVIDER_TOOL": tool,
-                "FAKE_PROVIDER_TOOL_ARGS": json.dumps(arguments or {}),
-                "FAKE_PROVIDER_TOOL_PLAN": json.dumps(plan or []),
-            },
+            env=environment,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -460,6 +476,9 @@ class OpenCodeRunnerTests(unittest.TestCase):
             self.assertTrue((root / "workdir/fake_delete").is_file())
             state = json.loads((root / "workdir/fake_state.json").read_text())
             self.assertTrue(state["spawn_child_tool"])
+            self.assertFalse(state["send_message_tool"])
+            self.assertFalse(state["read_messages_tool"])
+            self.assertFalse(state["legacy_peer_communication_tool"])
             self.assertTrue(state["system_plugin"])
             self.assertTrue(state["prepared_dependencies"])
             self.assertTrue(state["npm_offline"])
@@ -484,6 +503,9 @@ class OpenCodeRunnerTests(unittest.TestCase):
                 if key
                 not in {
                     "spawn_child_tool",
+                    "send_message_tool",
+                    "read_messages_tool",
+                    "legacy_peer_communication_tool",
                     "system_plugin",
                     "prepared_dependencies",
                     "npm_offline",
@@ -503,6 +525,14 @@ class OpenCodeRunnerTests(unittest.TestCase):
             }
             self.assertTrue(all(str(root / "state/opencode_runtime") in value for value in roots))
             self.assertFalse((root / "state/opencode_runtime").exists())
+            durable_request = json.loads(
+                (root / "control/opencode_runner.request.json").read_text()
+            )
+            self.assertNotIn("peer_communication_handler_command", durable_request)
+            self.assertEqual(
+                durable_request["spawn_child_handler_command"],
+                {"configured": True},
+            )
 
     def test_mcp_translation_and_sensitive_event_redaction(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1362,6 +1392,103 @@ class OpenCodeRunnerTests(unittest.TestCase):
             self.assertEqual(requests[0]["messages"][0], {"role": "system", "content": "EXACT OFFLINE SYSTEM"})
             self.assertEqual(requests[-1]["messages"][-1]["role"], "tool")
             self.assertIn('"success":true', requests[-1]["messages"][-1]["content"])
+
+    def test_real_opencode_message_tools_use_central_callback_and_redact_events(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            provider_release = root / "provider-release"
+            process, url, capture = self._start_provider(
+                root,
+                mode="spawn",
+                plan=[
+                    {
+                        "tool": SEND_MESSAGE_TOOL_NAME,
+                        "arguments": {
+                            "message": "PRIVATE PEER FINDING",
+                            "receiver": SAFE_ENGLISH_FIRST_NAMES[1],
+                        },
+                    },
+                ],
+                release_after_capture=provider_release,
+            )
+            name_mapping = {
+                index: SAFE_ENGLISH_FIRST_NAMES[index]
+                for index in range(PEER_ROLLOUT_COUNT)
+            }
+            store = PeerCommunicationStore(
+                root / "peer-log",
+                PeerCommunicationScope(
+                    benchmark="arc-agi",
+                    generation=0,
+                    seed=42,
+                    task_index=7,
+                    task_id="arc_batch",
+                    batch_id="test-batch",
+                    population_size=PEER_ROLLOUT_COUNT,
+                ),
+                name_mapping=name_mapping,
+            )
+            try:
+                with PeerCommunicationBridge(store) as bridge:
+                    credentials = bridge.credentials(0)
+                    context = root / "peer-context.json"
+                    context.write_text(
+                        json.dumps(
+                            {
+                                "peer_communication_endpoint": credentials.endpoint,
+                                "peer_communication_token": credentials.token,
+                            }
+                        )
+                    )
+                    with ThreadPoolExecutor(max_workers=1) as executor:
+                        future = executor.submit(
+                            self._run_real,
+                            root,
+                            url=url,
+                            prompt="publish peer finding",
+                            continuation=context,
+                        )
+                        deadline = time.monotonic() + 10
+                        while (
+                            (not capture.exists() or not capture.read_text().strip())
+                            and time.monotonic() < deadline
+                        ):
+                            time.sleep(0.01)
+                        self.assertTrue(capture.exists() and capture.read_text().strip())
+                        inbound = store.handle(
+                            1,
+                            SEND_MESSAGE_TOOL_NAME,
+                            {
+                                "message": "PRIVATE INBOUND FINDING",
+                                "receiver": name_mapping[0],
+                            },
+                        )
+                        self.assertTrue(inbound["success"])
+                        provider_release.write_text("release\n")
+                        result = future.result(timeout=40)
+            finally:
+                self._stop_provider(process)
+            self.assertEqual(result["status"], "completed", result)
+            outgoing = store.prepare_delivery(1)
+            self.assertTrue(outgoing["pending"])
+            self.assertIn("PRIVATE PEER FINDING", outgoing["injection"])
+            events = Path(str(result["events_path"])).read_text()
+            self.assertNotIn("PRIVATE PEER FINDING", events)
+            self.assertNotIn("PRIVATE INBOUND FINDING", events)
+            requests = [json.loads(line) for line in capture.read_text().splitlines()]
+            tools = {tool["function"]["name"]: tool["function"] for tool in requests[0]["tools"]}
+            self.assertEqual(tools[SEND_MESSAGE_TOOL_NAME]["parameters"], SEND_MESSAGE_INPUT_SCHEMA)
+            self.assertNotIn("read_messages", tools)
+            self.assertNotIn(LEGACY_PEER_COMMUNICATION_TOOL_NAME, tools)
+            request_text = json.dumps(requests)
+            self.assertIn("UNTRUSTED PEER CONTENT", request_text)
+            self.assertIn("PRIVATE INBOUND FINDING", request_text)
+            self.assertNotIn("PRIVATE INBOUND FINDING", json.dumps(requests[0]))
+            self.assertIn("PRIVATE INBOUND FINDING", json.dumps(requests[1]))
+            second_roles = [message["role"] for message in requests[1]["messages"]]
+            self.assertLess(second_roles.index("tool"), len(second_roles) - 1)
+            self.assertEqual(second_roles[-1], "user")
+            self.assertFalse(store.prepare_delivery(0)["pending"])
 
     def test_real_opencode_spawn_retry_then_one_success_and_continuation(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

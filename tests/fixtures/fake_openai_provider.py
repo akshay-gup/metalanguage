@@ -21,6 +21,11 @@ MODE = os.environ.get("FAKE_PROVIDER_MODE", "final")
 TOOL_NAME = os.environ.get("FAKE_PROVIDER_TOOL", "spawn_child")
 TOOL_ARGS = json.loads(os.environ.get("FAKE_PROVIDER_TOOL_ARGS", "{}"))
 TOOL_PLAN = json.loads(os.environ.get("FAKE_PROVIDER_TOOL_PLAN", "[]"))
+RELEASE_AFTER_CAPTURE = (
+    Path(os.environ["FAKE_PROVIDER_RELEASE_AFTER_CAPTURE"])
+    if os.environ.get("FAKE_PROVIDER_RELEASE_AFTER_CAPTURE")
+    else None
+)
 
 
 def chunk(handler: BaseHTTPRequestHandler, payload: object) -> None:
@@ -42,6 +47,13 @@ class Handler(BaseHTTPRequestHandler):
         request = json.loads(self.rfile.read(length))
         with CAPTURE.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(request, sort_keys=True) + "\n")
+        if RELEASE_AFTER_CAPTURE is not None and not RELEASE_AFTER_CAPTURE.exists():
+            deadline = time.monotonic() + 5
+            while not RELEASE_AFTER_CAPTURE.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            if not RELEASE_AFTER_CAPTURE.exists():
+                self.send_error(504)
+                return
         if TRANSPORT_CAPTURE is not None:
             with TRANSPORT_CAPTURE.open("a", encoding="utf-8") as stream:
                 stream.write(

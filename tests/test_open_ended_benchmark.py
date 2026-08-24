@@ -108,7 +108,7 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                 "--model",
                 "fixture/model-one",
                 "--num-rollouts",
-                "1",
+                "8",
                 "--step",
                 "--opencode-bin",
                 str(fake_opencode),
@@ -145,7 +145,7 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                 "main_loop.run_opencode_worker", side_effect=worker
             ):
                 _run_main([])
-            self.assertEqual(len(calls), 1)
+            self.assertEqual(len(calls), 8)
             configuration = calls[0]["custom_provider"]
             self.assertEqual(configuration["provider_id"], "fixture")
             self.assertEqual(configuration["model_id"], "model-one")
@@ -156,9 +156,26 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
             )
             run_log = (runtime / "logs/runs.jsonl").read_text()
             self.assertNotIn("DISPATCH-PRIVATE", run_log)
-            record = json.loads(run_log)
+            records = [json.loads(line) for line in run_log.splitlines()]
+            self.assertEqual(len(records), 8)
+            record = records[0]
             self.assertEqual(record["opencode_custom_provider"], configuration)
             self.assertTrue(record["opencode_custom_provider_sha256"])
+            self.assertTrue(record["peer_communication_enabled"])
+            self.assertFalse(record["rollout_independence"])
+            self.assertEqual(len(record["peer_name_mapping"]), 8)
+            self.assertEqual(
+                len({entry["name"] for entry in record["peer_name_mapping"]}),
+                8,
+            )
+            self.assertEqual(len(record["peer_name_roster"]), 8)
+            peer_log = (
+                runtime
+                / "logs/peer_communication/task_000000"
+                / f"batch_{record['peer_communication_batch_id']}"
+            )
+            self.assertTrue((peer_log / "manifest.json").is_file())
+            self.assertEqual(list((peer_log / "messages").glob("*.json")), [])
 
     def test_custom_provider_defaults_do_not_change_codex_or_openrouter_dispatch(self) -> None:
         documents = Path.home() / "Documents"
@@ -181,7 +198,7 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                     "--model",
                     "fixture/model",
                     "--num-rollouts",
-                    "1",
+                    "8",
                     "--step",
                 ]
                 if backend == "codex":
@@ -206,8 +223,8 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                     side_effect=AssertionError("OpenCode dispatch must remain inactive"),
                 ):
                     _run_main([])
-                self.assertEqual(len(codex_calls), 1 if backend == "codex" else 0)
-                self.assertEqual(len(openrouter_calls), 1 if backend == "openrouter" else 0)
+                self.assertEqual(len(codex_calls), 8 if backend == "codex" else 0)
+                self.assertEqual(len(openrouter_calls), 8 if backend == "openrouter" else 0)
 
     def test_opencode_resume_requires_matching_backend_configuration(self) -> None:
         custom_provider = custom_provider_configuration(
@@ -437,7 +454,7 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                 "--model",
                 "fixture/model",
                 "--num-rollouts",
-                "1",
+                "8",
                 "--step",
                 "--opencode-bin",
                 str(fake_opencode),
@@ -471,14 +488,21 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                     "main_loop.run_opencode_worker", side_effect=worker
                 ):
                     _run_main([])
-            self.assertEqual(len(calls), 3)
-            self.assertEqual(
-                [call["initial_user_text"] for call in calls],
-                [
-                    "CUSTOM OPENCODE BOOTSTRAP",
-                    "CUSTOM OPENCODE BOOTSTRAP",
-                    "INHERITED CHILD PROMPT",
-                ],
+            self.assertEqual(len(calls), 24)
+            inherited_indices = [
+                index
+                for index, call in enumerate(calls)
+                if call["initial_user_text"] == "INHERITED CHILD PROMPT"
+            ]
+            self.assertEqual(len(inherited_indices), 1)
+            inherited_index = inherited_indices[0]
+            self.assertIn(inherited_index, range(8, 16))
+            self.assertTrue(
+                all(
+                    call["initial_user_text"] == "CUSTOM OPENCODE BOOTSTRAP"
+                    for index, call in enumerate(calls)
+                    if index != inherited_index
+                )
             )
             self.assertNotIn(
                 str(runtime / "logs/rollout_control"),
@@ -505,15 +529,13 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                 json.loads(line)
                 for line in (runtime / "logs/runs.jsonl").read_text().splitlines()
             ]
-            self.assertEqual(len(records), 3)
-            self.assertEqual(
-                records[0]["opencode_effective_initial_prompt_sha256"],
-                records[1]["opencode_effective_initial_prompt_sha256"],
-            )
-            self.assertNotEqual(
-                records[1]["opencode_effective_initial_prompt_sha256"],
-                records[2]["opencode_effective_initial_prompt_sha256"],
-            )
+            self.assertEqual(len(records), 24)
+            prompt_hashes = [
+                record["opencode_effective_initial_prompt_sha256"]
+                for record in records
+            ]
+            self.assertEqual(len(set(prompt_hashes)), 2)
+            self.assertEqual(sorted(prompt_hashes.count(value) for value in set(prompt_hashes)), [1, 23])
             self.assertTrue(records[0]["opencode_system_instructions_sha256"])
             self.assertTrue(records[0]["opencode_python_sha256"])
             self.assertTrue(records[0]["opencode_bubblewrap_sha256"])
@@ -636,6 +658,16 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
             self.assertIn("no evaluator, score, reward, solved status, or ranking", runtime_text)
             self.assertNotIn("problem_pool", runtime_text)
             self.assertNotIn("Benchmark Pool Semantics", runtime_text)
+            peer_section = "## Peer Identity" + runtime_text.split("## Peer Identity", 1)[1]
+            self.assertEqual(
+                [line for line in peer_section.splitlines() if line],
+                [
+                    "## Peer Identity",
+                    "- your name: unavailable",
+                    "- other peer names: unavailable",
+                ],
+            )
+            self.assertNotIn("send_message", peer_section)
             bootstrap = (
                 Path(__file__).resolve().parents[1] / "seeds/bootstrap/README.md"
             ).read_text(encoding="utf-8")
@@ -643,6 +675,9 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
             self.assertIn("current human-authored task", bootstrap)
             self.assertIn("explicitly unevaluated", bootstrap_words)
             self.assertIn("an unevaluated profile can provide none", bootstrap)
+            self.assertIn("`send_message(message, receiver)`", bootstrap)
+            self.assertIn("must exactly match a peer name in `runtime.md`", bootstrap_words)
+            self.assertIn("next supported tool-cycle boundary", bootstrap_words)
 
             identity_root = root / "identity"
             identity_root.mkdir()

@@ -157,6 +157,15 @@ class Handler(BaseHTTPRequestHandler):
             state["spawn_child_tool"] = Path(
                 os.environ["OPENCODE_CONFIG_DIR"], "tool", "spawn_child.js"
             ).is_file()
+            state["send_message_tool"] = Path(
+                os.environ["OPENCODE_CONFIG_DIR"], "tool", "send_message.js"
+            ).is_file()
+            state["read_messages_tool"] = Path(
+                os.environ["OPENCODE_CONFIG_DIR"], "tool", "read_messages.js"
+            ).is_file()
+            state["legacy_peer_communication_tool"] = Path(
+                os.environ["OPENCODE_CONFIG_DIR"], "tool", "peer_communication.js"
+            ).exists()
             state["system_plugin"] = Path(
                 os.environ["OPENCODE_CONFIG_DIR"], "plugin", "metalanguage_system.js"
             ).is_file()
