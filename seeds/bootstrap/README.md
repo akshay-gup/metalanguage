@@ -48,6 +48,20 @@ readable, non-blank UTF-8 `README.md` at its root. Additional files are optional
 Generated runtime files, pool snapshots, transcripts, and other files are not
 inherited unless they are included in the supplied workspace.
 
+## Communication
+
+A rollout can send a direct message to another rollout in the current batch
+through:
+
+```text
+send_message(message="...", receiver="...")
+```
+
+`receiver` must exactly match one of the peer names in `runtime.md`. Delivery is
+automatic before a subsequent supported inference, including the next supported
+tool-cycle boundary. A message sent after the recipient's final inference can
+remain undelivered.
+
 ## Continuation
 
 An individual lineage continues only through a successful call of:

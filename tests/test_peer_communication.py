@@ -225,6 +225,8 @@ class PeerCommunicationTests(unittest.TestCase):
         send_message_words = " ".join(
             ("- `send_message" + bootstrap.split("- `send_message", 1)[1]).split()
         )
+        self.assertIn("## Communication", bootstrap)
+        self.assertIn('send_message(message="...", receiver="...")', bootstrap)
         self.assertIn("`send_message(message, receiver)`", bootstrap)
         self.assertIn("must exactly match a peer name in `runtime.md`", bootstrap_words)
         self.assertNotIn("read or broadcast", bootstrap_words)
