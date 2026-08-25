@@ -60,6 +60,7 @@ def call_openrouter_with_tools(
     *,
     api_key: str,
     model: str,
+    instructions: str,
     input_items: list[dict[str, Any]] | str,
     tools: list[dict[str, Any]] | None = None,
     tool_choice: ToolChoice = "auto",
@@ -79,9 +80,13 @@ def call_openrouter_with_tools(
     """
     payload: dict[str, Any] = {
         "model": model,
+        "instructions": instructions,
         "input": input_items,
         "stream": stream,
     }
+
+    if not instructions.strip():
+        raise ValueError("instructions must be non-empty")
 
     if max_output_tokens is not None:
         payload["max_output_tokens"] = max_output_tokens

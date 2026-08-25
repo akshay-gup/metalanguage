@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import shutil
@@ -135,10 +136,17 @@ DEFAULT_CODEX_HOME = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
 BUNDLED_BOOTSTRAP_SEED_DIR = PROJECT_ROOT / "seeds" / "bootstrap"
 RUNTIME_BENCHMARK_IDENTITY_FILENAME = "runtime_benchmark.json"
 STABLE_SEED_FILENAMES = ("README.md",)
-READ_README_TASK_INSTRUCTIONS = (
-    "This rollout has no assigned task. README.md describes its environment."
+DEFAULT_BOOTSTRAP_INITIAL_PROMPT = "Begin."
+ROLLOUT_SYSTEM_INSTRUCTIONS_MODE = "canonical-bootstrap"
+ROLLOUT_SYSTEM_INSTRUCTIONS_CAPABILITY_NAME = "rollout_system_instructions"
+ROLLOUT_SYSTEM_INSTRUCTIONS_VERSION = 1
+CANONICAL_BOOTSTRAP_README_SHA256 = (
+    "1dbe703390081b66644d10fbaf01032ca06320adf047314479be2d618b34f9d6"
 )
-CODEX_READ_README_BASE_INSTRUCTIONS = READ_README_TASK_INSTRUCTIONS
+ROLLOUT_SYSTEM_INSTRUCTIONS_FINGERPRINT = (
+    f"{ROLLOUT_SYSTEM_INSTRUCTIONS_MODE}:v{ROLLOUT_SYSTEM_INSTRUCTIONS_VERSION}:"
+    f"{CANONICAL_BOOTSTRAP_README_SHA256}"
+)
 BENCHMARK_README_FILENAME = "BENCHMARK.md"
 
 
@@ -180,7 +188,28 @@ def _normalize_difficulty_filter(raw: str | None) -> tuple[str, ...] | None:
     return values
 
 
-def _format_bootstrap_seed_prompt(seed_dir: Path) -> str:
+def canonical_rollout_system_instructions() -> str:
+    """Return the exact reviewed bootstrap README as the rollout system contract."""
+    path = BUNDLED_BOOTSTRAP_SEED_DIR / "README.md"
+    data = path.read_bytes()
+    digest = hashlib.sha256(data).hexdigest()
+    if digest != CANONICAL_BOOTSTRAP_README_SHA256:
+        raise RuntimeError(
+            "Canonical bootstrap README does not match the reviewed system-instruction hash."
+        )
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise RuntimeError("Canonical bootstrap README is not valid UTF-8.") from None
+    if not text.strip():
+        raise RuntimeError("Canonical bootstrap README is empty.")
+    return text
+
+
+def _format_bootstrap_seed_prompt(
+    seed_dir: Path,
+    initial_user_text: str = DEFAULT_BOOTSTRAP_INITIAL_PROMPT,
+) -> str:
     for filename in STABLE_SEED_FILENAMES:
         path = seed_dir / filename
         if not path.is_file():
@@ -189,7 +218,9 @@ def _format_bootstrap_seed_prompt(seed_dir: Path) -> str:
         if not content:
             raise ValueError(f"Bootstrap seed stable file is empty: {path}")
 
-    return READ_README_TASK_INSTRUCTIONS
+    if not initial_user_text.strip():
+        raise ValueError("Bootstrap initial user text must not be blank.")
+    return initial_user_text
 
 
 def _extract_text_from_response(response_json: dict[str, Any]) -> str:
@@ -808,8 +839,8 @@ def _refill_parent_pool_with_bootstrap_slots(
                 "slot_index": slot_index,
                 "parent_instance_uuid": None,
                 "parent_rollout_username": None,
-                "prompt": READ_README_TASK_INSTRUCTIONS,
-                "prompt_chars": len(READ_README_TASK_INSTRUCTIONS),
+                "prompt": DEFAULT_BOOTSTRAP_INITIAL_PROMPT,
+                "prompt_chars": len(DEFAULT_BOOTSTRAP_INITIAL_PROMPT),
                 "workspace_dir": None,
                 "slot_dir": None,
                 "manifest_path": None,
@@ -873,6 +904,13 @@ def _claim_runtime_benchmark(runtime_root: Path, requested: str) -> None:
         "version": PEER_COMMUNICATION_VERSION,
         "fingerprint": PEER_COMMUNICATION_FINGERPRINT,
     }
+    instruction_capability = {
+        "enabled": True,
+        "version": ROLLOUT_SYSTEM_INSTRUCTIONS_VERSION,
+        "fingerprint": ROLLOUT_SYSTEM_INSTRUCTIONS_FINGERPRINT,
+        "mode": ROLLOUT_SYSTEM_INSTRUCTIONS_MODE,
+        "sha256": CANONICAL_BOOTSTRAP_README_SHA256,
+    }
     if identity_path.exists():
         identity = _read_json_file(identity_path, None)
         if not isinstance(identity, dict):
@@ -908,6 +946,16 @@ def _claim_runtime_benchmark(runtime_root: Path, requested: str) -> None:
             raise RuntimeError(
                 "Runtime peer communication capability is incompatible with this version."
             )
+        recorded_instructions = capabilities.get(
+            ROLLOUT_SYSTEM_INSTRUCTIONS_CAPABILITY_NAME
+        )
+        if (
+            recorded_instructions is not None
+            and recorded_instructions != instruction_capability
+        ):
+            raise RuntimeError(
+                "Runtime rollout system-instruction capability is incompatible with this version."
+            )
         return
     _write_json_file_atomic(
         identity_path,
@@ -916,14 +964,15 @@ def _claim_runtime_benchmark(runtime_root: Path, requested: str) -> None:
             "version": 1,
             "benchmark": requested,
             "capabilities": {
-                PEER_COMMUNICATION_CAPABILITY_NAME: peer_capability
+                PEER_COMMUNICATION_CAPABILITY_NAME: peer_capability,
+                ROLLOUT_SYSTEM_INSTRUCTIONS_CAPABILITY_NAME: instruction_capability,
             },
         },
     )
 
 
 def _record_current_peer_communication_capability(runtime_root: Path) -> None:
-    """Upgrade runtime identity only after partial-run compatibility succeeds."""
+    """Upgrade runtime capabilities only after partial-run compatibility succeeds."""
     identity_path = runtime_root / RUNTIME_BENCHMARK_IDENTITY_FILENAME
     identity = _read_json_file(identity_path, None)
     if not isinstance(identity, dict):
@@ -938,7 +987,18 @@ def _record_current_peer_communication_capability(runtime_root: Path) -> None:
         "version": PEER_COMMUNICATION_VERSION,
         "fingerprint": PEER_COMMUNICATION_FINGERPRINT,
     }
-    if capabilities.get(PEER_COMMUNICATION_CAPABILITY_NAME) == peer_capability:
+    instruction_capability = {
+        "enabled": True,
+        "version": ROLLOUT_SYSTEM_INSTRUCTIONS_VERSION,
+        "fingerprint": ROLLOUT_SYSTEM_INSTRUCTIONS_FINGERPRINT,
+        "mode": ROLLOUT_SYSTEM_INSTRUCTIONS_MODE,
+        "sha256": CANONICAL_BOOTSTRAP_README_SHA256,
+    }
+    if (
+        capabilities.get(PEER_COMMUNICATION_CAPABILITY_NAME) == peer_capability
+        and capabilities.get(ROLLOUT_SYSTEM_INSTRUCTIONS_CAPABILITY_NAME)
+        == instruction_capability
+    ):
         return
     _write_json_file_atomic(
         identity_path,
@@ -947,6 +1007,7 @@ def _record_current_peer_communication_capability(runtime_root: Path) -> None:
             "capabilities": {
                 **capabilities,
                 PEER_COMMUNICATION_CAPABILITY_NAME: peer_capability,
+                ROLLOUT_SYSTEM_INSTRUCTIONS_CAPABILITY_NAME: instruction_capability,
             },
         },
     )
@@ -1055,16 +1116,11 @@ def _validate_opencode_containment(
 def _worker_backend_resume_compatible(
     record: dict[str, Any],
     args: argparse.Namespace,
-    *,
-    effective_initial_prompt: str | None = None,
-    require_effective_prompt: bool = False,
 ) -> bool:
     if record.get("worker_backend", "openrouter") != args.worker_backend:
         return False
     if args.worker_backend == "codex":
-        return record.get("codex_base_instructions_mode", "codex") == (
-            args.codex_base_instructions_mode
-        )
+        return True
     if args.worker_backend == "opencode":
         allowed_versions = tuple(
             version.strip()
@@ -1123,36 +1179,12 @@ def _worker_backend_resume_compatible(
             "opencode_bubblewrap_sha256": getattr(
                 args, "_opencode_bubblewrap_sha256", None
             ),
-            "opencode_system_instructions_sha256": getattr(
-                args, "_opencode_system_instructions_sha256", None
-            ),
-            "opencode_configured_initial_prompt_sha256": getattr(
-                args, "_opencode_configured_initial_prompt_sha256", None
-            ),
             "opencode_provider_env_names": list(
                 getattr(args, "_opencode_provider_env_names", ())
             ),
         }
-        effective_prompt_sha256 = record.get(
-            "opencode_effective_initial_prompt_sha256"
-        )
-        prompt_identity_matches = isinstance(effective_prompt_sha256, str) and bool(
-            effective_prompt_sha256
-        )
-        if effective_initial_prompt is not None:
-            prompt_identity_matches = effective_prompt_sha256 == text_sha256(
-                effective_initial_prompt
-            )
-        elif record.get("bootstrap_seed_used") is True:
-            prompt_identity_matches = effective_prompt_sha256 == getattr(
-                args, "_opencode_configured_initial_prompt_sha256", None
-            )
-        elif require_effective_prompt:
-            prompt_identity_matches = False
         return (
-            record.get("opencode_base_instructions_mode", "opencode")
-            == args.opencode_base_instructions_mode
-            and record.get("opencode_agent") == args.opencode_agent
+            record.get("opencode_agent") == args.opencode_agent
             and record.get("opencode_variant") == args.opencode_variant
             and tuple(
                 record.get(
@@ -1176,9 +1208,40 @@ def _worker_backend_resume_compatible(
                 or Path(record["opencode_bun_bin"]).resolve() == expected_bun_bin
             )
             and all(record.get(key) == value for key, value in expected_fingerprint.items())
-            and prompt_identity_matches
         )
     return True
+
+
+def _rollout_prompt_resume_compatible(
+    record: dict[str, Any],
+    args: argparse.Namespace,
+    *,
+    effective_initial_prompt: str | None,
+) -> bool:
+    """Require the current system contract and exact user-prompt identity."""
+    if (
+        record.get("rollout_system_instructions_version")
+        != ROLLOUT_SYSTEM_INSTRUCTIONS_VERSION
+        or record.get("rollout_system_instructions_fingerprint")
+        != ROLLOUT_SYSTEM_INSTRUCTIONS_FINGERPRINT
+        or record.get("rollout_system_instructions_mode")
+        != ROLLOUT_SYSTEM_INSTRUCTIONS_MODE
+        or record.get("rollout_system_instructions_sha256")
+        != CANONICAL_BOOTSTRAP_README_SHA256
+    ):
+        return False
+    expected_prompt = (
+        args.opencode_initial_prompt
+        if args.worker_backend == "opencode"
+        else args.codex_initial_prompt
+    )
+    if effective_initial_prompt is not None:
+        expected_prompt = effective_initial_prompt
+    elif record.get("bootstrap_seed_used") is not True:
+        return False
+    return record.get("rollout_effective_initial_prompt_sha256") == text_sha256(
+        expected_prompt
+    )
 
 
 def _peer_communication_resume_compatible(
@@ -1562,6 +1625,7 @@ def run_worker(
     rollout_benchmark: RolloutBenchmark,
     peer_communication_store: PeerCommunicationStore,
     initial_user_text: str,
+    instructions: str,
     progress_callback: Any = None,
 ) -> WorkerResult:
     """Run a multi-turn tool-calling worker loop and return final assistant text."""
@@ -1638,6 +1702,7 @@ def run_worker(
             response = call_openrouter_with_tools(
                 api_key=api_key,
                 model=model,
+                instructions=instructions,
                 input_items=conversation,
                 tools=[
                     bash_tool,
@@ -2011,20 +2076,16 @@ def run_opencode_worker(
 
 
 def resolve_codex_base_instructions(mode: str) -> str | None:
-    """Return fixed Codex base instructions, or None for Codex defaults."""
-    if mode == "codex":
-        return None
-    if mode == "read-readme":
-        return CODEX_READ_README_BASE_INSTRUCTIONS
+    """Return the exact canonical environment contract for Codex sessions."""
+    if mode == ROLLOUT_SYSTEM_INSTRUCTIONS_MODE:
+        return canonical_rollout_system_instructions()
     raise ValueError(f"Unknown Codex base instructions mode: {mode}")
 
 
 def resolve_opencode_system_instructions(mode: str) -> str | None:
-    """Return an exact per-request OpenCode system instruction override."""
-    if mode == "opencode":
-        return None
-    if mode == "read-readme":
-        return READ_README_TASK_INSTRUCTIONS
+    """Return the exact canonical environment contract for OpenCode sessions."""
+    if mode == ROLLOUT_SYSTEM_INSTRUCTIONS_MODE:
+        return canonical_rollout_system_instructions()
     raise ValueError(f"Unknown OpenCode system instructions mode: {mode}")
 
 
@@ -2453,16 +2514,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--codex-initial-prompt",
-        default=READ_README_TASK_INSTRUCTIONS,
-        help="Initial user text submitted to the Codex runner for each rollout.",
+        default=DEFAULT_BOOTSTRAP_INITIAL_PROMPT,
+        help="Initial user text submitted to a fresh Codex or OpenRouter bootstrap rollout.",
     )
     parser.add_argument(
         "--codex-base-instructions-mode",
-        choices=["codex", "read-readme"],
-        default="read-readme",
+        choices=[ROLLOUT_SYSTEM_INSTRUCTIONS_MODE],
+        default=ROLLOUT_SYSTEM_INSTRUCTIONS_MODE,
         help=(
-            "Codex base-instructions mode. 'codex' uses the model catalog default; "
-            "'read-readme' uses the fixed scaffold task instruction."
+            "Codex base-instructions mode. 'canonical-bootstrap' supplies the exact "
+            "bundled bootstrap README as system-level session instructions."
         ),
     )
     parser.add_argument(
@@ -2610,16 +2671,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--opencode-initial-prompt",
-        default=READ_README_TASK_INSTRUCTIONS,
+        default=DEFAULT_BOOTSTRAP_INITIAL_PROMPT,
         help="Initial user text submitted to OpenCode for a non-inherited rollout.",
     )
     parser.add_argument(
         "--opencode-base-instructions-mode",
-        choices=["opencode", "read-readme"],
-        default="read-readme",
+        choices=[ROLLOUT_SYSTEM_INSTRUCTIONS_MODE],
+        default=ROLLOUT_SYSTEM_INSTRUCTIONS_MODE,
         help=(
-            "OpenCode system-instruction mode. 'opencode' keeps its defaults; "
-            "'read-readme' injects the fixed scaffold instruction through the prompt system field."
+            "OpenCode system-instruction mode. 'canonical-bootstrap' supplies the exact "
+            "bundled bootstrap README through the first prompt's system field."
         ),
     )
     return parser.parse_args()
@@ -2639,10 +2700,32 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
         raise ValueError("--bash-timeout-seconds must be > 0")
     if args.openrouter_max_retries < 0:
         raise ValueError("--openrouter-max-retries must be >= 0")
+    configured_bootstrap_prompt = (
+        args.opencode_initial_prompt
+        if args.worker_backend == "opencode"
+        else args.codex_initial_prompt
+    )
+    if not configured_bootstrap_prompt.strip():
+        raise ValueError("The configured bootstrap initial prompt must not be blank.")
     if args.benchmark == "open-ended" and args.problem_pool_size is not None:
         raise SystemExit(
             "error: --problem-pool-size is not valid with --benchmark open-ended"
         )
+    if args.worker_backend == "codex":
+        rollout_system_instructions = resolve_codex_base_instructions(
+            args.codex_base_instructions_mode
+        )
+    elif args.worker_backend == "opencode":
+        rollout_system_instructions = resolve_opencode_system_instructions(
+            args.opencode_base_instructions_mode
+        )
+    else:
+        rollout_system_instructions = canonical_rollout_system_instructions()
+    if rollout_system_instructions is None:
+        raise RuntimeError("Canonical rollout system instructions are unavailable.")
+    rollout_system_instructions_sha256 = text_sha256(
+        rollout_system_instructions
+    )
 
     unresolved_runtime_root = _resolve_runtime_root(args.runtime_root, create=False)
     _check_runtime_benchmark(unresolved_runtime_root, args.benchmark)
@@ -2791,9 +2874,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             sandbox_mode=args.opencode_sandbox_mode,
         )
         opencode_python_sha256 = opencode_python_fingerprint(Path(__file__))
-        opencode_system_instructions = resolve_opencode_system_instructions(
-            args.opencode_base_instructions_mode
-        )
+        opencode_system_instructions = rollout_system_instructions
         opencode_system_instructions_sha256 = text_sha256(
             opencode_system_instructions
         )
@@ -2877,7 +2958,8 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 and rec.get("generation") == args.generation
                 and rec.get("bootstrap_rollout_count", rec.get("num_rollouts"))
                 == args.num_rollouts
-                and _worker_backend_resume_compatible(rec, args)
+                and rec.get("worker_backend", "openrouter")
+                == args.worker_backend
             ):
                 return False
             if args.benchmark != "supergpqa":
@@ -2933,28 +3015,45 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                     "completed earlier tasks remain valid, but this partial batch must be resumed with its "
                     "recorded capability or restarted explicitly"
                 )
-            if args.worker_backend != "opencode":
-                return True
             rollout_idx = record.get("rollout_index")
             inherited_prompt = None
             if record.get("bootstrap_seed_used") is not True:
                 if not isinstance(rollout_idx, int) or not 0 <= rollout_idx < len(parent_pool):
-                    return False
+                    raise RuntimeError(
+                        "partial task resume cannot recover the recorded inherited prompt; "
+                        "completed earlier tasks remain valid, but this partial batch must "
+                        "be restarted explicitly"
+                    )
                 inherited_prompt = _slot_prompt(parent_pool[rollout_idx])
                 if inherited_prompt is None:
-                    return False
-            return _worker_backend_resume_compatible(
+                    raise RuntimeError(
+                        "partial task resume cannot recover the recorded inherited prompt; "
+                        "completed earlier tasks remain valid, but this partial batch must "
+                        "be restarted explicitly"
+                    )
+            if not _rollout_prompt_resume_compatible(
                 record,
                 args,
                 effective_initial_prompt=inherited_prompt,
-                require_effective_prompt=True,
-            )
+            ):
+                raise RuntimeError(
+                    "partial task resume is incompatible with the current rollout system "
+                    "instructions or initial prompt; completed earlier tasks remain valid, "
+                    "but this partial batch must be restarted explicitly"
+                )
+            if not _worker_backend_resume_compatible(record, args):
+                raise RuntimeError(
+                    "partial task resume is incompatible with the current worker backend "
+                    "configuration; completed earlier tasks remain valid, but this partial "
+                    "batch must be restarted explicitly"
+                )
+            return True
 
         existing_records = [record for record in existing_records if _partial_prompt_matches(record)]
 
     # Do not rewrite a legacy runtime marker until every partial task has been
     # proven compatible. Completed historical batches remain valid and the
-    # next fresh batch then records the current automatic-delivery capability.
+    # next fresh batch then records the current delivery and instruction capabilities.
     _record_current_peer_communication_capability(runtime_root)
 
     existing_by_task: dict[int, dict[int, dict[str, Any]]] = {}
@@ -3267,11 +3366,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             shutil.rmtree(temp_dir, ignore_errors=True)
             temp_dir.mkdir(parents=True, exist_ok=True)
             bootstrap_seed_used = sampled_parent is None or bootstrap_reinitialized
-            rollout_initial_prompt = (
-                args.opencode_initial_prompt
-                if args.worker_backend == "opencode"
-                else args.codex_initial_prompt
-            )
+            rollout_initial_prompt = configured_bootstrap_prompt
             if sampled_parent is not None and not bootstrap_reinitialized:
                 parent_prompt = _slot_prompt(sampled_parent)
                 if parent_prompt is None:
@@ -3295,7 +3390,8 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 copy_seed_workspace(bootstrap_seed_dir, temp_dir)
                 if args.worker_backend != "opencode":
                     rollout_initial_prompt = _format_bootstrap_seed_prompt(
-                        bootstrap_seed_dir
+                        bootstrap_seed_dir,
+                        args.codex_initial_prompt,
                     )
 
             seed_output_dir = temp_dir / "seed_output"
@@ -3307,14 +3403,12 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
 
             runtime_file = temp_dir / "runtime.md"
             codex_base_instructions = (
-                resolve_codex_base_instructions(args.codex_base_instructions_mode)
+                rollout_system_instructions
                 if args.worker_backend == "codex"
                 else None
             )
             opencode_system_instructions = (
-                resolve_opencode_system_instructions(
-                    args.opencode_base_instructions_mode
-                )
+                rollout_system_instructions
                 if args.worker_backend == "opencode"
                 else None
             )
@@ -3463,8 +3557,27 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                     if args.worker_backend == "opencode"
                     else None
                 ),
+                rollout_system_instructions_version=(
+                    ROLLOUT_SYSTEM_INSTRUCTIONS_VERSION
+                ),
+                rollout_system_instructions_fingerprint=(
+                    ROLLOUT_SYSTEM_INSTRUCTIONS_FINGERPRINT
+                ),
+                rollout_system_instructions_mode=(
+                    ROLLOUT_SYSTEM_INSTRUCTIONS_MODE
+                ),
+                rollout_system_instructions_chars=len(
+                    rollout_system_instructions
+                ),
+                rollout_system_instructions_sha256=(
+                    rollout_system_instructions_sha256
+                ),
+                rollout_effective_initial_prompt_sha256=text_sha256(
+                    rollout_initial_prompt
+                ),
                 bootstrap_seed_used=bootstrap_seed_used,
                 bootstrap_seed_embedded=False,
+                bootstrap_readme_system_instructions=True,
                 rollout_initial_prompt_chars=len(rollout_initial_prompt),
             )
 
@@ -3582,6 +3695,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                             rollout_benchmark=rollout_benchmark,
                             peer_communication_store=peer_communication_store,
                             initial_user_text=rollout_initial_prompt,
+                            instructions=rollout_system_instructions,
                             progress_callback=_progress,
                         )
                 except BaseException as exc:
@@ -3796,6 +3910,24 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 "worker_timeout_seconds": args.worker_timeout_seconds,
                 "bash_timeout_seconds": args.bash_timeout_seconds,
                 "openrouter_max_retries": args.openrouter_max_retries,
+                "rollout_system_instructions_version": (
+                    ROLLOUT_SYSTEM_INSTRUCTIONS_VERSION
+                ),
+                "rollout_system_instructions_fingerprint": (
+                    ROLLOUT_SYSTEM_INSTRUCTIONS_FINGERPRINT
+                ),
+                "rollout_system_instructions_mode": (
+                    ROLLOUT_SYSTEM_INSTRUCTIONS_MODE
+                ),
+                "rollout_system_instructions_chars": len(
+                    rollout_system_instructions
+                ),
+                "rollout_system_instructions_sha256": (
+                    rollout_system_instructions_sha256
+                ),
+                "rollout_effective_initial_prompt_sha256": text_sha256(
+                    rollout_initial_prompt
+                ),
                 "codex_home": str(codex_home) if args.worker_backend == "codex" else None,
                 "codex_runner_bin": str(codex_runner_bin) if codex_runner_bin is not None else None,
                 "codex_sandbox_mode": args.codex_sandbox_mode if args.worker_backend == "codex" else None,
@@ -3925,6 +4057,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 ),
                 "bootstrap_seed_used": bootstrap_seed_used,
                 "bootstrap_seed_embedded": False,
+                "bootstrap_readme_system_instructions": True,
                 "rollout_initial_prompt_chars": len(rollout_initial_prompt),
                 "config_name": args.config_name if args.benchmark == "supergpqa" else None,
                 "runtime_root": str(runtime_root),
@@ -4092,6 +4225,22 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                                         "worker_timeout_seconds": args.worker_timeout_seconds,
                                         "bash_timeout_seconds": args.bash_timeout_seconds,
                                         "openrouter_max_retries": args.openrouter_max_retries,
+                                        "rollout_system_instructions_version": (
+                                            ROLLOUT_SYSTEM_INSTRUCTIONS_VERSION
+                                        ),
+                                        "rollout_system_instructions_fingerprint": (
+                                            ROLLOUT_SYSTEM_INSTRUCTIONS_FINGERPRINT
+                                        ),
+                                        "rollout_system_instructions_mode": (
+                                            ROLLOUT_SYSTEM_INSTRUCTIONS_MODE
+                                        ),
+                                        "rollout_system_instructions_chars": len(
+                                            rollout_system_instructions
+                                        ),
+                                        "rollout_system_instructions_sha256": (
+                                            rollout_system_instructions_sha256
+                                        ),
+                                        "rollout_effective_initial_prompt_sha256": None,
                                         "codex_home": str(codex_home) if args.worker_backend == "codex" else None,
                                         "codex_runner_bin": str(codex_runner_bin) if codex_runner_bin is not None else None,
                                         "codex_sandbox_mode": args.codex_sandbox_mode if args.worker_backend == "codex" else None,
