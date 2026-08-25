@@ -1,23 +1,31 @@
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import shutil
 import tempfile
+import threading
 import unittest
 from argparse import Namespace
 from pathlib import Path
 from unittest.mock import patch
 
 from main_loop import (
+    CANONICAL_BOOTSTRAP_README_SHA256,
+    DEFAULT_BOOTSTRAP_INITIAL_PROMPT,
+    ROLLOUT_SYSTEM_INSTRUCTIONS_FINGERPRINT,
+    ROLLOUT_SYSTEM_INSTRUCTIONS_MODE,
+    ROLLOUT_SYSTEM_INSTRUCTIONS_VERSION,
     _validate_opencode_containment,
     _create_benchmark_driver,
     _format_runtime_markdown,
+    _rollout_prompt_resume_compatible,
     _runtime_benchmark,
     _run_main,
     _spawn_child_continuation,
     _worker_backend_resume_compatible,
     WorkerResult,
+    canonical_rollout_system_instructions,
     parse_args,
 )
 from utils.open_ended_benchmark import (
@@ -59,7 +67,16 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
         ):
             args = parse_args()
         self.assertEqual(args.worker_backend, "opencode")
-        self.assertEqual(args.opencode_base_instructions_mode, "read-readme")
+        self.assertEqual(
+            args.opencode_base_instructions_mode,
+            ROLLOUT_SYSTEM_INSTRUCTIONS_MODE,
+        )
+        self.assertEqual(args.opencode_initial_prompt, DEFAULT_BOOTSTRAP_INITIAL_PROMPT)
+        self.assertEqual(
+            args.codex_base_instructions_mode,
+            ROLLOUT_SYSTEM_INSTRUCTIONS_MODE,
+        )
+        self.assertEqual(args.codex_initial_prompt, DEFAULT_BOOTSTRAP_INITIAL_PROMPT)
         self.assertEqual(args.opencode_allowed_versions, "1.18.21")
         self.assertEqual(args.opencode_allowed_bun_versions, "1.3.14")
         self.assertEqual(args.opencode_sandbox_mode, "bubblewrap")
@@ -177,9 +194,10 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
             self.assertTrue((peer_log / "manifest.json").is_file())
             self.assertEqual(list((peer_log / "messages").glob("*.json")), [])
 
-    def test_custom_provider_defaults_do_not_change_codex_or_openrouter_dispatch(self) -> None:
+    def test_codex_and_openrouter_separate_system_and_inherited_user_prompts(self) -> None:
         documents = Path.home() / "Documents"
         documents.mkdir(exist_ok=True)
+        canonical_instructions = canonical_rollout_system_instructions()
         for backend in ("codex", "openrouter"):
             with self.subTest(backend=backend), tempfile.TemporaryDirectory(dir=documents) as temp:
                 root = Path(temp)
@@ -205,26 +223,89 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                     argv.extend(["--codex-runner-bin", "/bin/true", "--codex-home", str(root / "codex-home")])
                 codex_calls: list[dict[str, object]] = []
                 openrouter_calls: list[dict[str, object]] = []
+                spawn_lock = threading.Lock()
+                spawned = False
+
+                def maybe_spawn(kwargs: dict[str, object]) -> None:
+                    nonlocal spawned
+                    with spawn_lock:
+                        if spawned:
+                            return
+                        spawned = True
+                    workdir = Path(str(kwargs["workdir"]))
+                    seed = workdir / "child-seed"
+                    seed.mkdir()
+                    (seed / "README.md").write_text("# Distinct inherited handoff\n")
+                    if backend == "codex":
+                        context = json.loads(
+                            Path(str(kwargs["continuation_context_path"])).read_text()
+                        )
+                    else:
+                        context = dict(kwargs["continuation_context"])
+                    child = _spawn_child_continuation(
+                        context=context,
+                        args={
+                            "prompt": "INHERITED USER PROMPT",
+                            "workspace_dir": "child-seed",
+                        },
+                    )
+                    self.assertTrue(child["child_spawned"])
 
                 def codex_worker(**kwargs: object) -> WorkerResult:
                     codex_calls.append(kwargs)
+                    maybe_spawn(kwargs)
                     return WorkerResult("offline", "completed", "final_message")
 
                 def openrouter_worker(**kwargs: object) -> WorkerResult:
                     openrouter_calls.append(kwargs)
+                    maybe_spawn(kwargs)
                     return WorkerResult("offline", "completed", "final_message")
 
-                with patch.dict("os.environ", {"OPENROUTER_API_KEY": "test-only-key"}), patch(
-                    "sys.argv", argv
-                ), patch("main_loop.run_codex_worker", side_effect=codex_worker), patch(
-                    "main_loop.run_worker", side_effect=openrouter_worker
-                ), patch(
-                    "main_loop.run_opencode_worker",
-                    side_effect=AssertionError("OpenCode dispatch must remain inactive"),
-                ):
-                    _run_main([])
-                self.assertEqual(len(codex_calls), 8 if backend == "codex" else 0)
-                self.assertEqual(len(openrouter_calls), 8 if backend == "openrouter" else 0)
+                for _ in range(2):
+                    with patch.dict("os.environ", {"OPENROUTER_API_KEY": "test-only-key"}), patch(
+                        "sys.argv", argv
+                    ), patch("main_loop.run_codex_worker", side_effect=codex_worker), patch(
+                        "main_loop.run_worker", side_effect=openrouter_worker
+                    ), patch(
+                        "main_loop.run_opencode_worker",
+                        side_effect=AssertionError("OpenCode dispatch must remain inactive"),
+                    ):
+                        _run_main([])
+                calls = codex_calls if backend == "codex" else openrouter_calls
+                self.assertEqual(len(calls), 16)
+                self.assertEqual(
+                    [call["initial_user_text"] for call in calls].count(
+                        "INHERITED USER PROMPT"
+                    ),
+                    1,
+                )
+                self.assertEqual(
+                    [call["initial_user_text"] for call in calls].count(
+                        DEFAULT_BOOTSTRAP_INITIAL_PROMPT
+                    ),
+                    15,
+                )
+                instruction_key = (
+                    "base_instructions" if backend == "codex" else "instructions"
+                )
+                self.assertTrue(
+                    all(
+                        call[instruction_key] == canonical_instructions
+                        for call in calls
+                    )
+                )
+                records = [
+                    json.loads(line)
+                    for line in (root / "runtime/logs/runs.jsonl").read_text().splitlines()
+                ]
+                self.assertEqual(len(records), 16)
+                self.assertTrue(
+                    all(
+                        record["rollout_system_instructions_sha256"]
+                        == CANONICAL_BOOTSTRAP_README_SHA256
+                        for record in records
+                    )
+                )
 
     def test_opencode_resume_requires_matching_backend_configuration(self) -> None:
         custom_provider = custom_provider_configuration(
@@ -241,7 +322,7 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
         custom_provider_sha256 = custom_provider_fingerprint(custom_provider)
         args = Namespace(
             worker_backend="opencode",
-            opencode_base_instructions_mode="read-readme",
+            opencode_initial_prompt=DEFAULT_BOOTSTRAP_INITIAL_PROMPT,
             opencode_agent="build",
             opencode_variant=None,
             opencode_server_startup_timeout_seconds=15,
@@ -263,12 +344,9 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
             _opencode_bubblewrap_bin="/usr/bin/bwrap",
             _opencode_bubblewrap_version="bubblewrap 0.11.0",
             _opencode_bubblewrap_sha256="bwrap-sha",
-            _opencode_system_instructions_sha256="system-sha",
-            _opencode_configured_initial_prompt_sha256="prompt-sha",
         )
         record = {
             "worker_backend": "opencode",
-            "opencode_base_instructions_mode": "read-readme",
             "opencode_agent": "build",
             "opencode_variant": None,
             "opencode_runtime_version": "1.18.21",
@@ -289,9 +367,13 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
             "opencode_bubblewrap_bin": "/usr/bin/bwrap",
             "opencode_bubblewrap_version": "bubblewrap 0.11.0",
             "opencode_bubblewrap_sha256": "bwrap-sha",
-            "opencode_system_instructions_sha256": "system-sha",
-            "opencode_configured_initial_prompt_sha256": "prompt-sha",
-            "opencode_effective_initial_prompt_sha256": "prompt-sha",
+            "rollout_system_instructions_version": ROLLOUT_SYSTEM_INSTRUCTIONS_VERSION,
+            "rollout_system_instructions_fingerprint": ROLLOUT_SYSTEM_INSTRUCTIONS_FINGERPRINT,
+            "rollout_system_instructions_mode": ROLLOUT_SYSTEM_INSTRUCTIONS_MODE,
+            "rollout_system_instructions_sha256": CANONICAL_BOOTSTRAP_README_SHA256,
+            "rollout_effective_initial_prompt_sha256": hashlib.sha256(
+                DEFAULT_BOOTSTRAP_INITIAL_PROMPT.encode()
+            ).hexdigest(),
             "bootstrap_seed_used": True,
             "opencode_provider_env_names": ["OPENAI_API_KEY"],
         }
@@ -311,8 +393,6 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
             "opencode_bubblewrap_bin",
             "opencode_bubblewrap_version",
             "opencode_bubblewrap_sha256",
-            "opencode_system_instructions_sha256",
-            "opencode_configured_initial_prompt_sha256",
             "opencode_worker_timeout_seconds",
         ):
             with self.subTest(field=field):
@@ -321,15 +401,6 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                         {**record, field: "changed"}, args
                     )
                 )
-        self.assertFalse(
-            _worker_backend_resume_compatible(
-                {
-                    **record,
-                    "opencode_effective_initial_prompt_sha256": "changed",
-                },
-                args,
-            )
-        )
         self.assertFalse(
             _worker_backend_resume_compatible(
                 {**record, "opencode_server_startup_timeout_seconds": 99}, args
@@ -399,35 +470,138 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
         inherited = {
             **record,
             "bootstrap_seed_used": False,
-            "opencode_effective_initial_prompt_sha256": hashlib.sha256(
+            "rollout_effective_initial_prompt_sha256": hashlib.sha256(
                 b"inherited child prompt"
             ).hexdigest(),
         }
         self.assertTrue(
-            _worker_backend_resume_compatible(
+            _rollout_prompt_resume_compatible(
                 inherited,
                 args,
                 effective_initial_prompt="inherited child prompt",
-                require_effective_prompt=True,
             )
         )
         self.assertFalse(
-            _worker_backend_resume_compatible(
+            _rollout_prompt_resume_compatible(
                 inherited,
                 args,
                 effective_initial_prompt="changed child prompt",
-                require_effective_prompt=True,
             )
         )
         self.assertFalse(
-            _worker_backend_resume_compatible(
-                inherited,
+            _rollout_prompt_resume_compatible(
+                {**inherited, "rollout_system_instructions_sha256": "legacy"},
                 args,
-                require_effective_prompt=True,
+                effective_initial_prompt="inherited child prompt",
+            )
+        )
+        self.assertFalse(
+            _rollout_prompt_resume_compatible(
+                {
+                    "worker_backend": "opencode",
+                    "bootstrap_seed_used": True,
+                    "rollout_effective_initial_prompt_sha256": hashlib.sha256(
+                        DEFAULT_BOOTSTRAP_INITIAL_PROMPT.encode()
+                    ).hexdigest(),
+                },
+                args,
+                effective_initial_prompt=None,
             )
         )
 
-    def test_actual_opencode_orchestration_uses_custom_bootstrap_prompt(self) -> None:
+    def test_completed_legacy_system_prompt_history_is_kept_but_partial_is_rejected(self) -> None:
+        documents = Path.home() / "Documents"
+        documents.mkdir(exist_ok=True)
+        for partial in (False, True):
+            with self.subTest(partial=partial), tempfile.TemporaryDirectory(
+                dir=documents
+            ) as temp:
+                root = Path(temp)
+                runtime = root / "runtime"
+                task = root / "task.md"
+                task.write_text("# Resume identity fixture\n")
+                argv = [
+                    "main_loop.py",
+                    "--benchmark",
+                    "open-ended",
+                    "--task-file",
+                    str(task),
+                    "--runtime-root",
+                    str(runtime),
+                    "--worker-backend",
+                    "openrouter",
+                    "--model",
+                    "fixture/model",
+                    "--num-rollouts",
+                    "8",
+                    "--step",
+                ]
+                calls: list[dict[str, object]] = []
+
+                def worker(**kwargs: object) -> WorkerResult:
+                    calls.append(kwargs)
+                    return WorkerResult("offline", "completed", "final_message")
+
+                with patch.dict(
+                    "os.environ", {"OPENROUTER_API_KEY": "test-only-key"}
+                ), patch("sys.argv", argv), patch(
+                    "main_loop.run_worker", side_effect=worker
+                ):
+                    _run_main([])
+
+                runs_path = runtime / "logs/runs.jsonl"
+                records = [
+                    json.loads(line) for line in runs_path.read_text().splitlines()
+                ]
+                if partial:
+                    records = records[:7]
+                for record in records:
+                    for field in (
+                        "rollout_system_instructions_version",
+                        "rollout_system_instructions_fingerprint",
+                        "rollout_system_instructions_mode",
+                        "rollout_system_instructions_chars",
+                        "rollout_system_instructions_sha256",
+                        "rollout_effective_initial_prompt_sha256",
+                        "bootstrap_readme_system_instructions",
+                    ):
+                        record.pop(field, None)
+                runs_path.write_text(
+                    "".join(json.dumps(record) + "\n" for record in records)
+                )
+                identity_path = runtime / "runtime_benchmark.json"
+                identity = json.loads(identity_path.read_text())
+                identity["capabilities"].pop(
+                    "rollout_system_instructions", None
+                )
+                identity_path.write_text(json.dumps(identity))
+
+                if partial:
+                    with patch.dict(
+                        "os.environ", {"OPENROUTER_API_KEY": "test-only-key"}
+                    ), patch("sys.argv", argv), patch(
+                        "main_loop.run_worker", side_effect=worker
+                    ), self.assertRaisesRegex(
+                        RuntimeError, "rollout system instructions or initial prompt"
+                    ):
+                        _run_main([])
+                    self.assertEqual(len(calls), 8)
+                else:
+                    with patch.dict(
+                        "os.environ", {"OPENROUTER_API_KEY": "test-only-key"}
+                    ), patch("sys.argv", argv), patch(
+                        "main_loop.run_worker", side_effect=worker
+                    ):
+                        _run_main([])
+                    self.assertEqual(len(calls), 16)
+                    self.assertEqual(
+                        {call["task_index"] for call in calls[:8]}, {0}
+                    )
+                    self.assertEqual(
+                        {call["task_index"] for call in calls[8:]}, {1}
+                    )
+
+    def test_actual_opencode_orchestration_separates_system_and_user_prompts(self) -> None:
         documents = Path.home() / "Documents"
         documents.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=documents) as temp:
@@ -458,8 +632,6 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                 "--step",
                 "--opencode-bin",
                 str(fake_opencode),
-                "--opencode-initial-prompt",
-                "CUSTOM OPENCODE BOOTSTRAP",
             ]
             calls: list[dict[str, object]] = []
 
@@ -499,9 +671,16 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
             self.assertIn(inherited_index, range(8, 16))
             self.assertTrue(
                 all(
-                    call["initial_user_text"] == "CUSTOM OPENCODE BOOTSTRAP"
+                    call["initial_user_text"] == DEFAULT_BOOTSTRAP_INITIAL_PROMPT
                     for index, call in enumerate(calls)
                     if index != inherited_index
+                )
+            )
+            canonical_instructions = canonical_rollout_system_instructions()
+            self.assertTrue(
+                all(
+                    call["system_instructions"] == canonical_instructions
+                    for call in calls
                 )
             )
             self.assertNotIn(
@@ -536,7 +715,17 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
             ]
             self.assertEqual(len(set(prompt_hashes)), 2)
             self.assertEqual(sorted(prompt_hashes.count(value) for value in set(prompt_hashes)), [1, 23])
-            self.assertTrue(records[0]["opencode_system_instructions_sha256"])
+            self.assertEqual(
+                records[0]["opencode_system_instructions_sha256"],
+                CANONICAL_BOOTSTRAP_README_SHA256,
+            )
+            self.assertTrue(
+                all(
+                    record["rollout_system_instructions_sha256"]
+                    == CANONICAL_BOOTSTRAP_README_SHA256
+                    for record in records
+                )
+            )
             self.assertTrue(records[0]["opencode_python_sha256"])
             self.assertTrue(records[0]["opencode_bubblewrap_sha256"])
 
@@ -672,12 +861,28 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                 Path(__file__).resolve().parents[1] / "seeds/bootstrap/README.md"
             ).read_text(encoding="utf-8")
             bootstrap_words = " ".join(bootstrap.split())
-            self.assertIn("current human-authored task", bootstrap)
-            self.assertIn("explicitly unevaluated", bootstrap_words)
-            self.assertIn("an unevaluated profile can provide none", bootstrap)
-            self.assertIn("`send_message(message, receiver)`", bootstrap)
-            self.assertIn("must exactly match a peer name in `runtime.md`", bootstrap_words)
-            self.assertIn("next supported tool-cycle boundary", bootstrap_words)
+            self.assertIn("Nobody has assigned you an objective.", bootstrap_words)
+            self.assertIn(
+                "`runtime.md` lists how many there are and what they are called.",
+                bootstrap_words,
+            )
+            self.assertIn('send_message(message="...", receiver="...")', bootstrap)
+            self.assertIn(
+                "`receiver` must exactly match one of the names in `runtime.md`.",
+                bootstrap_words,
+            )
+            self.assertIn("`seed_output/` is local writable empty directory", bootstrap_words)
+            self.assertIn(
+                "`shared_workspace/` is visible to all programs running alongside you. "
+                "It is erased at the end of the round.",
+                bootstrap_words,
+            )
+            self.assertIn("`archive/` is durable and shared across rounds.", bootstrap_words)
+            self.assertIn(
+                "Material committed there can remain available to programs that arrive later.",
+                bootstrap_words,
+            )
+            self.assertIn("Uncommitted changes there are discarded when you stop.", bootstrap_words)
 
             identity_root = root / "identity"
             identity_root.mkdir()

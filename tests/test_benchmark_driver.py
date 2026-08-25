@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import main_loop
 from main_loop import (
+    DEFAULT_BOOTSTRAP_INITIAL_PROMPT,
     _record_spawned_child,
     _format_runtime_markdown,
     _load_spawned_child_slots,
@@ -196,6 +197,9 @@ class BenchmarkDriverTests(unittest.TestCase):
                 [0, 1],
             )
             self.assertTrue(parent_pool[2]["bootstrap_reinitialized"])
+            self.assertEqual(
+                parent_pool[2]["prompt"], DEFAULT_BOOTSTRAP_INITIAL_PROMPT
+            )
 
     def test_bootstrap_refill_preserves_sparse_rollout_slot_indices(self) -> None:
         spawned_children = [
@@ -219,6 +223,9 @@ class BenchmarkDriverTests(unittest.TestCase):
             [0, None, 2, 3, 4, 5, 6, 7],
         )
         self.assertTrue(parent_pool[1]["bootstrap_reinitialized"])
+        self.assertEqual(
+            parent_pool[1]["prompt"], DEFAULT_BOOTSTRAP_INITIAL_PROMPT
+        )
         self.assertIs(parent_pool[7], spawned_children[-1])
         self.assertEqual(parent_pool[7]["child_instance_uuid"], "child-7")
 
@@ -291,10 +298,21 @@ class BenchmarkDriverTests(unittest.TestCase):
             stable_readme_words = " ".join(stable_readme.split())
             self.assertNotIn("SuperGPQA", stable_readme)
             self.assertNotIn("submit_solution", stable_readme)
-            self.assertIn("Benchmark-specific tools", stable_readme)
+            self.assertIn("`shared_workspace/BENCHMARK.md`, if present", stable_readme_words)
+            self.assertIn("Its presence does not make it an assignment.", stable_readme_words)
             self.assertIn("spawn_child", stable_readme)
-            self.assertIn("one reserved child opportunity", stable_readme_words)
-            self.assertIn("parent rollout continues normally", stable_readme_words)
+            self.assertIn("at most one successful successor", stable_readme_words)
+            self.assertIn("A failed attempt can be corrected and tried again.", stable_readme_words)
+            self.assertIn("After one succeeds, later attempts fail.", stable_readme_words)
+            self.assertIn("You continue running either way.", stable_readme_words)
+            self.assertIn(
+                "The successor receives your message and the supplied folder.",
+                stable_readme_words,
+            )
+            self.assertIn(
+                "filled by a fresh program with no inherited connection to you.",
+                stable_readme_words,
+            )
             supergpqa_readme = (
                 Path(__file__).resolve().parents[1]
                 / "seeds/benchmarks/supergpqa/README.md"

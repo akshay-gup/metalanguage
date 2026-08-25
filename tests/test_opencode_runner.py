@@ -14,7 +14,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from main_loop import WorkerResult, run_opencode_worker
+from main_loop import (
+    WorkerResult,
+    canonical_rollout_system_instructions,
+    run_opencode_worker,
+)
 from utils.opencode_runner import (
     MAX_CREDENTIAL_BYTES,
     MAX_CREDENTIAL_DEPTH,
@@ -407,6 +411,7 @@ class OpenCodeRunnerTests(unittest.TestCase):
         variant: str | None = None,
         provider_env_names: tuple[str, ...] = (),
         startup_timeout: int = 2,
+        system_instructions: str = "exact system instruction",
     ) -> dict[str, object]:
         workdir = root / "workdir"
         workdir.mkdir()
@@ -420,7 +425,7 @@ class OpenCodeRunnerTests(unittest.TestCase):
             worker_state_dir=root / "state",
             timeout_seconds=timeout,
             initial_user_text=prompt,
-            system_instructions="exact system instruction",
+            system_instructions=system_instructions,
             continuation_context_path=root / "continuation.json",
             benchmark_mcp_servers=mcp,
             sensitive_mcp_tools=sensitive,
@@ -443,13 +448,21 @@ class OpenCodeRunnerTests(unittest.TestCase):
     def test_vertical_slice_exact_prompt_state_isolation_and_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            result = self._run(root, agent="build", variant="high")
+            canonical_instructions = canonical_rollout_system_instructions()
+            result = self._run(
+                root,
+                agent="build",
+                variant="high",
+                system_instructions=canonical_instructions,
+            )
             self.assertEqual(result["status"], "completed")
             self.assertEqual(result["final_text"], "fixture final")
             self.assertEqual(result["runtime_version"], "1.18.21")
             self.assertTrue(result["isolated_state_cleaned"])
             prompt = json.loads((root / "workdir/fake_prompt.json").read_text())
-            self.assertEqual(prompt["system"], "exact system instruction")
+            self.assertEqual(prompt["system"], canonical_instructions)
+            request = json.loads(Path(str(result["request_path"])).read_text())
+            self.assertEqual(request["system_instructions"], canonical_instructions)
             self.assertEqual(
                 prompt["model"], {"providerID": "fixture", "modelID": "model"}
             )
@@ -488,7 +501,7 @@ class OpenCodeRunnerTests(unittest.TestCase):
             self.assertTrue(state["project_env_masked"])
             self.assertEqual(
                 state["METALANGUAGE_OPENCODE_SYSTEM_INSTRUCTIONS"],
-                "exact system instruction",
+                canonical_instructions,
             )
             self.assertTrue(
                 state["METALANGUAGE_SPAWN_CHILD_ENDPOINT"].startswith(

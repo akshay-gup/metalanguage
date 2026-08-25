@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
@@ -16,15 +17,22 @@ from unittest.mock import patch
 
 import utils.peer_communication as peer
 from main_loop import (
+    CANONICAL_BOOTSTRAP_README_SHA256,
+    ROLLOUT_SYSTEM_INSTRUCTIONS_CAPABILITY_NAME,
+    ROLLOUT_SYSTEM_INSTRUCTIONS_FINGERPRINT,
+    ROLLOUT_SYSTEM_INSTRUCTIONS_MODE,
+    ROLLOUT_SYSTEM_INSTRUCTIONS_VERSION,
     _claim_runtime_benchmark,
     _format_runtime_markdown,
     _peer_communication_resume_compatible,
     _record_current_peer_communication_capability,
+    canonical_rollout_system_instructions,
     run_child_tool_handler,
     run_worker,
 )
 from utils.benchmark_driver import RolloutBenchmark
 from utils.codex_runner import runner_binary_path, run_codex_rollout
+from utils.openrouter import call_openrouter_with_tools
 from utils.peer_communication import (
     DELIVERY_ACK_TOOL_NAME,
     DELIVERY_ACK_BOUNDARY_TOOL_NAME,
@@ -221,16 +229,18 @@ class PeerCommunicationTests(unittest.TestCase):
         bootstrap = (
             Path(__file__).resolve().parents[1] / "seeds/bootstrap/README.md"
         ).read_text(encoding="utf-8")
-        bootstrap_words = " ".join(bootstrap.split())
-        send_message_words = " ".join(
-            ("- `send_message" + bootstrap.split("- `send_message", 1)[1]).split()
+        self.assertEqual(bootstrap, canonical_rollout_system_instructions())
+        self.assertEqual(
+            hashlib.sha256(bootstrap.encode()).hexdigest(),
+            CANONICAL_BOOTSTRAP_README_SHA256,
         )
-        self.assertIn("## Communication", bootstrap)
+        bootstrap_words = " ".join(bootstrap.split())
+        self.assertIn("## The others", bootstrap)
         self.assertIn('send_message(message="...", receiver="...")', bootstrap)
-        self.assertIn("`send_message(message, receiver)`", bootstrap)
-        self.assertIn("must exactly match a peer name in `runtime.md`", bootstrap_words)
-        self.assertNotIn("read or broadcast", bootstrap_words)
-        self.assertIn("final inference can remain undelivered", bootstrap_words)
+        self.assertIn(
+            "`receiver` must exactly match one of the names in `runtime.md`.",
+            bootstrap_words,
+        )
         for prescriptive in (
             "claiming a direction",
             "sharing a result",
@@ -245,9 +255,8 @@ class PeerCommunicationTests(unittest.TestCase):
             "synthesize",
             "conflicting or duplicate",
             "communication is optional",
-            "assigned objective",
         ):
-            self.assertNotIn(prescriptive, (serialized + " " + send_message_words).casefold())
+            self.assertNotIn(prescriptive, serialized.casefold())
 
     def test_unknown_self_and_removed_interfaces_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -541,6 +550,19 @@ class PeerCommunicationTests(unittest.TestCase):
             _record_current_peer_communication_capability(identity_root)
             capability = json.loads(identity_path.read_text())["capabilities"][PEER_COMMUNICATION_CAPABILITY_NAME]
             self.assertEqual(capability["version"], PEER_COMMUNICATION_VERSION)
+            instruction_capability = json.loads(identity_path.read_text())[
+                "capabilities"
+            ][ROLLOUT_SYSTEM_INSTRUCTIONS_CAPABILITY_NAME]
+            self.assertEqual(
+                instruction_capability,
+                {
+                    "enabled": True,
+                    "version": ROLLOUT_SYSTEM_INSTRUCTIONS_VERSION,
+                    "fingerprint": ROLLOUT_SYSTEM_INSTRUCTIONS_FINGERPRINT,
+                    "mode": ROLLOUT_SYSTEM_INSTRUCTIONS_MODE,
+                    "sha256": CANONICAL_BOOTSTRAP_README_SHA256,
+                },
+            )
             identity = json.loads(identity_path.read_text())
             identity["capabilities"][PEER_COMMUNICATION_CAPABILITY_NAME] = {
                 "enabled": True,
@@ -607,8 +629,16 @@ class PeerCommunicationTests(unittest.TestCase):
                         rollout_benchmark=RolloutBenchmark(context={}, model_metadata={"tools": []}),
                         peer_communication_store=store,
                         initial_user_text="test",
+                        instructions=canonical_rollout_system_instructions(),
                     )
                 self.assertEqual(result.status, "completed")
+                self.assertTrue(
+                    all(
+                        call["instructions"]
+                        == canonical_rollout_system_instructions()
+                        for call in captured
+                    )
+                )
                 tools = {tool["name"]: tool for tool in captured[0]["tools"]}
                 self.assertEqual(set(tools) & {SEND_MESSAGE_TOOL_NAME, "read_messages", LEGACY_PEER_COMMUNICATION_TOOL_NAME}, {SEND_MESSAGE_TOOL_NAME})
                 self.assertEqual(tools[SEND_MESSAGE_TOOL_NAME]["parameters"], SEND_MESSAGE_INPUT_SCHEMA)
@@ -620,6 +650,38 @@ class PeerCommunicationTests(unittest.TestCase):
                 self.assertFalse(store.prepare_delivery(1)["pending"])
                 recipient = store.prepare_delivery(2)
                 self.assertIn("routed result", recipient["injection"])
+
+    def test_openrouter_request_uses_top_level_canonical_instructions(self) -> None:
+        class Response:
+            ok = True
+
+            @staticmethod
+            def json() -> dict[str, object]:
+                return {"output": []}
+
+        canonical = canonical_rollout_system_instructions()
+        with patch("utils.openrouter.requests.post", return_value=Response()) as post:
+            response = call_openrouter_with_tools(
+                api_key="offline",
+                model="fixture/model",
+                instructions=canonical,
+                input_items=[
+                    {
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "Begin."}],
+                    }
+                ],
+                max_retries=0,
+            )
+        self.assertEqual(response, {"output": []})
+        payload = post.call_args.kwargs["json"]
+        self.assertEqual(payload["instructions"], canonical)
+        self.assertEqual(
+            hashlib.sha256(payload["instructions"].encode()).hexdigest(),
+            CANONICAL_BOOTSTRAP_README_SHA256,
+        )
+        self.assertEqual(payload["input"][0]["role"], "user")
+        self.assertEqual(payload["input"][0]["content"][0]["text"], "Begin.")
 
     def test_codex_request_and_central_handler_support_send_and_internal_delivery_only(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -648,9 +710,19 @@ class PeerCommunicationTests(unittest.TestCase):
                 shared_workspace_dir=root / "shared",
                 rollout_username="rollout_user_000",
                 timeout_seconds=2,
+                initial_user_text="Begin.",
+                base_instructions=canonical_rollout_system_instructions(),
                 spawn_child_handler_context_path=context,
             )
             request = json.loads(Path(result["request_path"]).read_text())
+            self.assertEqual(
+                request["base_instructions"],
+                canonical_rollout_system_instructions(),
+            )
+            self.assertEqual(
+                hashlib.sha256(request["base_instructions"].encode()).hexdigest(),
+                CANONICAL_BOOTSTRAP_README_SHA256,
+            )
             self.assertNotEqual(
                 request["peer_communication_handler_command"],
                 request["spawn_child_handler_command"],
