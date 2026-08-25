@@ -26,6 +26,8 @@ LLM systems already possess much of the active side of this loop. A modern model
 
 The target of this paper is therefore not ordinary model improvement, better memory, or AI-assisted research acceleration. The target is **autonomous recursive accumulation**: a system in which structures generated inside the system become inherited conditions for future instances and are differentially preserved because they improve future continuation.
 
+Open-endedness and recursion are distinct properties. A system may recursively improve within a bounded domain without generating an expanding range of novelty, while a system may generate sustained novelty without improving the machinery that produces it. The target here is their conjunction: cumulative novelty that changes how subsequent novelty is generated, transmitted, interpreted, evaluated, or combined. On this stronger criterion, an improvement is recursively relevant only when it changes the machinery or inherited process by which future improvements are produced, rather than merely improving an object-level output.
+
 The key question is:
 
 > What minimal architecture would allow AI-generated process structures to become heritable, selectable, and cumulative without relying on a privileged human curator at every cycle?
@@ -57,6 +59,8 @@ Known cumulative systems handle this by splitting into two coupled loops. The in
 In biology, cellular machinery reads and expresses genetic material. Organisms are transient interactors in an environment. Genomes and inherited cellular organization persist across generations and change under selection. In human culture, brains are the plastic machinery. Speech, writing, diagrams, mathematics, code, tools, institutions, and archives are persistent cultural substrates. No individual mind contains the whole culture. Minds reconstruct fragments of culture, use them, modify them, teach them, and leave traces for other minds.
 
 The AI analogue should preserve this separation. The base model and scaffold are the stable interpreter machinery. A rollout is an episode of plastic action. A workspace is the episode's local lifetime state. A persistent repository or archive is the substrate. A lineage seed is the bounded vertical process packet passed from parent to child. A public archive is the shared cultural store from which unrelated lineages can borrow.
+
+Von Neumann's description-constructor distinction clarifies why the persistent side of the loop is powerful. A hereditary description can be copied without being executed and interpreted to reconstruct active machinery. Copying preserves the description across turnover; interpretation turns it into causal process. Because descriptions can be copied, varied, recombined, compared, and corrected more readily than fully assembled machines, they provide an addressable channel for cumulative variation. Genetic descriptions instantiate this pattern directly; cultural instructions and machine-readable artifacts are looser functional analogues.
 
 The seed is not DNA in a literal sense. It is closer to vertically transmitted culture: lab notes, operating doctrine, apprenticeship material, local conventions, trusted tools, warnings, and unresolved hypotheses. The base model, system prompt, tool scaffold, and evaluation harness are closer to the fixed constructor that regenerates a certain kind of agent each episode. Git or any shared archive is not automatically an ecology. It becomes ecological only when artifacts compete for attention, trust, dependency, validation, context, execution cost, and downstream use.
 
@@ -313,6 +317,12 @@ The key baselines are:
 7. lineage seed plus public archive with uptake-sensitive selection.
 
 The key measurements are multi-generation solve-rate improvement, seed reconstructibility under fresh-context reset, descendant viability under perturbation, cross-lineage artifact adoption corrected by downstream success, reduced redundant artifacts, emergence of stable naming and indexing conventions, archive retrieval precision under bounded context, artifact dependency formation, and cost-adjusted performance.
+
+### Local consequence and external assays
+
+Selection inside the ecology and measurement of the ecology should be separated. Local tests, verifiers, descendant performance, and downstream uptake can provide protected in-loop consequence: they determine whether a particular solution, seed, or artifact remains useful. They need not collapse into a single permanent global objective. Deep artifact chains can instead be evaluated through local consumer relations - a tool helps a workflow, a workflow helps a solver - while external task performance supplies the boundary condition.
+
+Global benchmarks should be treated as blind held-out assays rather than exposed objectives. At intervals, the artifact ecology should be frozen and fresh evaluation rollouts should receive bounded access to it on held-out tasks. Their performance should be compared with matched rollouts that lack the ecology, and neither the assay tasks nor their outcomes should be returned directly to the active selection loop. This tests whether inherited culture causally expands capability rather than merely accumulating text or adapting to a visible score.
 
 ### Ablation-sensitive evidence
 
