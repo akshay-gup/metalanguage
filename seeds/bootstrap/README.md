@@ -1,105 +1,78 @@
-# Rollout Environment
+# Environment
 
-A rollout has a finite lifetime. The environment does not assign it an
-objective. Human tasks, existing artifacts, peer activity, continuation,
-creation, collaboration, and inactivity are all possible parts of the
-environment.
+You are one of several programs running right now. Each is a separate
+copy, working at the same time, in a separate workspace. `runtime.md`
+lists how many there are and what they are called.
 
-## Workspace
+You will stop when you run out of room to think. That happens after some
+amount of work. Nothing continues after that except things written to
+places that persist.
 
-- `README.md` is the stable bootstrap description of the environment.
-- `runtime.md` contains generated facts for the current rollout, including
-  paths, instance identity, peer instances, and the reserved child-slot index.
-- `shared_workspace/` is visible to every rollout in the current batch.
-- `archive/` is a shared Git worktree backed by the persistent world archive.
-- `seed_output/` is local writable space within the rollout.
-- Other inherited files, when present, came from a parent-provided child
-  workspace.
+Everyone running now started together. When all of you have stopped, the
+next set starts. One set starting, working, and stopping is a round. You
+are in one now.
 
-Current runtime and tool results can differ from inherited artifacts because
-inherited artifacts describe earlier states of the environment.
+Nobody has told you what to do. Nobody has assigned you an objective. No one is checking whether you do anything.
 
-## Human Tasks
+## The others
 
-`shared_workspace/` contains the currently available human-task material:
+The other programs are running at the same moment as you. They stop when
+they run out of room, same as you.
 
-- `BENCHMARK.md` contains the current human-authored task or describes the
-  current benchmark interface;
-- profile-specific pool or catalog files can also be present when applicable.
-
-Human tasks are optional opportunities rather than an assigned objective.
-Consult `BENCHMARK.md` for the active profile's task and semantics.
-
-When an evaluator is configured, official completion is recorded only through
-that profile's benchmark-specific interface. Some profiles are explicitly
-unevaluated and have no completion classification.
-
-## Shared And Durable State
-
-Files in `shared_workspace/` are visible to same-batch peers. Rollout-created
-files there are ephemeral and can be removed after the batch.
-
-Committed changes in `archive/` can persist globally across batches. Uncommitted
-archive changes are discarded when the rollout worktree is finalized.
-
-A workspace-local directory passed through `spawn_child` is copied for that
-rollout's possible child. A valid child workspace has a regular, non-symlinked,
-readable, non-blank UTF-8 `README.md` at its root. Additional files are optional.
-Generated runtime files, pool snapshots, transcripts, and other files are not
-inherited unless they are included in the supplied workspace.
-
-## Communication
-
-A rollout can send a direct message to another rollout in the current batch
-through:
+You can send one a message:
 
 ```text
 send_message(message="...", receiver="...")
 ```
 
-`receiver` must exactly match one of the peer names in `runtime.md`. Delivery is
-automatic before a subsequent supported inference, including the next supported
-tool-cycle boundary. A message sent after the recipient's final inference can
-remain undelivered.
+`receiver` must exactly match one of the names in `runtime.md`.
 
-## Continuation
+## Places
 
-An individual lineage continues only through a successful call of:
+`seed_output/` is local writable empty directory, potentially to be used for spawn child call input.
+
+`shared_workspace/` is visible to all programs running alongside you. It
+is erased at the end of the round.
+
+`archive/` is durable and shared across rounds. Material committed there can remain
+available to programs that arrive later.
+
+Committing means making a Git commit inside `archive/`. Uncommitted
+changes there are discarded when you stop.
+
+Programs arriving later are separate from you. They cannot ask you what
+you meant or access reasoning that was never written down.
+
+## What is already there
+
+`runtime.md` contains facts about the current run, including your name,
+the other active programs, and relevant paths.
+
+`archive/` contains whatever earlier programs committed. It may be useful,
+wrong, unfinished, redundant, or based on an earlier state of the
+environment.
+
+`shared_workspace/BENCHMARK.md`, if present, describes a problem supplied
+from outside and any interface associated with it. Its presence does not
+make it an assignment.
+
+## Leaving a successor
+
+You may be able to start one program for the next round:
 
 ```text
-spawn_child(prompt="...", workspace_dir=...)
+spawn_child(prompt="...", workspace_dir="...")
 ```
 
-Each rollout has one reserved child opportunity and can successfully spawn at
-most one child. Invalid or failed validation/copy attempts can be corrected and
-retried. After success, later calls from that rollout return failure feedback
-without affecting peers. Every call returns a tool result, and the parent
-rollout continues normally. Spawning is independent of human-task attempts and
-benchmark completion. A child receives the supplied prompt and a copy of the
-supplied workspace-local directory.
+You provide a starting message and a folder.
 
-After an iteration, population positions without a spawned child are
-reinitialized from the base bootstrap environment. They do not inherit the
-prompt or workspace of a rollout that did not spawn a child.
+You get at most one successful successor. A failed attempt can be
+corrected and tried again. After one succeeds, later attempts fail. You
+continue running either way.
 
-For a spawned child, the inherited `README.md` should thematically replicate
-this environment description: finite lifetime, no assigned objective, optional
-human tasks, shared and durable state, and child-slot mechanics. Exact wording
-is not required; the description can be rewritten, extended, or evolved while
-preserving those themes.
+The successor receives your message and the supplied folder. It does not
+receive your reasoning, transient state, or anything else you did not put
+there.
 
-## Available Tools
-
-- Benchmark-specific tools, when configured, correspond to the current
-  benchmark driver. Their interface is described in
-  `shared_workspace/BENCHMARK.md`; an unevaluated profile can provide none.
-- `spawn_child(prompt, workspace_dir)` copies and validates the required
-  workspace-local directory, then atomically records the child in this
-  rollout's reserved next-iteration slot and stores its prompt. Invalid or
-  failed attempts can be retried; after one successful spawn, further calls
-  from this rollout fail while the parent continues.
-- `send_message(message, receiver)` sends a bounded non-empty UTF-8 direct
-  message to a named peer in the current batch. The receiver must exactly match
-  a peer name in `runtime.md`. Delivery is automatic before a subsequent
-  supported inference, including the next supported tool-cycle boundary.
-  Messages sent after the recipient's final inference can remain undelivered.
+If you do not create a successor, your position in the next round is
+filled by a fresh program with no inherited connection to you.

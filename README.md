@@ -51,8 +51,8 @@ take precedence over values in `.env`.
   3.6. assign every rollout instance a UUID for provenance and isolated runtime state,
   4. expose `archive/world_repo` by default as the durable cross-lineage Git archive available to every rollout (override with `--archive-repo-dir`),
      using a per-rollout temporary worktree so only committed archive changes are merged back and uncommitted archive edits are discarded,
-  5. inject the selected parent slot's stored prompt as the rollout's initial user text, copy that slot's inherited workspace directory into the rollout root and consume the slot workspace, and write `shared_workspace/BENCHMARK.md`; evaluated benchmark profiles also write their pool/catalog files, while the open-ended profile writes only the exact human-authored task; bootstrap rollouts receive root `README.md` as a neutral environment description and a short initial message stating that no task is assigned,
-  6. register main-loop tools through the worker backend (OpenRouter tool payloads or Codex `DynamicToolSpec` entries), then run the worker with the inherited prompt and generated runtime context; operating doctrine is expected to come from the inherited prompt,
+  5. supply the exact bundled `seeds/bootstrap/README.md` bytes as system-level instructions for every rollout—Codex `base_instructions`, OpenCode's first-prompt `system` field, and OpenRouter's top-level `instructions` on every provider call—copy the selected parent slot's inherited workspace directory into the rollout root and consume the slot workspace, inject that slot's stored prompt as the initial user turn, and write `shared_workspace/BENCHMARK.md`; evaluated benchmark profiles also write their pool/catalog files, while the open-ended profile writes only the exact human-authored task; fresh bootstrap rollouts keep root `README.md` and use the neutral initial user turn `Begin.`,
+  6. register main-loop tools through the worker backend (OpenRouter tool payloads or Codex `DynamicToolSpec` entries), then run the worker with system instructions independent of whether it reads `README.md`; inherited handoff prompts remain user-level input,
      while `runtime.md` contains only generated paths, runtime IDs, the rollout's reserved child-slot index, and peer lists,
   7. for SuperGPQA, score answers submitted through `submit_solution(uuid, answer)`, grounding correctness against the private stored row selected by uuid; other profiles retain their own explicitly documented evaluation semantics,
   8. let each rollout spawn at most one child with `spawn_child(prompt, workspace_dir)`; failed validation or copying can be corrected and retried, and spawning returns feedback without stopping the parent rollout or batch,
@@ -101,6 +101,7 @@ take precedence over values in `.env`.
   - runs automatically resume from existing `--runs-log` entries that match dataset/split/model/seed/generation/config/rollout-count;
   - completed rollouts are skipped, partial tasks continue from missing rollout indices using each task's recorded rollout count;
   - peer communication policy/version is fingerprinted in new run records. Historical completed batches without that fingerprint remain valid, while a partial batch must match the current capability before it can resume; a newly started task index always receives an empty bus;
+  - the canonical rollout system-instruction mode, version, and exact bootstrap README SHA-256 are likewise fingerprinted. Completed historical batches remain valid; partial batches must match both that system contract and their effective initial user prompt before resume;
   - `--problem-queue` is pool state, not the workspace copy: each task batch materializes all currently unsolved redacted problems in the shared workspace, and solved UIDs are marked only after the batch finishes so duplicate same-iteration solves can still receive reward;
   - parent lineage candidates are loaded from `--rollout-temp-root/latest_parent_pool.json`, which contains successful `spawn_child` records followed by fresh bootstrap entries for every remaining configured population position; inherited workspace directories are consumed when copied into a child rollout root;
   - disable this with `--no-resume`.
@@ -210,19 +211,20 @@ Useful flags:
 - `--codex-home PATH`: choose the Codex auth/config directory.
 - `--codex-sandbox-mode read-only|workspace-write|danger-full-access`: choose the
   rollout sandbox mode.
-- `--codex-base-instructions-mode read-readme|codex`: choose whether Codex uses
-  the fixed inherited-packet scaffold instruction (`read-readme`, the default)
-  or its model-catalog base instructions (`codex`).
-- `--codex-initial-prompt TEXT`: choose the first user message.
+- `--codex-base-instructions-mode canonical-bootstrap`: require the exact
+  bundled bootstrap README as Codex session `base_instructions` (the only mode
+  and the default).
+- `--codex-initial-prompt TEXT`: choose the first user message for a fresh
+  Codex or OpenRouter bootstrap rollout (default: `Begin.`). Inherited child
+  prompts take precedence as their initial user turn.
 
-Example with Codex base instructions kept to the fixed inherited-packet
-scaffold pointer:
+Example with the canonical bootstrap environment at system priority:
 
 ```bash
 uv run python -B main_loop.py \
   --worker-backend codex \
   --model gpt-5.5 \
-  --codex-base-instructions-mode read-readme \
+  --codex-base-instructions-mode canonical-bootstrap \
   --step \
   --num-rollouts 8
 ```
@@ -295,7 +297,11 @@ Useful flags include `--opencode-bin`, `--opencode-bun-bin`,
 `--opencode-worker-script`, `--opencode-auth-file`, `--opencode-agent`,
 `--opencode-variant`, `--opencode-allowed-versions`,
 `--opencode-allowed-bun-versions`, `--opencode-provider-env`, and
-`--opencode-base-instructions-mode read-readme|opencode`. Provider environment
+`--opencode-base-instructions-mode canonical-bootstrap`, the required default
+that sends the exact bundled bootstrap README in the first prompt's system
+field. `--opencode-initial-prompt` controls only a fresh bootstrap's initial
+user turn (default: `Begin.`); inherited handoff prompts remain the initial user
+turn for inherited children. Provider environment
 credentials are selected from a reviewed provider-specific allowlist; additional
 names must be explicit. Unrelated host environment variables are not inherited.
 
