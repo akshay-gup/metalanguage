@@ -78,15 +78,17 @@ from utils.peer_communication import (
     DELIVERY_PREPARE_TOOL_NAME,
     LEGACY_AUTOMATIC_DELIVERY_FINGERPRINT,
     LEGACY_AUTOMATIC_DELIVERY_VERSION,
+    LEGACY_DISTINCT_NAMES_FINGERPRINT,
+    LEGACY_DISTINCT_NAMES_VERSION,
     LEGACY_PEER_COMMUNICATION_FINGERPRINT,
     LEGACY_PEER_COMMUNICATION_VERSION,
     LEGACY_TWO_TOOL_FINGERPRINT,
     LEGACY_TWO_TOOL_VERSION,
     PEER_COMMUNICATION_CAPABILITY_NAME,
     PEER_COMMUNICATION_FINGERPRINT,
-    PEER_ROLLOUT_COUNT,
     PEER_COMMUNICATION_TOOL_NAMES,
     PEER_COMMUNICATION_VERSION,
+    SUPPORTED_PEER_ROLLOUT_COUNTS,
     PeerCommunicationBridge,
     PeerCommunicationScope,
     PeerCommunicationStore,
@@ -937,6 +939,11 @@ def _claim_runtime_benchmark(runtime_root: Path, requested: str) -> None:
                 "version": LEGACY_AUTOMATIC_DELIVERY_VERSION,
                 "fingerprint": LEGACY_AUTOMATIC_DELIVERY_FINGERPRINT,
             },
+            {
+                "enabled": True,
+                "version": LEGACY_DISTINCT_NAMES_VERSION,
+                "fingerprint": LEGACY_DISTINCT_NAMES_FINGERPRINT,
+            },
         )
         if (
             recorded_peer is not None
@@ -1248,6 +1255,7 @@ def _peer_communication_resume_compatible(
     record: dict[str, Any],
     *,
     require_fingerprint: bool,
+    population_size: int | None = None,
 ) -> bool:
     recorded = (
         record.get("peer_communication_enabled"),
@@ -1262,6 +1270,15 @@ def _peer_communication_resume_compatible(
         PEER_COMMUNICATION_FINGERPRINT,
     )
     if not capability_matches:
+        return False
+    recorded_population = record.get("peer_communication_population_size")
+    if (
+        isinstance(recorded_population, bool)
+        or not isinstance(recorded_population, int)
+        or recorded_population not in SUPPORTED_PEER_ROLLOUT_COUNTS
+        or population_size is not None
+        and recorded_population != population_size
+    ):
         return False
     batch_id = record.get("peer_communication_batch_id")
     return not require_fingerprint or isinstance(batch_id, str) and bool(batch_id)
@@ -2128,6 +2145,46 @@ def load_existing_run_records(log_path: Path) -> list[dict[str, Any]]:
     return records
 
 
+def _recorded_task_rollout_count(
+    per_task: dict[int, dict[str, Any]],
+) -> int | None:
+    counts: list[int] = []
+    for record in per_task.values():
+        raw_count = record.get(
+            "task_rollout_count", record.get("scheduled_rollout_count")
+        )
+        try:
+            count = int(raw_count)
+        except (TypeError, ValueError):
+            continue
+        if count > 0:
+            counts.append(count)
+    return max(counts) if counts else None
+
+
+def _next_step_task_index(
+    existing_by_task: dict[int, dict[int, dict[str, Any]]],
+    *,
+    start_task_index: int,
+    default_rollout_count: int,
+) -> int:
+    eligible_indices = [
+        task_index
+        for task_index in existing_by_task
+        if task_index >= start_task_index
+    ]
+    for task_index in sorted(eligible_indices):
+        per_task = existing_by_task[task_index]
+        expected_count = (
+            _recorded_task_rollout_count(per_task) or default_rollout_count
+        )
+        if len(per_task) < expected_count:
+            return task_index
+    if eligible_indices:
+        return max(eligible_indices) + 1
+    return start_task_index
+
+
 def load_parent_pool(parent_pool_path: Path) -> list[dict[str, Any]]:
     if not parent_pool_path.exists():
         return []
@@ -2690,9 +2747,12 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
     args = parse_args()
     args.difficulty_filter = _normalize_difficulty_filter(args.difficulty_filter)
     difficulty_filter_payload = list(args.difficulty_filter) if args.difficulty_filter is not None else None
-    if args.num_rollouts != PEER_ROLLOUT_COUNT:
+    if args.num_rollouts not in SUPPORTED_PEER_ROLLOUT_COUNTS:
+        supported = ", ".join(
+            str(value) for value in sorted(SUPPORTED_PEER_ROLLOUT_COUNTS)
+        )
         raise ValueError(
-            f"--num-rollouts must be exactly {PEER_ROLLOUT_COUNT} while peer communication is enabled"
+            f"--num-rollouts must be one of {supported} while peer communication is enabled"
         )
     if args.worker_timeout_seconds <= 0:
         raise ValueError("--worker-timeout-seconds must be > 0")
@@ -2957,7 +3017,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 and rec.get("seed") == args.seed
                 and rec.get("generation") == args.generation
                 and rec.get("bootstrap_rollout_count", rec.get("num_rollouts"))
-                == args.num_rollouts
+                in SUPPORTED_PEER_ROLLOUT_COUNTS
                 and rec.get("worker_backend", "openrouter")
                 == args.worker_backend
             ):
@@ -3009,6 +3069,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             if not _peer_communication_resume_compatible(
                 record,
                 require_fingerprint=True,
+                population_size=args.num_rollouts,
             ):
                 raise RuntimeError(
                     "partial task resume is incompatible with the current peer communication capability; "
@@ -3072,29 +3133,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
     def _rollout_username(rollout_index: int) -> str:
         return f"rollout_user_{rollout_index:03d}"
 
-    def _recorded_task_rollout_count(per_task: dict[int, dict[str, Any]]) -> int | None:
-        counts: list[int] = []
-        for rec in per_task.values():
-            raw_count = rec.get("task_rollout_count", rec.get("scheduled_rollout_count"))
-            try:
-                count = int(raw_count)
-            except (TypeError, ValueError):
-                continue
-            if count > 0:
-                counts.append(count)
-        return max(counts) if counts else None
-
-    def _next_step_task_index() -> int:
-        eligible_indices = [idx for idx in existing_by_task if idx >= args.start_task_index]
-        for idx in sorted(eligible_indices):
-            per_task = existing_by_task[idx]
-            expected_count = _recorded_task_rollout_count(per_task) or args.num_rollouts
-            if len(per_task) < expected_count:
-                return idx
-        if eligible_indices:
-            return max(eligible_indices) + 1
-        return args.start_task_index
-
     benchmark_driver = _create_benchmark_driver(
         args,
         arc_benchmark_state_path=arc_benchmark_state_path,
@@ -3106,7 +3144,15 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
         open_ended_state_dir=open_ended_state_dir,
     )
     active_drivers.append(benchmark_driver)
-    problem_start_index = _next_step_task_index() if args.step else args.start_task_index
+    problem_start_index = (
+        _next_step_task_index(
+            existing_by_task,
+            start_task_index=args.start_task_index,
+            default_rollout_count=args.num_rollouts,
+        )
+        if args.step
+        else args.start_task_index
+    )
     problem_batch_count = args.max_tasks if args.all_tasks and args.max_tasks is not None else 1
     scheduled_batches = [
         ScheduledBenchmarkBatch(
@@ -3129,18 +3175,31 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
         existing_task_records = existing_by_task.get(task_index, {})
         recorded_task_rollout_count = _recorded_task_rollout_count(existing_task_records)
         bootstrap_without_parent = not parent_pool
+        if (
+            recorded_task_rollout_count is None
+            and parent_pool
+            and len(parent_pool) != args.num_rollouts
+        ):
+            raise RuntimeError(
+                "The finalized parent pool population does not match --num-rollouts; "
+                "reconcile the pool before starting a new task."
+            )
         task_rollout_count = (
             recorded_task_rollout_count
             if recorded_task_rollout_count is not None
-            else (args.num_rollouts if bootstrap_without_parent else len(parent_pool))
+            else args.num_rollouts
         )
         if task_rollout_count <= 0:
             raise RuntimeError(
                 f"No rollout population positions available for task_index={task_index}."
             )
-        if task_rollout_count != PEER_ROLLOUT_COUNT:
+        if task_rollout_count not in SUPPORTED_PEER_ROLLOUT_COUNTS:
+            supported = ", ".join(
+                str(value) for value in sorted(SUPPORTED_PEER_ROLLOUT_COUNTS)
+            )
             raise RuntimeError(
-                f"peer communication requires exactly {PEER_ROLLOUT_COUNT} rollout population positions"
+                "peer communication rollout population must be one of: "
+                f"{supported}"
             )
         task_instance_uuids: dict[int, str] = {}
         for rollout_index in range(task_rollout_count):
@@ -3228,6 +3287,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 "peer_communication_version": PEER_COMMUNICATION_VERSION,
                 "peer_communication_fingerprint": PEER_COMMUNICATION_FINGERPRINT,
                 "peer_communication_batch_id": peer_communication_batch_id,
+                "peer_communication_population_size": task_rollout_count,
                 "rollout_coordination": "collaborative_same_batch",
                 "rollout_independence": False,
             }
@@ -3276,9 +3336,12 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                         "rollout_index": index,
                         "name": peer_communication_store.name_for(index),
                     }
-                    for index in range(PEER_ROLLOUT_COUNT)
+                    for index in range(task_rollout_count)
                 ],
                 "peer_name_roster": list(peer_communication_store.roster),
+                "peer_communication_batch_message_limit": (
+                    peer_communication_store.batch_message_limit
+                ),
                 "peer_delivery_mode": "automatic_safe_inference_boundary",
             }
         )

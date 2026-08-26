@@ -45,7 +45,7 @@ PEER_SUPERVISOR_REQUEST_NAMES = frozenset(
     }
 )
 PEER_COMMUNICATION_CAPABILITY_NAME = "peer_communication"
-PEER_COMMUNICATION_VERSION = 4
+PEER_COMMUNICATION_VERSION = 5
 LEGACY_PEER_COMMUNICATION_VERSION = 1
 LEGACY_PEER_COMMUNICATION_FINGERPRINT = (
     "736f86bb60067680401e41a845883e08b1c40603a6b0168835edb926ddc1402f"
@@ -58,10 +58,15 @@ LEGACY_AUTOMATIC_DELIVERY_VERSION = 3
 LEGACY_AUTOMATIC_DELIVERY_FINGERPRINT = (
     "c8febcbb564a7c4d8b732359a8e780f08952638f0477868b2d1369cfd559dd0a"
 )
-PEER_ROLLOUT_COUNT = 8
+LEGACY_DISTINCT_NAMES_VERSION = 4
+LEGACY_DISTINCT_NAMES_FINGERPRINT = (
+    "7aac34fa840bc8ebf5e7d9f6d0c9e02eb0d423454e59157585bfe2da5f4edcfe"
+)
+DEFAULT_PEER_ROLLOUT_COUNT = 8
+SUPPORTED_PEER_ROLLOUT_COUNTS = frozenset({8, 16})
 MESSAGE_MAX_BYTES = 2_048
 PER_ROLLOUT_SEND_LIMIT = 64
-BATCH_MESSAGE_LIMIT = 512
+BATCH_MESSAGE_LIMIT = 1_024
 DELIVERY_MAX_MESSAGES = 8
 DELIVERY_MAX_BYTES = 8_192
 BRIDGE_REQUEST_MAX_BYTES = 16_384
@@ -103,14 +108,17 @@ PEER_COMMUNICATION_POLICY = {
     "tool_names": [SEND_MESSAGE_TOOL_NAME],
     "version": PEER_COMMUNICATION_VERSION,
     "model_fields": ["message", "receiver"],
-    "population_size": PEER_ROLLOUT_COUNT,
+    "supported_population_sizes": sorted(SUPPORTED_PEER_ROLLOUT_COUNTS),
     "identity": "supervisor_random_persisted_distinct_initial_name_mapping",
     "enabled_benchmark_profiles": ["open-ended", "supergpqa", "arc-agi"],
     "scope": "runtime_and_supervisor_batch_id",
     "storage": "immutable_sequence_records_with_atomic_delivery_cursors_v1",
     "message_max_bytes": MESSAGE_MAX_BYTES,
     "per_rollout_send_limit": PER_ROLLOUT_SEND_LIMIT,
-    "batch_message_limit": BATCH_MESSAGE_LIMIT,
+    "batch_message_limit": {
+        "per_rollout": PER_ROLLOUT_SEND_LIMIT,
+        "hard_max": BATCH_MESSAGE_LIMIT,
+    },
     "delivery_max_messages": DELIVERY_MAX_MESSAGES,
     "delivery_max_bytes": DELIVERY_MAX_BYTES,
     "retry_idempotence": "none_each_accepted_send_gets_a_new_sequence",
@@ -275,7 +283,7 @@ LifecycleCallback = Callable[[str, dict[str, Any]], None]
 
 
 class PeerCommunicationStore:
-    """One append-only, thread-safe direct-message bus for one eight-way batch."""
+    """One append-only, thread-safe direct-message bus for one supported batch."""
 
     def __init__(
         self,
@@ -285,25 +293,35 @@ class PeerCommunicationStore:
         name_mapping: dict[int, str] | None = None,
         lifecycle_callback: LifecycleCallback | None = None,
     ) -> None:
-        if scope.population_size != PEER_ROLLOUT_COUNT:
-            raise ValueError(f"peer communication requires exactly {PEER_ROLLOUT_COUNT} rollouts")
+        if scope.population_size not in SUPPORTED_PEER_ROLLOUT_COUNTS:
+            supported = ", ".join(str(value) for value in sorted(SUPPORTED_PEER_ROLLOUT_COUNTS))
+            raise ValueError(
+                f"peer communication population size must be one of: {supported}"
+            )
         self.log_dir = log_dir.resolve()
         self.scope = scope
+        self.population_size = scope.population_size
+        self.batch_message_limit = min(
+            BATCH_MESSAGE_LIMIT,
+            PER_ROLLOUT_SEND_LIMIT * self.population_size,
+        )
         self._lock = threading.Lock()
         self._lifecycle_callback = lifecycle_callback
         self._records: list[dict[str, Any]] = []
-        self._send_counts = [0 for _ in range(PEER_ROLLOUT_COUNT)]
-        self._delivery_cursors = [0 for _ in range(PEER_ROLLOUT_COUNT)]
-        self._last_delivery_ids: list[str | None] = [None for _ in range(PEER_ROLLOUT_COUNT)]
+        self._send_counts = [0 for _ in range(self.population_size)]
+        self._delivery_cursors = [0 for _ in range(self.population_size)]
+        self._last_delivery_ids: list[str | None] = [
+            None for _ in range(self.population_size)
+        ]
         self._pending_deliveries: list[dict[str, Any] | None] = [
-            None for _ in range(PEER_ROLLOUT_COUNT)
+            None for _ in range(self.population_size)
         ]
         # Codex can complete several tool calls concurrently before one model
         # sampling cycle. A protected cycle claim lets exactly one successful
         # PostToolUse hook inject a bundle; the runner opens the next cycle only
         # after model-authored activity proves that sampling has begun.
         self._tool_cycle_claims: list[dict[str, Any] | None] = [
-            None for _ in range(PEER_ROLLOUT_COUNT)
+            None for _ in range(self.population_size)
         ]
         self._batch_started_epoch = 0.0
         self._name_mapping: dict[int, str] = {}
@@ -328,21 +346,27 @@ class PeerCommunicationStore:
 
     @property
     def roster(self) -> tuple[str, ...]:
-        return tuple(self._name_mapping[index] for index in range(PEER_ROLLOUT_COUNT))
+        return tuple(self._name_mapping[index] for index in range(self.population_size))
 
     def name_for(self, rollout_index: int) -> str:
         self._validate_rollout(rollout_index)
         return self._name_mapping[rollout_index]
 
     @staticmethod
-    def random_name_mapping() -> dict[int, str]:
+    def random_name_mapping(
+        population_size: int = DEFAULT_PEER_ROLLOUT_COUNT,
+    ) -> dict[int, str]:
+        if population_size not in SUPPORTED_PEER_ROLLOUT_COUNTS:
+            supported = ", ".join(str(value) for value in sorted(SUPPORTED_PEER_ROLLOUT_COUNTS))
+            raise ValueError(
+                f"peer communication population size must be one of: {supported}"
+            )
         names = secrets.SystemRandom().sample(
-            list(SAFE_ENGLISH_FIRST_NAMES), PEER_ROLLOUT_COUNT
+            list(SAFE_ENGLISH_FIRST_NAMES), population_size
         )
         return dict(enumerate(names))
 
-    @staticmethod
-    def _validate_name_mapping(value: Any) -> dict[int, str]:
+    def _validate_name_mapping(self, value: Any) -> dict[int, str]:
         if not isinstance(value, dict):
             raise RuntimeError("peer communication name mapping is invalid")
         normalized: dict[int, str] = {}
@@ -353,16 +377,27 @@ class PeerCommunicationStore:
                 raise RuntimeError("peer communication name mapping is invalid") from None
             if (
                 isinstance(raw_index, bool)
-                or index not in range(PEER_ROLLOUT_COUNT)
+                or index not in range(self.population_size)
                 or not isinstance(name, str)
                 or name not in SAFE_ENGLISH_FIRST_NAMES
             ):
                 raise RuntimeError("peer communication name mapping is invalid")
             normalized[index] = name
-        if set(normalized) != set(range(PEER_ROLLOUT_COUNT)) or len(set(normalized.values())) != PEER_ROLLOUT_COUNT:
-            raise RuntimeError("peer communication name mapping must contain eight distinct safe names")
-        if len({name[0].casefold() for name in normalized.values()}) != PEER_ROLLOUT_COUNT:
-            raise RuntimeError("peer communication name mapping must use eight distinct initials")
+        if (
+            set(normalized) != set(range(self.population_size))
+            or len(set(normalized.values())) != self.population_size
+        ):
+            raise RuntimeError(
+                "peer communication name mapping must contain exactly one distinct safe "
+                f"name for each of {self.population_size} rollouts"
+            )
+        if (
+            len({name[0].casefold() for name in normalized.values()})
+            != self.population_size
+        ):
+            raise RuntimeError(
+                "peer communication name mapping must use distinct initials"
+            )
         return normalized
 
     def _prepare(self, requested_mapping: dict[int, str] | None) -> None:
@@ -392,7 +427,9 @@ class PeerCommunicationStore:
             self._batch_started_epoch = float(manifest["batch_started_epoch"])
         else:
             mapping = self._validate_name_mapping(
-                requested_mapping if requested_mapping is not None else self.random_name_mapping()
+                requested_mapping
+                if requested_mapping is not None
+                else self.random_name_mapping(self.population_size)
             )
             epoch, timestamp = _utc_now()
             manifest = {
@@ -400,7 +437,10 @@ class PeerCommunicationStore:
                 "version": PEER_COMMUNICATION_VERSION,
                 "fingerprint": PEER_COMMUNICATION_FINGERPRINT,
                 "scope": expected_scope,
-                "name_mapping": {str(index): mapping[index] for index in range(PEER_ROLLOUT_COUNT)},
+                "name_mapping": {
+                    str(index): mapping[index]
+                    for index in range(self.population_size)
+                },
                 "batch_started_epoch": epoch,
                 "batch_started_at": timestamp,
                 "storage": "immutable-sequence-records-with-atomic-delivery-cursors",
@@ -422,12 +462,12 @@ class PeerCommunicationStore:
             self._records.append(record)
             self._send_counts[int(record["sender_rollout_index"])] += 1
             expected_sequence += 1
-        if len(self._records) > BATCH_MESSAGE_LIMIT or any(
+        if len(self._records) > self.batch_message_limit or any(
             count > PER_ROLLOUT_SEND_LIMIT for count in self._send_counts
         ):
             raise RuntimeError("peer communication log exceeds configured limits")
 
-        for index in range(PEER_ROLLOUT_COUNT):
+        for index in range(self.population_size):
             path = self._cursor_path(index)
             if not path.exists():
                 self._write_cursor(index, 0, None, must_be_new=True)
@@ -520,10 +560,10 @@ class PeerCommunicationStore:
         if (
             isinstance(sender, bool)
             or not isinstance(sender, int)
-            or sender not in range(PEER_ROLLOUT_COUNT)
+            or sender not in range(self.population_size)
             or isinstance(recipient, bool)
             or not isinstance(recipient, int)
-            or recipient not in range(PEER_ROLLOUT_COUNT)
+            or recipient not in range(self.population_size)
             or sender == recipient
             or record.get("sender_name") != self._name_mapping[sender]
             or record.get("receiver_name") != self._name_mapping[recipient]
@@ -551,7 +591,7 @@ class PeerCommunicationStore:
         if (
             isinstance(rollout_index, bool)
             or not isinstance(rollout_index, int)
-            or rollout_index not in range(PEER_ROLLOUT_COUNT)
+            or rollout_index not in range(self.population_size)
         ):
             raise ValueError("rollout identity is unavailable")
         return rollout_index
@@ -633,11 +673,11 @@ class PeerCommunicationStore:
                     "rollout_send_limit_reached",
                     f"this rollout has reached its {PER_ROLLOUT_SEND_LIMIT}-message batch limit",
                 )
-            if len(self._records) >= BATCH_MESSAGE_LIMIT:
+            if len(self._records) >= self.batch_message_limit:
                 return _error(
                     SEND_MESSAGE_TOOL_NAME,
                     "batch_message_limit_reached",
-                    f"this batch has reached its {BATCH_MESSAGE_LIMIT}-message limit",
+                    f"this batch has reached its {self.batch_message_limit}-message limit",
                 )
             sequence = len(self._records) + 1
             epoch, timestamp = _utc_now()
@@ -1261,7 +1301,7 @@ def peer_communication_handler_command(
     """Return the lightweight protected callback command for worker transports.
 
     This module deliberately has no benchmark-driver or model-runtime imports,
-    so eight concurrent callbacks do not pay the full ``main_loop`` startup
+    so concurrent callbacks do not pay the full ``main_loop`` startup
     cost at a latency-sensitive inference boundary.
     """
 
