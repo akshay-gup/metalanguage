@@ -47,10 +47,10 @@ take precedence over values in `.env`.
   1.5. use `moonshotai/kimi-k2.6` as the default OpenRouter model (override with `--model`),
   2. run a supported population of exactly 8 or 16 rollouts (`--num-rollouts`), using bootstrap rollouts for positions without spawned parents,
   3. reserve one deterministic next-iteration child opportunity for each source rollout, keyed by `source_rollout_index` and the same `slot_index`,
-  3.5. expose a shared cross-rollout workspace at `--rollout-temp-root/shared_workspace` and a bounded `send_message` tool for direct communication among the configured 8 or 16 rollouts in the current task batch (workspace files are cleaned after the batch; message-bus audit records remain under runtime logs),
+  3.5. expose a shared cross-rollout workspace at `--rollout-temp-root/shared_workspace` and a bounded `send_message` tool for direct communication among the configured 8 or 16 rollouts in the current task batch (non-repository workspace files are cleaned after the batch; message-bus audit records remain under runtime logs),
   3.6. assign every rollout instance a UUID for provenance and isolated runtime state,
-  4. expose `archive/world_repo` by default as the durable cross-lineage Git archive available to every rollout (override with `--archive-repo-dir`),
-     using a per-rollout temporary worktree so only committed archive changes are merged back and uncommitted archive edits are discarded,
+  4. expose `--rollout-temp-root/shared_workspace/archive` as one persistent ordinary Git checkout shared by every rollout and later batch; each rollout's `archive/` path resolves to that exact checkout, including its working tree, index, current branch, refs, and committed changes; Git commands run concurrently without supervisor serialization or repair, and after every rollout process has stopped the supervisor discards staged, modified, deleted, untracked, and ignored archive content without committing, merging, or selecting a branch,
+     while `--archive-repo-dir` retains the historical archive path as a compatibility symlink to the shared checkout,
   5. supply the exact bundled `seeds/bootstrap/README.md` bytes as system-level instructions for every rollout—Codex `base_instructions`, OpenCode's first-prompt `system` field, and OpenRouter's top-level `instructions` on every provider call—copy the selected parent slot's inherited workspace directory into the rollout root and consume the slot workspace, inject that slot's stored prompt as the initial user turn, and write `shared_workspace/BENCHMARK.md`; evaluated benchmark profiles also write their pool/catalog files, while the open-ended profile writes only the exact human-authored task; fresh bootstrap rollouts keep root `README.md` and use the neutral initial user turn `Begin.`,
   6. register main-loop tools through the worker backend (OpenRouter tool payloads or Codex `DynamicToolSpec` entries), then run the worker with system instructions independent of whether it reads `README.md`; inherited handoff prompts remain user-level input,
      while `runtime.md` contains only generated paths, runtime IDs, the rollout's reserved child-slot index, and peer lists,
@@ -64,8 +64,8 @@ take precedence over values in `.env`.
   - `--runtime-root` itself is rejected unless it stays inside `~/Documents`;
   - Codex runner request, event, stderr, and continuation-context control files are written under `logs/rollout_control/<instance_uuid>/`, outside rollout and shared workspaces;
   - worker home/cache/temp state is written under `logs/rollout_state/<instance_uuid>/`, outside rollout and shared workspaces;
-  - shared workspace write attribution is recorded only in the durable runtime log, not as supervisor-written files inside the shared workspace;
-  - rollout-created or modified shared workspace files are deleted after the active rollout batch finishes;
+  - the checkout under `shared_workspace/archive` is excluded from batch-local file cleanup while rollouts run; after all rollout processes stop, one guarded Git reset/clean restores its current committed HEAD, preserving that HEAD, the current branch, commits, and refs while removing staged, modified, deleted, untracked, and ignored content;
+  - rollout-created or modified non-repository shared workspace files are deleted after the active rollout batch finishes; supervisor-provided benchmark files are rewritten only by benchmark preparation for the relevant batch;
   - immutable peer-message records are stored under `logs/peer_communication/task_<task_index>/batch_<supervisor_batch_id>/messages/`, with protected delivery cursors and a batch manifest containing the randomly assigned population-sized name mapping; these supervisor-owned logs are outside every rollout-writable root, survive normal cleanup and partial resume, and are preserved with the runtime; a fresh rerun of the same task index receives a new batch ID, fresh names, and an empty bus;
   - Hugging Face caches and process temp files are also redirected under the runtime root.
 - Benchmark events and child slots:
@@ -143,7 +143,7 @@ uv run python -B main_loop.py \
   or ranking. Generic rollout tools, peer communication, child spawning, shared workspace,
   artifacts, and archive behavior are unchanged.
 - Run records and one-line summaries say `evaluation=unconfigured`. Worker
-  status, artifacts, archive activity, and child spawns remain lifecycle
+  status, artifacts, shared Git state, and child spawns remain lifecycle
   diagnostics and are not treated as proxy scores.
 - `--problem-pool-size` is rejected for this profile. A runtime claimed by one
   benchmark/profile cannot be reused for another.
