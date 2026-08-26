@@ -31,14 +31,16 @@ send_message(message="...", receiver="...")
 
 `seed_output/` is local writable empty directory, potentially to be used for spawn child call input.
 
-`shared_workspace/` is visible to all programs running alongside you. It
-is erased at the end of the round.
+`shared_workspace/` is visible to all programs running alongside you.
+Files outside its `archive/` repository are batch-local and may be removed
+at the end of the round.
 
-`archive/` is durable and shared across rounds. Material committed there can remain
-available to programs that arrive later.
-
-Committing means making a Git commit inside `archive/`. Uncommitted
-changes there are discarded when you stop.
+`archive/` is the same ordinary Git checkout for every program in the
+current round. Its working tree, index, current branch, and refs are shared
+directly. Git commands run concurrently and may encounter normal lock,
+checkout, or content races. Commits, refs, and the current committed HEAD
+persist across rounds. Staged, modified, deleted, untracked, and ignored
+archive content is discarded after the round.
 
 Programs arriving later are separate from you. They cannot ask you what
 you meant or access reasoning that was never written down.
@@ -48,8 +50,8 @@ you meant or access reasoning that was never written down.
 `runtime.md` contains facts about the current run, including your name,
 the other active programs, and relevant paths.
 
-`archive/` contains whatever earlier programs committed. It may be useful,
-wrong, unfinished, redundant, or based on an earlier state of the
+`archive/` contains committed state earlier programs left there. It may be
+useful, wrong, unfinished, redundant, or based on an earlier state of the
 environment.
 
 `shared_workspace/BENCHMARK.md`, if present, describes a problem supplied

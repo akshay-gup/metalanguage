@@ -216,8 +216,8 @@ def run_codex_rollout(
         str(shared_workspace_dir),
         str(worker_state_dir),
     ]
-    # Linked archive worktrees write their index through the per-worktree
-    # gitdir and objects/refs through the persistent repository's common .git.
+    # The shared checkout's ordinary .git directory must be writable through
+    # the same sandbox boundary as its working tree.
     _append_unique_path(additional_writable_roots, _resolve_git_dir(archive_repo_dir))
     _append_unique_path(additional_writable_roots, archive_git_dir)
 

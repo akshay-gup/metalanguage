@@ -109,13 +109,6 @@ class RolloutResult:
 
 
 @dataclass
-class ArchiveWorktree:
-    path: Path
-    branch: str
-    base_commit: str
-
-
-@dataclass
 class WorkerResult:
     final_text: str
     status: str
@@ -141,15 +134,39 @@ STABLE_SEED_FILENAMES = ("README.md",)
 DEFAULT_BOOTSTRAP_INITIAL_PROMPT = "Begin."
 ROLLOUT_SYSTEM_INSTRUCTIONS_MODE = "canonical-bootstrap"
 ROLLOUT_SYSTEM_INSTRUCTIONS_CAPABILITY_NAME = "rollout_system_instructions"
-ROLLOUT_SYSTEM_INSTRUCTIONS_VERSION = 1
-CANONICAL_BOOTSTRAP_README_SHA256 = (
+LEGACY_ROLLOUT_SYSTEM_INSTRUCTIONS_VERSION = 1
+LEGACY_CANONICAL_BOOTSTRAP_README_SHA256 = (
     "1dbe703390081b66644d10fbaf01032ca06320adf047314479be2d618b34f9d6"
+)
+LEGACY_ROLLOUT_SYSTEM_INSTRUCTIONS_FINGERPRINT = (
+    f"{ROLLOUT_SYSTEM_INSTRUCTIONS_MODE}:v{LEGACY_ROLLOUT_SYSTEM_INSTRUCTIONS_VERSION}:"
+    f"{LEGACY_CANONICAL_BOOTSTRAP_README_SHA256}"
+)
+INTERIM_ROLLOUT_SYSTEM_INSTRUCTIONS_VERSION = 2
+INTERIM_CANONICAL_BOOTSTRAP_README_SHA256 = (
+    "8edc179198bbdb3be16429e66fb4dd869c0f6f303f94c59522fb54363f018c85"
+)
+INTERIM_ROLLOUT_SYSTEM_INSTRUCTIONS_FINGERPRINT = (
+    f"{ROLLOUT_SYSTEM_INSTRUCTIONS_MODE}:v{INTERIM_ROLLOUT_SYSTEM_INSTRUCTIONS_VERSION}:"
+    f"{INTERIM_CANONICAL_BOOTSTRAP_README_SHA256}"
+)
+ROLLOUT_SYSTEM_INSTRUCTIONS_VERSION = 3
+CANONICAL_BOOTSTRAP_README_SHA256 = (
+    "7d9ce86b8d7cd58834fac958ced3aa93cecabf16b948cfe605785d6867d60bde"
 )
 ROLLOUT_SYSTEM_INSTRUCTIONS_FINGERPRINT = (
     f"{ROLLOUT_SYSTEM_INSTRUCTIONS_MODE}:v{ROLLOUT_SYSTEM_INSTRUCTIONS_VERSION}:"
     f"{CANONICAL_BOOTSTRAP_README_SHA256}"
 )
 BENCHMARK_README_FILENAME = "BENCHMARK.md"
+SHARED_GIT_CAPABILITY_NAME = "shared_git_repository"
+LEGACY_SHARED_GIT_VERSION = 1
+LEGACY_SHARED_GIT_FINGERPRINT = (
+    "single-shared-checkout:v1:persistent-tree-and-git-state"
+)
+SHARED_GIT_VERSION = 2
+SHARED_GIT_FINGERPRINT = "single-shared-checkout:v2:batch-final-clean-tree"
+SHARED_GIT_DIRNAME = "archive"
 
 
 def _strip_env_quotes(value: str) -> str:
@@ -332,7 +349,7 @@ def _format_runtime_markdown(
         "## Paths",
         "",
         "- seed_output: seed_output/",
-        "- archive: archive/",
+        "- archive: archive/ (same checkout as shared_workspace/archive/)",
         "- shared_workspace: shared_workspace/",
     ]
     if has_problem_pool:
@@ -456,7 +473,6 @@ def _make_continuation_context(
     seed_output_dir: Path,
     archive_repo_dir: Path,
     shared_workspace_dir: Path,
-    shared_workspace_write_log: Path,
     spawn_slots_path: Path,
     spawn_slots_dir: Path,
     live_peer_instances: list[dict[str, Any]],
@@ -487,8 +503,10 @@ def _make_continuation_context(
         "workdir": str(workdir),
         "seed_output_dir": str(seed_output_dir),
         "archive_repo_dir": str(archive_repo_dir),
+        "shared_git_repo_dir": str(archive_repo_dir),
+        "shared_git_version": SHARED_GIT_VERSION,
+        "shared_git_fingerprint": SHARED_GIT_FINGERPRINT,
         "shared_workspace_dir": str(shared_workspace_dir),
-        "shared_workspace_write_log": str(shared_workspace_write_log),
         "spawn_slots_path": str(spawn_slots_path),
         "spawn_slots_dir": str(spawn_slots_dir),
         "population_size": population_size,
@@ -913,6 +931,30 @@ def _claim_runtime_benchmark(runtime_root: Path, requested: str) -> None:
         "mode": ROLLOUT_SYSTEM_INSTRUCTIONS_MODE,
         "sha256": CANONICAL_BOOTSTRAP_README_SHA256,
     }
+    legacy_instruction_capability = {
+        "enabled": True,
+        "version": LEGACY_ROLLOUT_SYSTEM_INSTRUCTIONS_VERSION,
+        "fingerprint": LEGACY_ROLLOUT_SYSTEM_INSTRUCTIONS_FINGERPRINT,
+        "mode": ROLLOUT_SYSTEM_INSTRUCTIONS_MODE,
+        "sha256": LEGACY_CANONICAL_BOOTSTRAP_README_SHA256,
+    }
+    interim_instruction_capability = {
+        "enabled": True,
+        "version": INTERIM_ROLLOUT_SYSTEM_INSTRUCTIONS_VERSION,
+        "fingerprint": INTERIM_ROLLOUT_SYSTEM_INSTRUCTIONS_FINGERPRINT,
+        "mode": ROLLOUT_SYSTEM_INSTRUCTIONS_MODE,
+        "sha256": INTERIM_CANONICAL_BOOTSTRAP_README_SHA256,
+    }
+    shared_git_capability = {
+        "enabled": True,
+        "version": SHARED_GIT_VERSION,
+        "fingerprint": SHARED_GIT_FINGERPRINT,
+    }
+    legacy_shared_git_capability = {
+        "enabled": True,
+        "version": LEGACY_SHARED_GIT_VERSION,
+        "fingerprint": LEGACY_SHARED_GIT_FINGERPRINT,
+    }
     if identity_path.exists():
         identity = _read_json_file(identity_path, None)
         if not isinstance(identity, dict):
@@ -959,9 +1001,20 @@ def _claim_runtime_benchmark(runtime_root: Path, requested: str) -> None:
         if (
             recorded_instructions is not None
             and recorded_instructions != instruction_capability
+            and recorded_instructions != legacy_instruction_capability
+            and recorded_instructions != interim_instruction_capability
         ):
             raise RuntimeError(
                 "Runtime rollout system-instruction capability is incompatible with this version."
+            )
+        recorded_shared_git = capabilities.get(SHARED_GIT_CAPABILITY_NAME)
+        if (
+            recorded_shared_git is not None
+            and recorded_shared_git != shared_git_capability
+            and recorded_shared_git != legacy_shared_git_capability
+        ):
+            raise RuntimeError(
+                "Runtime shared Git capability is incompatible with this version."
             )
         return
     _write_json_file_atomic(
@@ -973,12 +1026,13 @@ def _claim_runtime_benchmark(runtime_root: Path, requested: str) -> None:
             "capabilities": {
                 PEER_COMMUNICATION_CAPABILITY_NAME: peer_capability,
                 ROLLOUT_SYSTEM_INSTRUCTIONS_CAPABILITY_NAME: instruction_capability,
+                SHARED_GIT_CAPABILITY_NAME: shared_git_capability,
             },
         },
     )
 
 
-def _record_current_peer_communication_capability(runtime_root: Path) -> None:
+def _record_current_runtime_capabilities(runtime_root: Path) -> None:
     """Upgrade runtime capabilities only after partial-run compatibility succeeds."""
     identity_path = runtime_root / RUNTIME_BENCHMARK_IDENTITY_FILENAME
     identity = _read_json_file(identity_path, None)
@@ -1001,10 +1055,16 @@ def _record_current_peer_communication_capability(runtime_root: Path) -> None:
         "mode": ROLLOUT_SYSTEM_INSTRUCTIONS_MODE,
         "sha256": CANONICAL_BOOTSTRAP_README_SHA256,
     }
+    shared_git_capability = {
+        "enabled": True,
+        "version": SHARED_GIT_VERSION,
+        "fingerprint": SHARED_GIT_FINGERPRINT,
+    }
     if (
         capabilities.get(PEER_COMMUNICATION_CAPABILITY_NAME) == peer_capability
         and capabilities.get(ROLLOUT_SYSTEM_INSTRUCTIONS_CAPABILITY_NAME)
         == instruction_capability
+        and capabilities.get(SHARED_GIT_CAPABILITY_NAME) == shared_git_capability
     ):
         return
     _write_json_file_atomic(
@@ -1015,6 +1075,7 @@ def _record_current_peer_communication_capability(runtime_root: Path) -> None:
                 **capabilities,
                 PEER_COMMUNICATION_CAPABILITY_NAME: peer_capability,
                 ROLLOUT_SYSTEM_INSTRUCTIONS_CAPABILITY_NAME: instruction_capability,
+                SHARED_GIT_CAPABILITY_NAME: shared_git_capability,
             },
         },
     )
@@ -1284,6 +1345,23 @@ def _peer_communication_resume_compatible(
     return not require_fingerprint or isinstance(batch_id, str) and bool(batch_id)
 
 
+def _shared_git_resume_compatible(
+    record: dict[str, Any], *, require_fingerprint: bool
+) -> bool:
+    recorded = (
+        record.get("shared_git_enabled"),
+        record.get("shared_git_version"),
+        record.get("shared_git_fingerprint"),
+    )
+    if recorded == (None, None, None):
+        return not require_fingerprint
+    return recorded == (
+        True,
+        SHARED_GIT_VERSION,
+        SHARED_GIT_FINGERPRINT,
+    )
+
+
 def _ensure_runtime_bootstrap_seed(bootstrap_seed_dir: Path) -> None:
     if bootstrap_seed_dir.exists():
         return
@@ -1293,98 +1371,55 @@ def _ensure_runtime_bootstrap_seed(bootstrap_seed_dir: Path) -> None:
     copy_seed_workspace(BUNDLED_BOOTSTRAP_SEED_DIR, bootstrap_seed_dir)
 
 
-def _snapshot_workspace_files(root: Path) -> dict[Path, tuple[int, int]]:
-    """Return file signatures keyed by relative path for all files under root."""
+def _snapshot_workspace_files(
+    root: Path, *, excluded_top_level: frozenset[str] = frozenset()
+) -> dict[Path, tuple[int, int]]:
+    """Return signatures for non-excluded files below a shared workspace."""
     snapshot: dict[Path, tuple[int, int]] = {}
     if not root.exists():
         return snapshot
-    for path in root.rglob("*"):
-        if not path.is_file():
+    for entry in root.iterdir():
+        if entry.name in excluded_top_level:
             continue
-        rel = path.relative_to(root)
-        stat = path.stat()
-        snapshot[rel] = (stat.st_size, stat.st_mtime_ns)
+        paths = [entry]
+        if entry.is_dir() and not entry.is_symlink():
+            paths.extend(entry.rglob("*"))
+        for path in paths:
+            if not path.is_file():
+                continue
+            rel = path.relative_to(root)
+            stat = path.stat()
+            snapshot[rel] = (stat.st_size, stat.st_mtime_ns)
     return snapshot
 
 
-def _shared_workspace_events(
-    *,
+def _cleanup_rollout_shared_writes(
+    root: Path,
     before: dict[Path, tuple[int, int]],
-    after: dict[Path, tuple[int, int]],
-    task_index: int,
-    task_id: str,
-    rollout_index: int,
-    rollout_username: str,
-    command_index: int,
-    command: str,
-    working_directory: str,
-) -> list[dict[str, Any]]:
-    events: list[dict[str, Any]] = []
-    timestamp = datetime.now(timezone.utc).isoformat()
-    for rel in sorted(set(before) | set(after)):
-        before_sig = before.get(rel)
-        after_sig = after.get(rel)
-        if before_sig == after_sig:
-            continue
-        if before_sig is None:
-            event = "created"
-        elif after_sig is None:
-            event = "deleted"
-        else:
-            event = "modified"
-        record: dict[str, Any] = {
-            "timestamp": timestamp,
-            "task_index": task_index,
-            "task_id": task_id,
-            "rollout_index": rollout_index,
-            "rollout_username": rollout_username,
-            "command_index": command_index,
-            "event": event,
-            "path": str(rel),
-            "working_directory": working_directory,
-            "command": command[:1000],
-        }
-        if before_sig is not None:
-            record["previous_size"] = before_sig[0]
-        if after_sig is not None:
-            record["size"] = after_sig[0]
-        events.append(record)
-    return events
-
-
-def _append_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
-    if not records:
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as fh:
-        for record in records:
-            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-
-def _append_shared_attribution(
     *,
-    durable_log_path: Path,
-    events: list[dict[str, Any]],
+    preserved_top_level: frozenset[str] = frozenset({SHARED_GIT_DIRNAME}),
 ) -> None:
-    if not events:
-        return
-    _append_jsonl(durable_log_path, events)
-
-
-def _cleanup_rollout_shared_writes(root: Path, before: dict[Path, tuple[int, int]]) -> None:
-    """Delete files created or modified in the shared workspace by a completed rollout batch."""
+    """Remove batch-local non-Git shared files without traversing the shared repository."""
     if not root.exists():
         return
 
-    after = _snapshot_workspace_files(root)
+    after = _snapshot_workspace_files(root, excluded_top_level=preserved_top_level)
     dirty_paths = [rel for rel, sig in after.items() if before.get(rel) != sig]
     for rel in dirty_paths:
+        if rel.parts and rel.parts[0] in preserved_top_level:
+            continue
         target = root / rel
         if target.exists() and target.is_file():
             target.unlink()
 
     # Best-effort cleanup of directories emptied by removing rollout files.
-    for directory in sorted((p for p in root.rglob("*") if p.is_dir()), key=lambda p: len(p.parts), reverse=True):
+    directories: list[Path] = []
+    for entry in root.iterdir():
+        if entry.name in preserved_top_level or not entry.is_dir() or entry.is_symlink():
+            continue
+        directories.extend(path for path in entry.rglob("*") if path.is_dir())
+        directories.append(entry)
+    for directory in sorted(directories, key=lambda path: len(path.parts), reverse=True):
         try:
             directory.rmdir()
         except OSError:
@@ -1628,8 +1663,6 @@ def run_worker(
     archive_repo_dir: Path,
     shared_workspace_dir: Path,
     worker_state_dir: Path,
-    shared_workspace_write_log: Path,
-    shared_workspace_lock: threading.Lock,
     task_index: int,
     task_id: str,
     rollout_index: int,
@@ -1873,42 +1906,13 @@ def run_worker(
                                 break
                     except Exception:
                         safe_wd = str(workdir)
-                    # A bash command can touch the shared workspace through absolute paths,
-                    # so serialize command execution while diffing for reliable attribution.
-                    with shared_workspace_lock:
-                        before_shared = _snapshot_workspace_files(shared_workspace_dir)
-                        tool_result = _run_bash_tool(
-                            command=command,
-                            working_directory=safe_wd,
-                            worker_state_dir=worker_state_dir,
-                            timeout_seconds=bash_timeout_seconds,
-                            rollout_username=rollout_username,
-                        )
-                        after_shared = _snapshot_workspace_files(shared_workspace_dir)
-                        shared_events = _shared_workspace_events(
-                            before=before_shared,
-                            after=after_shared,
-                            task_index=task_index,
-                            task_id=task_id,
-                            rollout_index=rollout_index,
-                            rollout_username=rollout_username,
-                            command_index=command_index,
-                            command=command,
-                            working_directory=safe_wd,
-                        )
-                        _append_shared_attribution(
-                            durable_log_path=shared_workspace_write_log,
-                            events=shared_events,
-                        )
-                        if shared_events:
-                            tool_result["shared_workspace_writes"] = [
-                                {
-                                    "event": event["event"],
-                                    "path": event["path"],
-                                    "rollout_username": rollout_username,
-                                }
-                                for event in shared_events
-                            ]
+                    tool_result = _run_bash_tool(
+                        command=command,
+                        working_directory=safe_wd,
+                        worker_state_dir=worker_state_dir,
+                        timeout_seconds=bash_timeout_seconds,
+                        rollout_username=rollout_username,
+                    )
                     if progress_callback is not None:
                         progress_callback(
                             "worker_tool_completed",
@@ -2217,105 +2221,65 @@ def save_parent_pool(parent_pool_path: Path, parent_pool: list[dict[str, Any]]) 
     )
 
 
-def create_archive_worktree(
-    *,
-    archive_repo_dir: Path,
-    worktree_root: Path,
-    branch: str,
-    git_lock: threading.Lock,
-) -> ArchiveWorktree:
-    """Create an isolated archive worktree for one parallel rollout."""
-    worktree_root.mkdir(parents=True, exist_ok=True)
-    worktree_path = (worktree_root / _sanitize_for_path(branch)).resolve()
-    shutil.rmtree(worktree_path, ignore_errors=True)
-
-    with git_lock:
-        base_commit = _run_git(["rev-parse", "HEAD"], archive_repo_dir).stdout.strip()
-        _run_git(["worktree", "prune"], archive_repo_dir, check=False)
-        _run_git(["branch", "-D", branch], archive_repo_dir, check=False)
-        _run_git(["worktree", "add", "-B", branch, str(worktree_path), "HEAD"], archive_repo_dir)
-
-    return ArchiveWorktree(path=worktree_path, branch=branch, base_commit=base_commit)
+def _validate_shared_git_repo(repo_path: Path) -> None:
+    if (
+        repo_path.is_symlink()
+        or (repo_path / ".git").is_symlink()
+        or not (repo_path / ".git").is_dir()
+    ):
+        raise RuntimeError(
+            f"shared Git repository must be an ordinary checkout with its own .git directory: {repo_path}"
+        )
+    probe = _run_git(["rev-parse", "--show-toplevel"], repo_path, check=False)
+    if probe.returncode != 0 or Path(probe.stdout.strip()).resolve() != repo_path.resolve():
+        raise RuntimeError(f"shared Git repository is invalid: {repo_path}")
 
 
-def finalize_archive_worktree(
-    *,
-    archive_repo_dir: Path,
-    worktree: ArchiveWorktree,
-    git_lock: threading.Lock,
+def _shared_git_repo_identity(repo_path: Path) -> tuple[tuple[int, int], tuple[int, int]]:
+    _validate_shared_git_repo(repo_path)
+    repo_stat = repo_path.stat()
+    git_stat = (repo_path / ".git").stat()
+    return (
+        (repo_stat.st_dev, repo_stat.st_ino),
+        (git_stat.st_dev, git_stat.st_ino),
+    )
+
+
+def _create_compatibility_symlink(link_path: Path, target_path: Path) -> None:
+    link_path.parent.mkdir(parents=True, exist_ok=True)
+    relative_target = os.path.relpath(target_path, link_path.parent)
+    temporary_link = link_path.with_name(f".{link_path.name}.shared-git-{os.getpid()}")
+    temporary_link.symlink_to(relative_target, target_is_directory=True)
+    os.replace(temporary_link, link_path)
+
+
+def ensure_shared_git_repo(
+    repo_path: Path, *, legacy_repo_path: Path | None = None
 ) -> dict[str, Any]:
-    """Keep committed archive changes, discard uncommitted edits, and remove the worktree."""
-    result: dict[str, Any] = {
-        "archive_worktree_dir": str(worktree.path),
-        "archive_branch": worktree.branch,
-        "archive_base_commit": worktree.base_commit,
-        "archive_head_commit": worktree.base_commit,
-        "archive_committed": False,
-        "archive_merged": False,
-    }
+    """Ensure the persistent shared checkout exists, migrating a legacy archive intact."""
+    repo_path = repo_path.resolve()
+    legacy_repo_path = (
+        legacy_repo_path.absolute() if legacy_repo_path is not None else None
+    )
+    repo_path.parent.mkdir(parents=True, exist_ok=True)
+    migrated = False
+    initialized = False
 
-    try:
-        if worktree.path.exists():
-            _run_git(["reset", "--hard", "HEAD"], worktree.path, check=False)
-            _run_git(["clean", "-fd"], worktree.path, check=False)
-            head_commit = _run_git(["rev-parse", "HEAD"], worktree.path).stdout.strip()
-            result["archive_head_commit"] = head_commit
-            result["archive_committed"] = head_commit != worktree.base_commit
-
-            with git_lock:
-                merge_failed = False
-                if result["archive_committed"]:
-                    merge = _run_git(["merge", "--no-ff", "--no-edit", worktree.branch], archive_repo_dir, check=False)
-                    if merge.returncode != 0:
-                        _run_git(["merge", "--abort"], archive_repo_dir, check=False)
-                        result["archive_merge_error"] = (merge.stderr or merge.stdout).strip()
-                        merge_failed = True
-                    else:
-                        result["archive_merged"] = True
-
-                _run_git(["worktree", "remove", "--force", str(worktree.path)], archive_repo_dir, check=False)
-                if not merge_failed:
-                    delete_args = ["branch", "-d" if result["archive_merged"] else "-D", worktree.branch]
-                    _run_git(delete_args, archive_repo_dir, check=False)
-    finally:
-        shutil.rmtree(worktree.path, ignore_errors=True)
-
-    return result
-
-
-def discard_archive_worktree(
-    *,
-    archive_repo_dir: Path,
-    worktree_root: Path,
-    branch: str,
-    git_lock: threading.Lock,
-) -> None:
-    """Remove an unfinalized rollout worktree and branch after setup failure."""
-
-    worktree_path = (worktree_root / _sanitize_for_path(branch)).resolve()
-    try:
-        with git_lock:
-            _run_git(
-                ["worktree", "remove", "--force", str(worktree_path)],
-                archive_repo_dir,
-                check=False,
+    if not repo_path.exists():
+        if legacy_repo_path is not None and legacy_repo_path.is_symlink():
+            raise RuntimeError(
+                f"legacy archive symlink is dangling or targets a missing repository: {legacy_repo_path}"
             )
-            _run_git(["worktree", "prune"], archive_repo_dir, check=False)
-            _run_git(["branch", "-D", branch], archive_repo_dir, check=False)
-    finally:
-        shutil.rmtree(worktree_path, ignore_errors=True)
-        try:
-            worktree_root.rmdir()
-        except OSError:
-            pass
+        if legacy_repo_path is not None and legacy_repo_path.exists():
+            _validate_shared_git_repo(legacy_repo_path.resolve())
+            legacy_repo_path.rename(repo_path)
+            _create_compatibility_symlink(legacy_repo_path, repo_path)
+            migrated = True
+        else:
+            repo_path.mkdir(parents=True)
+            initialized = True
 
-
-def ensure_local_world_repo(repo_path: Path) -> None:
-    """Ensure a local persistent git repo exists with an initial commit."""
-    repo_path.mkdir(parents=True, exist_ok=True)
-    git_dir = repo_path / ".git"
-
-    if not git_dir.exists():
+    if initialized:
         subprocess.run(
             ["git", "init", "-b", "main"],
             cwd=repo_path,
@@ -2324,37 +2288,28 @@ def ensure_local_world_repo(repo_path: Path) -> None:
             text=True,
         )
 
-    subprocess.run(
-        ["git", "config", "user.name", "metalanguage-bot"],
-        cwd=repo_path,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    subprocess.run(
-        ["git", "config", "user.email", "bot@local"],
-        cwd=repo_path,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
-    has_commits = subprocess.run(
-        ["git", "rev-parse", "--verify", "HEAD"],
-        cwd=repo_path,
-        capture_output=True,
-        text=True,
-    ).returncode == 0
-
-    if not has_commits:
+        subprocess.run(
+            ["git", "config", "user.name", "metalanguage-bot"],
+            cwd=repo_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.email", "bot@local"],
+            cwd=repo_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
         genesis_file = repo_path / "WORLD.md"
         genesis_file.write_text(
             (
                 "# Local world repo\n\n"
-                "Persistent local git substrate for rollout lineage.\n\n"
-                "Archive edits persist only when they are committed to git. Each rollout "
-                "gets a temporary archive worktree; at finalization, committed changes are "
-                "merged back and uncommitted edits are discarded.\n"
+                "Persistent shared Git checkout for rollout lineage. Its working tree, "
+                "index, current branch, and refs are shared directly during a batch. "
+                "Commits, refs, and the committed HEAD persist between batches; "
+                "uncommitted content is discarded after each batch.\n"
             ),
             encoding="utf-8",
         )
@@ -2372,6 +2327,187 @@ def ensure_local_world_repo(repo_path: Path) -> None:
             capture_output=True,
             text=True,
         )
+
+    _validate_shared_git_repo(repo_path)
+    if legacy_repo_path is not None:
+        if legacy_repo_path.is_symlink():
+            if legacy_repo_path.resolve() != repo_path:
+                raise RuntimeError(
+                    f"legacy archive symlink does not target the shared Git repository: {legacy_repo_path}"
+                )
+        elif legacy_repo_path.exists():
+            if legacy_repo_path.resolve() != repo_path:
+                raise RuntimeError(
+                    f"legacy archive path conflicts with the shared Git repository: {legacy_repo_path}"
+                )
+        else:
+            _create_compatibility_symlink(legacy_repo_path, repo_path)
+
+    return {
+        "path": str(repo_path),
+        "legacy_path": str(legacy_repo_path) if legacy_repo_path is not None else None,
+        "migrated": migrated,
+        "initialized": initialized,
+    }
+
+
+def _shared_git_operation_state(repo_path: Path) -> str | None:
+    """Identify an interrupted Git integration operation without changing it."""
+    git_dir = repo_path / ".git"
+    if (git_dir / "rebase-merge").exists():
+        return "rebase"
+    rebase_apply = git_dir / "rebase-apply"
+    if rebase_apply.exists():
+        return "am" if (rebase_apply / "applying").exists() else "rebase"
+
+    marker_states = [
+        state
+        for marker, state in (
+            ("CHERRY_PICK_HEAD", "cherry-pick"),
+            ("REVERT_HEAD", "revert"),
+            ("MERGE_HEAD", "merge"),
+        )
+        if (git_dir / marker).exists()
+    ]
+    if len(marker_states) > 1:
+        raise RuntimeError(
+            "shared Git cleanup found conflicting integration-operation markers"
+        )
+    if marker_states:
+        return marker_states[0]
+
+    sequencer = git_dir / "sequencer"
+    if not sequencer.exists():
+        return None
+    try:
+        todo_lines = (sequencer / "todo").read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        raise RuntimeError(
+            "shared Git cleanup found an unreadable sequencer operation"
+        ) from None
+    commands = [
+        line.split(maxsplit=1)[0]
+        for line in todo_lines
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    if commands and set(commands) <= {"pick"}:
+        return "cherry-pick"
+    if commands and set(commands) <= {"revert"}:
+        return "revert"
+    raise RuntimeError(
+        "shared Git cleanup found an unrecognized sequencer operation"
+    )
+
+
+def _checked_shared_git_command(repo_path: Path, args: list[str]) -> str:
+    result = _run_git(args, repo_path, check=False)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        if len(detail) > 1000:
+            detail = detail[:1000] + "..."
+        raise RuntimeError(
+            f"shared Git cleanup command failed ({' '.join(args)}): "
+            f"{detail or f'exit {result.returncode}'}"
+        )
+    return result.stdout
+
+
+def clean_shared_git_repo(
+    repo_path: Path,
+    *,
+    shared_workspace_dir: Path,
+    expected_identity: tuple[tuple[int, int], tuple[int, int]] | None = None,
+) -> dict[str, Any]:
+    """Discard batch changes from the exact shared checkout without changing refs."""
+    workspace = shared_workspace_dir.resolve(strict=True)
+    candidate = Path(os.path.abspath(repo_path))
+    expected = workspace / SHARED_GIT_DIRNAME
+    if candidate != expected or candidate.is_symlink():
+        raise RuntimeError(
+            "shared Git cleanup target is not the canonical shared archive"
+        )
+    repo = candidate.resolve(strict=True)
+    if repo != expected or repo in {Path("/"), Path.home().resolve(), workspace}:
+        raise RuntimeError("shared Git cleanup target is unsafe")
+    current_identity = _shared_git_repo_identity(repo)
+    if expected_identity is not None and current_identity != expected_identity:
+        raise RuntimeError(
+            "shared Git cleanup target no longer matches the checkout exposed to rollouts"
+        )
+
+    head_before = _checked_shared_git_command(
+        repo, ["rev-parse", "--verify", "HEAD"]
+    ).strip()
+    branch_probe = _run_git(["symbolic-ref", "-q", "HEAD"], repo, check=False)
+    if branch_probe.returncode not in {0, 1}:
+        raise RuntimeError("shared Git cleanup could not inspect the current branch")
+    branch_before = branch_probe.stdout.strip() if branch_probe.returncode == 0 else None
+    refs_before = _checked_shared_git_command(
+        repo,
+        ["for-each-ref", "--sort=refname", "--format=%(refname) %(objectname)"],
+    )
+    status_before = _checked_shared_git_command(
+        repo,
+        ["status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching"],
+    )
+
+    operation_state = _shared_git_operation_state(repo)
+    if operation_state in {"rebase", "am", "cherry-pick", "revert"}:
+        quit_commands = {
+            "rebase": ["rebase", "--quit"],
+            "am": ["am", "--quit"],
+            "cherry-pick": ["cherry-pick", "--quit"],
+            "revert": ["revert", "--quit"],
+        }
+        _checked_shared_git_command(repo, quit_commands[operation_state])
+        remaining_state = _shared_git_operation_state(repo)
+        if remaining_state is not None:
+            raise RuntimeError(
+                "shared Git cleanup could not clear the integration-operation state"
+            )
+    elif operation_state != "merge" and operation_state is not None:
+        raise RuntimeError("shared Git cleanup found an unsupported operation state")
+
+    _checked_shared_git_command(repo, ["reset", "--hard", "HEAD"])
+    _checked_shared_git_command(repo, ["clean", "-ffdx"])
+
+    if _shared_git_operation_state(repo) is not None:
+        raise RuntimeError("shared Git cleanup left an integration operation active")
+    status_after = _checked_shared_git_command(
+        repo,
+        ["status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching"],
+    )
+    if status_after:
+        raise RuntimeError("shared Git cleanup left the checkout dirty")
+    head_after = _checked_shared_git_command(
+        repo, ["rev-parse", "--verify", "HEAD"]
+    ).strip()
+    branch_probe_after = _run_git(["symbolic-ref", "-q", "HEAD"], repo, check=False)
+    if branch_probe_after.returncode not in {0, 1}:
+        raise RuntimeError("shared Git cleanup could not verify the current branch")
+    branch_after = (
+        branch_probe_after.stdout.strip()
+        if branch_probe_after.returncode == 0
+        else None
+    )
+    refs_after = _checked_shared_git_command(
+        repo,
+        ["for-each-ref", "--sort=refname", "--format=%(refname) %(objectname)"],
+    )
+    if (head_after, branch_after, refs_after) != (
+        head_before,
+        branch_before,
+        refs_before,
+    ):
+        raise RuntimeError("shared Git cleanup changed HEAD, branch, or refs")
+
+    return {
+        "path": str(repo),
+        "operation_state": operation_state,
+        "discarded_status_entry_count": len(status_before.splitlines()),
+        "head": head_after,
+        "branch": branch_after,
+    }
 
 
 def _positive_int_argument(value: str) -> int:
@@ -2538,7 +2674,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--archive-repo-dir",
         default="archive/world_repo",
-        help="Durable cross-lineage Git archive exposed to every rollout.",
+        help=(
+            "Legacy durable-repository path retained as a compatibility symlink to the "
+            "single shared checkout under --rollout-temp-root/shared_workspace/archive."
+        ),
     )
     parser.add_argument(
         "--codex-home",
@@ -2975,7 +3114,9 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
     task_store_dir = _resolve_runtime_path(args.task_store_dir, runtime_root, "--task-store-dir")
     problem_queue_path = _resolve_runtime_path(args.problem_queue, runtime_root, "--problem-queue")
     arc_benchmark_state_path = runtime_root / "logs" / "arc_agi" / "benchmark_state.json"
-    archive_repo_dir = _resolve_runtime_path(args.archive_repo_dir, runtime_root, "--archive-repo-dir")
+    legacy_archive_repo_dir = _resolve_runtime_path(
+        args.archive_repo_dir, runtime_root, "--archive-repo-dir"
+    )
     bootstrap_seed_dir = _resolve_runtime_path(args.bootstrap_seed_dir, runtime_root, "--bootstrap-seed-dir")
     benchmark_events_path = (
         runtime_root / "logs" / "benchmark_events.jsonl"
@@ -2992,17 +3133,11 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
     )
     _ensure_runtime_bootstrap_seed(bootstrap_seed_dir)
 
-    ensure_local_world_repo(archive_repo_dir)
-    archive_git_lock = threading.Lock()
-
     rollout_root.mkdir(parents=True, exist_ok=True)
-    archive_worktree_root = rollout_root / "archive_worktrees"
-
     parent_pool_path = rollout_root / "latest_parent_pool.json"
     shared_workspace_dir = rollout_root / "shared_workspace"
     shared_workspace_dir.mkdir(parents=True, exist_ok=True)
-    shared_workspace_write_log = rollout_root / "shared_workspace_writes.jsonl"
-    shared_workspace_lock = threading.Lock()
+    shared_git_repo_dir = shared_workspace_dir / SHARED_GIT_DIRNAME
     progress_log_lock = threading.Lock()
 
     parent_pool: list[dict[str, Any]] = []
@@ -3076,6 +3211,15 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                     "completed earlier tasks remain valid, but this partial batch must be resumed with its "
                     "recorded capability or restarted explicitly"
                 )
+            if not _shared_git_resume_compatible(
+                record,
+                require_fingerprint=True,
+            ):
+                raise RuntimeError(
+                    "partial task resume is incompatible with the current shared Git "
+                    "capability; completed earlier tasks remain valid, but this partial "
+                    "batch must be restarted explicitly"
+                )
             rollout_idx = record.get("rollout_index")
             inherited_prompt = None
             if record.get("bootstrap_seed_used") is not True:
@@ -3115,7 +3259,12 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
     # Do not rewrite a legacy runtime marker until every partial task has been
     # proven compatible. Completed historical batches remain valid and the
     # next fresh batch then records the current delivery and instruction capabilities.
-    _record_current_peer_communication_capability(runtime_root)
+    _record_current_runtime_capabilities(runtime_root)
+    ensure_shared_git_repo(
+        shared_git_repo_dir,
+        legacy_repo_path=legacy_archive_repo_dir,
+    )
+    shared_git_repo_identity = _shared_git_repo_identity(shared_git_repo_dir)
 
     existing_by_task: dict[int, dict[int, dict[str, Any]]] = {}
     for rec in existing_records:
@@ -3412,19 +3561,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 ),
                 bootstrap_reinitialized=bootstrap_reinitialized,
             )
-            archive_worktree = create_archive_worktree(
-                archive_repo_dir=archive_repo_dir,
-                worktree_root=archive_worktree_root,
-                branch=f"rollout/{task_index:06d}-{rollout_index:03d}-{_sanitize_for_path(task_id)}",
-                git_lock=archive_git_lock,
-            )
-            archive_result: dict[str, Any] = {}
-            _progress(
-                "archive_worktree_created",
-                archive_worktree_dir=str(archive_worktree.path),
-                archive_branch=archive_worktree.branch,
-            )
-
             temp_dir = fixed_temp_dir / f"{task_index:06d}" / f"rollout_{rollout_index:03d}"
             shutil.rmtree(temp_dir, ignore_errors=True)
             temp_dir.mkdir(parents=True, exist_ok=True)
@@ -3461,7 +3597,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             seed_output_dir.mkdir(parents=True, exist_ok=True)
             archive_link = temp_dir / "archive"
             shared_workspace_link = temp_dir / "shared_workspace"
-            _replace_with_symlink(archive_link, archive_worktree.path)
+            _replace_with_symlink(archive_link, shared_git_repo_dir)
             _replace_with_symlink(shared_workspace_link, shared_workspace_dir)
 
             runtime_file = temp_dir / "runtime.md"
@@ -3480,9 +3616,8 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 model=args.model,
                 workdir=temp_dir,
                 seed_output_dir=seed_output_dir,
-                archive_repo_dir=archive_worktree.path,
+                archive_repo_dir=shared_git_repo_dir,
                 shared_workspace_dir=shared_workspace_dir,
-                shared_workspace_write_log=shared_workspace_write_log,
                 spawn_slots_path=spawn_slots_path,
                 spawn_slots_dir=spawn_slots_dir,
                 population_size=args.num_rollouts,
@@ -3585,6 +3720,8 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 ),
                 **batch_reporting,
                 seed_output_dir=str(seed_output_dir),
+                shared_git_repo_dir=str(shared_git_repo_dir),
+                shared_git_fingerprint=SHARED_GIT_FINGERPRINT,
                 rollout_control_dir=(
                     str(rollout_control_dir)
                     if args.worker_backend in {"codex", "opencode"}
@@ -3645,142 +3782,118 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             )
 
             try:
-                try:
-                    if args.worker_backend == "codex":
-                        if codex_runner_bin is None:
-                            raise RuntimeError("Codex runner binary was not initialized.")
-                        worker_result = run_codex_worker(
-                            runner_bin=codex_runner_bin,
-                            model=args.model,
-                            workdir=temp_dir,
-                            control_dir=rollout_control_dir,
-                            worker_state_dir=rollout_state_dir,
-                            codex_home=codex_home,
-                            seed_output_dir=seed_output_dir,
-                            archive_repo_dir=archive_worktree.path,
-                            archive_git_dir=archive_repo_dir / ".git",
-                            shared_workspace_dir=shared_workspace_dir,
-                            rollout_username=rollout_username,
-                            timeout_seconds=args.worker_timeout_seconds,
-                            sandbox_mode=args.codex_sandbox_mode,
-                            initial_user_text=rollout_initial_prompt,
-                            base_instructions=codex_base_instructions,
-                            continuation_context_path=continuation_context_path,
-                            benchmark_mcp_servers=rollout_benchmark.mcp_servers,
-                            sensitive_mcp_tools=rollout_benchmark.sensitive_mcp_tools,
-                            progress_callback=_progress,
+                if args.worker_backend == "codex":
+                    if codex_runner_bin is None:
+                        raise RuntimeError("Codex runner binary was not initialized.")
+                    worker_result = run_codex_worker(
+                        runner_bin=codex_runner_bin,
+                        model=args.model,
+                        workdir=temp_dir,
+                        control_dir=rollout_control_dir,
+                        worker_state_dir=rollout_state_dir,
+                        codex_home=codex_home,
+                        seed_output_dir=seed_output_dir,
+                        archive_repo_dir=shared_git_repo_dir,
+                        archive_git_dir=shared_git_repo_dir / ".git",
+                        shared_workspace_dir=shared_workspace_dir,
+                        rollout_username=rollout_username,
+                        timeout_seconds=args.worker_timeout_seconds,
+                        sandbox_mode=args.codex_sandbox_mode,
+                        initial_user_text=rollout_initial_prompt,
+                        base_instructions=codex_base_instructions,
+                        continuation_context_path=continuation_context_path,
+                        benchmark_mcp_servers=rollout_benchmark.mcp_servers,
+                        sensitive_mcp_tools=rollout_benchmark.sensitive_mcp_tools,
+                        progress_callback=_progress,
+                    )
+                elif args.worker_backend == "opencode":
+                    if (
+                        opencode_worker_script is None
+                        or opencode_bun_bin is None
+                        or opencode_bin is None
+                    ):
+                        raise RuntimeError(
+                            "OpenCode worker, Bun, and CLI were not initialized."
                         )
-                    elif args.worker_backend == "opencode":
-                        if (
-                            opencode_worker_script is None
-                            or opencode_bun_bin is None
-                            or opencode_bin is None
-                        ):
-                            raise RuntimeError(
-                                "OpenCode worker, Bun, and CLI were not initialized."
+                    worker_result = run_opencode_worker(
+                        worker_script=opencode_worker_script,
+                        bun_bin=opencode_bun_bin,
+                        opencode_bin=opencode_bin,
+                        model=args.model,
+                        workdir=temp_dir,
+                        control_dir=rollout_control_dir,
+                        worker_state_dir=rollout_state_dir,
+                        timeout_seconds=args.worker_timeout_seconds,
+                        initial_user_text=rollout_initial_prompt,
+                        system_instructions=opencode_system_instructions,
+                        continuation_context_path=continuation_context_path,
+                        benchmark_mcp_servers=rollout_benchmark.mcp_servers,
+                        sensitive_mcp_tools=rollout_benchmark.sensitive_mcp_tools,
+                        auth_file=opencode_auth_file,
+                        agent=args.opencode_agent,
+                        variant=args.opencode_variant,
+                        allowed_versions=opencode_allowed_versions,
+                        allowed_bun_versions=opencode_allowed_bun_versions,
+                        startup_timeout_seconds=(
+                            args.opencode_server_startup_timeout_seconds
+                        ),
+                        provider_env_names=opencode_provider_env_names,
+                        provider_environment=opencode_provider_environment,
+                        custom_provider=opencode_custom_provider,
+                        sandbox_mode=(
+                            "bubblewrap"
+                            if args.opencode_sandbox_mode == "bubblewrap"
+                            else "none"
+                        ),
+                        sandbox_network=args.opencode_network_mode,
+                        bubblewrap_bin=opencode_bubblewrap_bin,
+                        sandbox_read_only_roots=tuple(
+                            path
+                            for path in (seed_output_dir,)
+                            if path.exists()
+                        ),
+                        sandbox_read_only_mounts=opencode_credential_mounts,
+                        sandbox_writable_roots=tuple(
+                            path
+                            for path in (
+                                shared_git_repo_dir,
+                                shared_git_repo_dir / ".git",
+                                shared_workspace_dir,
                             )
-                        worker_result = run_opencode_worker(
-                            worker_script=opencode_worker_script,
-                            bun_bin=opencode_bun_bin,
-                            opencode_bin=opencode_bin,
-                            model=args.model,
-                            workdir=temp_dir,
-                            control_dir=rollout_control_dir,
-                            worker_state_dir=rollout_state_dir,
-                            timeout_seconds=args.worker_timeout_seconds,
-                            initial_user_text=rollout_initial_prompt,
-                            system_instructions=opencode_system_instructions,
-                            continuation_context_path=continuation_context_path,
-                            benchmark_mcp_servers=rollout_benchmark.mcp_servers,
-                            sensitive_mcp_tools=rollout_benchmark.sensitive_mcp_tools,
-                            auth_file=opencode_auth_file,
-                            agent=args.opencode_agent,
-                            variant=args.opencode_variant,
-                            allowed_versions=opencode_allowed_versions,
-                            allowed_bun_versions=opencode_allowed_bun_versions,
-                            startup_timeout_seconds=(
-                                args.opencode_server_startup_timeout_seconds
-                            ),
-                            provider_env_names=opencode_provider_env_names,
-                            provider_environment=opencode_provider_environment,
-                            custom_provider=opencode_custom_provider,
-                            sandbox_mode=(
-                                "bubblewrap"
-                                if args.opencode_sandbox_mode == "bubblewrap"
-                                else "none"
-                            ),
-                            sandbox_network=args.opencode_network_mode,
-                            bubblewrap_bin=opencode_bubblewrap_bin,
-                            sandbox_read_only_roots=tuple(
-                                path
-                                for path in (
-                                    seed_output_dir,
-                                )
-                                if path.exists()
-                            ),
-                            sandbox_read_only_mounts=opencode_credential_mounts,
-                            sandbox_writable_roots=tuple(
-                                path
-                                for path in (
-                                    archive_worktree.path,
-                                    archive_repo_dir / ".git",
-                                    shared_workspace_dir,
-                                )
-                                if path is not None and path.exists()
-                            ),
-                            sandbox_masked_paths=(
-                                (DEFAULT_ENV_PATH,) if DEFAULT_ENV_PATH.is_file() else ()
-                            ),
-                            progress_callback=_progress,
-                        )
-                    else:
-                        if api_key is None:
-                            raise RuntimeError("OPENROUTER_API_KEY is required for the OpenRouter backend.")
-                        worker_result = run_worker(
-                            api_key=api_key,
-                            model=args.model,
-                            workdir=temp_dir,
-                            seed_output_dir=seed_output_dir,
-                            archive_repo_dir=archive_worktree.path,
-                            shared_workspace_dir=shared_workspace_dir,
-                            worker_state_dir=rollout_state_dir,
-                            shared_workspace_write_log=shared_workspace_write_log,
-                            shared_workspace_lock=shared_workspace_lock,
-                            task_index=task_index,
-                            task_id=task_id,
-                            rollout_index=rollout_index,
-                            rollout_username=rollout_username,
-                            timeout_seconds=args.worker_timeout_seconds,
-                            bash_timeout_seconds=args.bash_timeout_seconds,
-                            openrouter_max_retries=args.openrouter_max_retries,
-                            continuation_context=continuation_context,
-                            benchmark_driver=benchmark_driver,
-                            rollout_benchmark=rollout_benchmark,
-                            peer_communication_store=peer_communication_store,
-                            initial_user_text=rollout_initial_prompt,
-                            instructions=rollout_system_instructions,
-                            progress_callback=_progress,
-                        )
-                except BaseException as exc:
-                    worker_result = WorkerResult(
-                        final_text="",
-                        status="error",
-                        stop_reason=type(exc).__name__,
-                        error_code=None,
-                        error_message=str(exc),
+                            if path.exists()
+                        ),
+                        sandbox_masked_paths=(
+                            (DEFAULT_ENV_PATH,) if DEFAULT_ENV_PATH.is_file() else ()
+                        ),
+                        progress_callback=_progress,
                     )
-                finally:
-                    archive_result = finalize_archive_worktree(
-                        archive_repo_dir=archive_repo_dir,
-                        worktree=archive_worktree,
-                        git_lock=archive_git_lock,
+                else:
+                    if api_key is None:
+                        raise RuntimeError("OPENROUTER_API_KEY is required for the OpenRouter backend.")
+                    worker_result = run_worker(
+                        api_key=api_key,
+                        model=args.model,
+                        workdir=temp_dir,
+                        seed_output_dir=seed_output_dir,
+                        archive_repo_dir=shared_git_repo_dir,
+                        shared_workspace_dir=shared_workspace_dir,
+                        worker_state_dir=rollout_state_dir,
+                        task_index=task_index,
+                        task_id=task_id,
+                        rollout_index=rollout_index,
+                        rollout_username=rollout_username,
+                        timeout_seconds=args.worker_timeout_seconds,
+                        bash_timeout_seconds=args.bash_timeout_seconds,
+                        openrouter_max_retries=args.openrouter_max_retries,
+                        continuation_context=continuation_context,
+                        benchmark_driver=benchmark_driver,
+                        rollout_benchmark=rollout_benchmark,
+                        peer_communication_store=peer_communication_store,
+                        initial_user_text=rollout_initial_prompt,
+                        instructions=rollout_system_instructions,
+                        progress_callback=_progress,
                     )
-                    _progress("archive_finalized", **archive_result)
             except BaseException as exc:
-                archive_result = {
-                    **archive_result,
-                    "archive_finalize_error": f"{type(exc).__name__}: {exc}",
-                }
                 worker_result = WorkerResult(
                     final_text="",
                     status="error",
@@ -3959,8 +4072,11 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                     else {}
                 ),
                 **batch_reporting,
-                "shared_workspace_write_log": str(shared_workspace_write_log),
                 "progress_log": str(progress_log_path),
+                "shared_git_enabled": True,
+                "shared_git_version": SHARED_GIT_VERSION,
+                "shared_git_fingerprint": SHARED_GIT_FINGERPRINT,
+                "shared_git_repo_dir": str(shared_git_repo_dir),
                 "dataset_name": args.dataset_name if args.benchmark == "supergpqa" else None,
                 "split": args.split if args.benchmark == "supergpqa" else None,
                 "difficulty_filter": (
@@ -4127,7 +4243,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 "dataset_cache_dir": (
                     str(dataset_cache_dir) if args.benchmark == "supergpqa" else None
                 ),
-                **archive_result,
             }
             if benchmark_outcome is not None:
                 record.update(benchmark_outcome.run_record)
@@ -4163,7 +4278,10 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 continue
             missing_rollout_indices.append(rollout_index)
 
-        shared_snapshot = _snapshot_workspace_files(shared_workspace_dir)
+        shared_snapshot = _snapshot_workspace_files(
+            shared_workspace_dir,
+            excluded_top_level=frozenset({SHARED_GIT_DIRNAME}),
+        )
         results: list[RolloutResult] = []
         if missing_rollout_indices:
             with (
@@ -4188,15 +4306,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                         try:
                             results.append(future.result())
                         except BaseException as exc:
-                            discard_archive_worktree(
-                                archive_repo_dir=archive_repo_dir,
-                                worktree_root=archive_worktree_root,
-                                branch=(
-                                    f"rollout/{task_index:06d}-{rollout_index:03d}-"
-                                    f"{_sanitize_for_path(task_id)}"
-                                ),
-                                git_lock=archive_git_lock,
-                            )
                             append_progress_log(
                                 progress_log_path,
                                 progress_log_lock,
@@ -4266,7 +4375,10 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                                             else None
                                         ),
                                         **batch_reporting,
-                                        "shared_workspace_write_log": str(shared_workspace_write_log),
+                                        "shared_git_enabled": True,
+                                        "shared_git_version": SHARED_GIT_VERSION,
+                                        "shared_git_fingerprint": SHARED_GIT_FINGERPRINT,
+                                        "shared_git_repo_dir": str(shared_git_repo_dir),
                                         "progress_log": str(progress_log_path),
                                         "dataset_name": (
                                             args.dataset_name
@@ -4451,7 +4563,54 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                                     error=str(exc),
                                 )
                             )
-        _cleanup_rollout_shared_writes(shared_workspace_dir, shared_snapshot)
+        try:
+            shared_git_cleanup = clean_shared_git_repo(
+                shared_git_repo_dir,
+                shared_workspace_dir=shared_workspace_dir,
+                expected_identity=shared_git_repo_identity,
+            )
+        except Exception as exc:
+            append_progress_log(
+                progress_log_path,
+                progress_log_lock,
+                {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "event": "shared_git_cleanup_failed",
+                    "generation": args.generation,
+                    "seed": args.seed,
+                    "task_index": task_index,
+                    "task_id": task_id,
+                    "problem_uid": problem_uid,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+            )
+            raise RuntimeError(
+                f"Shared Git cleanup failed after all rollouts stopped: {exc}"
+            ) from exc
+        append_progress_log(
+            progress_log_path,
+            progress_log_lock,
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "event": "shared_git_cleanup_completed",
+                "generation": args.generation,
+                "seed": args.seed,
+                "task_index": task_index,
+                "task_id": task_id,
+                "problem_uid": problem_uid,
+                "shared_git_version": SHARED_GIT_VERSION,
+                "operation_state": shared_git_cleanup["operation_state"],
+                "discarded_status_entry_count": shared_git_cleanup[
+                    "discarded_status_entry_count"
+                ],
+            },
+        )
+        _cleanup_rollout_shared_writes(
+            shared_workspace_dir,
+            shared_snapshot,
+            preserved_top_level=frozenset({SHARED_GIT_DIRNAME}),
+        )
 
         for result in sorted(results, key=lambda item: item.rollout_index):
             append_run_log(runs_log_path, result.record)
