@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import json
-import subprocess
 import tempfile
-import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -19,9 +17,6 @@ from main_loop import (
     _spawn_child_continuation,
     _resolve_spawn_workspace_dir,
     _spawn_item_ref,
-    create_archive_worktree,
-    discard_archive_worktree,
-    ensure_local_world_repo,
 )
 from utils.benchmark_driver import (
     BenchmarkDriver,
@@ -484,7 +479,7 @@ class BenchmarkDriverTests(unittest.TestCase):
                 BenchmarkItemRef("arc-instance-42", "arc-task", 7, 9).to_metadata(),
             )
 
-    def test_prepare_failure_discards_archive_worktree_and_top_level_closes_driver(self) -> None:
+    def test_top_level_closes_driver_after_failure(self) -> None:
         class FailingDriver:
             def __init__(self) -> None:
                 self.close_calls = 0
@@ -496,45 +491,7 @@ class BenchmarkDriverTests(unittest.TestCase):
                 self.close_calls += 1
 
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            archive = root / "archive"
-            worktrees = root / "worktrees"
-            lock = threading.Lock()
-            ensure_local_world_repo(archive)
-            branch = "rollout/fixture-prepare-failure"
-            worktree = create_archive_worktree(
-                archive_repo_dir=archive,
-                worktree_root=worktrees,
-                branch=branch,
-                git_lock=lock,
-            )
             driver = FailingDriver()
-            try:
-                driver.prepare_rollout()
-            except RuntimeError:
-                discard_archive_worktree(
-                    archive_repo_dir=archive,
-                    worktree_root=worktrees,
-                    branch=branch,
-                    git_lock=lock,
-                )
-            self.assertFalse(worktree.path.exists())
-            branches = subprocess.run(
-                ["git", "branch", "--list", branch],
-                cwd=archive,
-                text=True,
-                capture_output=True,
-                check=True,
-            ).stdout
-            self.assertEqual(branches.strip(), "")
-            worktree_listing = subprocess.run(
-                ["git", "worktree", "list", "--porcelain"],
-                cwd=archive,
-                text=True,
-                capture_output=True,
-                check=True,
-            ).stdout
-            self.assertNotIn(str(worktree.path), worktree_listing)
 
             def fail_after_driver_registration(active_drivers):
                 active_drivers.append(driver)

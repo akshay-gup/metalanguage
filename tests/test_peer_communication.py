@@ -18,14 +18,25 @@ from unittest.mock import patch
 import utils.peer_communication as peer
 from main_loop import (
     CANONICAL_BOOTSTRAP_README_SHA256,
+    INTERIM_CANONICAL_BOOTSTRAP_README_SHA256,
+    INTERIM_ROLLOUT_SYSTEM_INSTRUCTIONS_FINGERPRINT,
+    INTERIM_ROLLOUT_SYSTEM_INSTRUCTIONS_VERSION,
+    LEGACY_CANONICAL_BOOTSTRAP_README_SHA256,
+    LEGACY_SHARED_GIT_FINGERPRINT,
+    LEGACY_SHARED_GIT_VERSION,
+    LEGACY_ROLLOUT_SYSTEM_INSTRUCTIONS_FINGERPRINT,
+    LEGACY_ROLLOUT_SYSTEM_INSTRUCTIONS_VERSION,
     ROLLOUT_SYSTEM_INSTRUCTIONS_CAPABILITY_NAME,
     ROLLOUT_SYSTEM_INSTRUCTIONS_FINGERPRINT,
     ROLLOUT_SYSTEM_INSTRUCTIONS_MODE,
     ROLLOUT_SYSTEM_INSTRUCTIONS_VERSION,
+    SHARED_GIT_CAPABILITY_NAME,
+    SHARED_GIT_FINGERPRINT,
+    SHARED_GIT_VERSION,
     _claim_runtime_benchmark,
     _format_runtime_markdown,
     _peer_communication_resume_compatible,
-    _record_current_peer_communication_capability,
+    _record_current_runtime_capabilities,
     canonical_rollout_system_instructions,
     run_child_tool_handler,
     run_worker,
@@ -676,7 +687,7 @@ class PeerCommunicationTests(unittest.TestCase):
             identity_path = identity_root / "runtime_benchmark.json"
             identity_path.write_text(json.dumps({"format": "metalanguage-runtime-benchmark", "version": 1, "benchmark": "open-ended"}))
             _claim_runtime_benchmark(identity_root, "open-ended")
-            _record_current_peer_communication_capability(identity_root)
+            _record_current_runtime_capabilities(identity_root)
             capability = json.loads(identity_path.read_text())["capabilities"][PEER_COMMUNICATION_CAPABILITY_NAME]
             self.assertEqual(capability["version"], PEER_COMMUNICATION_VERSION)
             instruction_capability = json.loads(identity_path.read_text())[
@@ -692,6 +703,17 @@ class PeerCommunicationTests(unittest.TestCase):
                     "sha256": CANONICAL_BOOTSTRAP_README_SHA256,
                 },
             )
+            shared_git_capability = json.loads(identity_path.read_text())[
+                "capabilities"
+            ][SHARED_GIT_CAPABILITY_NAME]
+            self.assertEqual(
+                shared_git_capability,
+                {
+                    "enabled": True,
+                    "version": SHARED_GIT_VERSION,
+                    "fingerprint": SHARED_GIT_FINGERPRINT,
+                },
+            )
             identity = json.loads(identity_path.read_text())
             identity["capabilities"][PEER_COMMUNICATION_CAPABILITY_NAME] = {
                 "enabled": True,
@@ -702,9 +724,48 @@ class PeerCommunicationTests(unittest.TestCase):
             _claim_runtime_benchmark(identity_root, "open-ended")
             still_legacy = json.loads(identity_path.read_text())["capabilities"][PEER_COMMUNICATION_CAPABILITY_NAME]
             self.assertEqual(still_legacy["version"], LEGACY_DISTINCT_NAMES_VERSION)
-            _record_current_peer_communication_capability(identity_root)
+            _record_current_runtime_capabilities(identity_root)
             upgraded = json.loads(identity_path.read_text())["capabilities"][PEER_COMMUNICATION_CAPABILITY_NAME]
             self.assertEqual(upgraded["version"], PEER_COMMUNICATION_VERSION)
+
+            identity = json.loads(identity_path.read_text())
+            identity["capabilities"][ROLLOUT_SYSTEM_INSTRUCTIONS_CAPABILITY_NAME] = {
+                "enabled": True,
+                "version": INTERIM_ROLLOUT_SYSTEM_INSTRUCTIONS_VERSION,
+                "fingerprint": INTERIM_ROLLOUT_SYSTEM_INSTRUCTIONS_FINGERPRINT,
+                "mode": ROLLOUT_SYSTEM_INSTRUCTIONS_MODE,
+                "sha256": INTERIM_CANONICAL_BOOTSTRAP_README_SHA256,
+            }
+            identity["capabilities"][SHARED_GIT_CAPABILITY_NAME] = {
+                "enabled": True,
+                "version": LEGACY_SHARED_GIT_VERSION,
+                "fingerprint": LEGACY_SHARED_GIT_FINGERPRINT,
+            }
+            identity_path.write_text(json.dumps(identity))
+            _claim_runtime_benchmark(identity_root, "open-ended")
+            _record_current_runtime_capabilities(identity_root)
+            upgraded_capabilities = json.loads(identity_path.read_text())["capabilities"]
+            self.assertEqual(
+                upgraded_capabilities[ROLLOUT_SYSTEM_INSTRUCTIONS_CAPABILITY_NAME][
+                    "version"
+                ],
+                ROLLOUT_SYSTEM_INSTRUCTIONS_VERSION,
+            )
+            self.assertEqual(
+                upgraded_capabilities[SHARED_GIT_CAPABILITY_NAME]["version"],
+                SHARED_GIT_VERSION,
+            )
+
+            identity = json.loads(identity_path.read_text())
+            identity["capabilities"][ROLLOUT_SYSTEM_INSTRUCTIONS_CAPABILITY_NAME] = {
+                "enabled": True,
+                "version": LEGACY_ROLLOUT_SYSTEM_INSTRUCTIONS_VERSION,
+                "fingerprint": LEGACY_ROLLOUT_SYSTEM_INSTRUCTIONS_FINGERPRINT,
+                "mode": ROLLOUT_SYSTEM_INSTRUCTIONS_MODE,
+                "sha256": LEGACY_CANONICAL_BOOTSTRAP_README_SHA256,
+            }
+            identity_path.write_text(json.dumps(identity))
+            _claim_runtime_benchmark(identity_root, "open-ended")
 
     def test_all_benchmarks_and_openrouter_use_only_send_with_automatic_delivery(self) -> None:
         class Driver:
@@ -744,8 +805,6 @@ class PeerCommunicationTests(unittest.TestCase):
                         archive_repo_dir=root / "archive",
                         shared_workspace_dir=root / "shared",
                         worker_state_dir=root / "state",
-                        shared_workspace_write_log=root / "writes.jsonl",
-                        shared_workspace_lock=threading.Lock(),
                         task_index=index,
                         task_id=f"task-{index}",
                         rollout_index=1,
@@ -815,8 +874,9 @@ class PeerCommunicationTests(unittest.TestCase):
     def test_codex_request_and_central_handler_support_send_and_internal_delivery_only(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            for name in ("work", "state", "codex-home", "seed", "archive", "shared"):
+            for name in ("work", "state", "codex-home", "seed", "shared"):
                 (root / name).mkdir()
+            (root / "shared/archive/.git").mkdir(parents=True)
             context = root / "control-context.json"
             context.write_text(
                 json.dumps(
@@ -834,8 +894,8 @@ class PeerCommunicationTests(unittest.TestCase):
                 worker_state_dir=root / "state",
                 codex_home=root / "codex-home",
                 seed_output_dir=root / "seed",
-                archive_repo_dir=root / "archive",
-                archive_git_dir=None,
+                archive_repo_dir=root / "shared/archive",
+                archive_git_dir=root / "shared/archive/.git",
                 shared_workspace_dir=root / "shared",
                 rollout_username="rollout_user_000",
                 timeout_seconds=2,
@@ -844,6 +904,14 @@ class PeerCommunicationTests(unittest.TestCase):
                 spawn_child_handler_context_path=context,
             )
             request = json.loads(Path(result["request_path"]).read_text())
+            self.assertIn(
+                str((root / "shared/archive").resolve()),
+                request["workspace_roots"],
+            )
+            self.assertIn(
+                str((root / "shared/archive/.git").resolve()),
+                request["additional_writable_roots"],
+            )
             self.assertEqual(
                 request["base_instructions"],
                 canonical_rollout_system_instructions(),

@@ -10,6 +10,7 @@ from argparse import Namespace
 from pathlib import Path
 from unittest.mock import patch
 
+import main_loop
 from main_loop import (
     CANONICAL_BOOTSTRAP_README_SHA256,
     DEFAULT_BOOTSTRAP_INITIAL_PROMPT,
@@ -234,6 +235,11 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                 openrouter_calls: list[dict[str, object]] = []
                 spawn_lock = threading.Lock()
                 spawned = False
+                active_lock = threading.Lock()
+                active_workers = 0
+                worker_barrier = threading.Barrier(16)
+                cleanup_calls: list[Path] = []
+                real_cleanup = main_loop.clean_shared_git_repo
 
                 def maybe_spawn(kwargs: dict[str, object]) -> None:
                     nonlocal spawned
@@ -261,14 +267,45 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                     self.assertTrue(child["child_spawned"])
 
                 def codex_worker(**kwargs: object) -> WorkerResult:
+                    nonlocal active_workers
+                    with active_lock:
+                        active_workers += 1
                     codex_calls.append(kwargs)
-                    maybe_spawn(kwargs)
-                    return WorkerResult("offline", "completed", "final_message")
+                    try:
+                        worker_barrier.wait(timeout=10)
+                        maybe_spawn(kwargs)
+                        return WorkerResult("offline", "completed", "final_message")
+                    finally:
+                        with active_lock:
+                            active_workers -= 1
 
                 def openrouter_worker(**kwargs: object) -> WorkerResult:
+                    nonlocal active_workers
+                    with active_lock:
+                        active_workers += 1
                     openrouter_calls.append(kwargs)
-                    maybe_spawn(kwargs)
-                    return WorkerResult("offline", "completed", "final_message")
+                    try:
+                        worker_barrier.wait(timeout=10)
+                        maybe_spawn(kwargs)
+                        return WorkerResult("offline", "completed", "final_message")
+                    finally:
+                        with active_lock:
+                            active_workers -= 1
+
+                def checked_cleanup(
+                    repo_path: Path,
+                    *,
+                    shared_workspace_dir: Path,
+                    expected_identity: tuple[tuple[int, int], tuple[int, int]],
+                ) -> dict[str, object]:
+                    with active_lock:
+                        self.assertEqual(active_workers, 0)
+                    cleanup_calls.append(repo_path)
+                    return real_cleanup(
+                        repo_path,
+                        shared_workspace_dir=shared_workspace_dir,
+                        expected_identity=expected_identity,
+                    )
 
                 for _ in range(2):
                     with patch.dict("os.environ", {"OPENROUTER_API_KEY": "test-only-key"}), patch(
@@ -278,6 +315,9 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                     ), patch(
                         "main_loop.run_opencode_worker",
                         side_effect=AssertionError("OpenCode dispatch must remain inactive"),
+                    ), patch(
+                        "main_loop.clean_shared_git_repo",
+                        side_effect=checked_cleanup,
                     ):
                         _run_main([])
                 calls = codex_calls if backend == "codex" else openrouter_calls
@@ -303,11 +343,53 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                         for call in calls
                     )
                 )
+                shared_repositories = {
+                    Path(str(call["archive_repo_dir"])).resolve() for call in calls
+                }
+                self.assertEqual(len(shared_repositories), 1)
+                shared_repository = next(iter(shared_repositories))
+                self.assertEqual(
+                    shared_repository,
+                    root / "runtime/logs/tmp/rollout_chain/shared_workspace/archive",
+                )
+                self.assertEqual(len({Path(str(call["workdir"])) for call in calls}), 32)
+                self.assertEqual(
+                    {
+                        (Path(str(call["workdir"])) / "archive").stat().st_ino
+                        for call in calls
+                    },
+                    {shared_repository.stat().st_ino},
+                )
+                if backend == "codex":
+                    self.assertTrue(
+                        all(
+                            Path(str(call["archive_git_dir"]))
+                            == shared_repository / ".git"
+                            for call in calls
+                        )
+                    )
                 records = [
                     json.loads(line)
                     for line in (root / "runtime/logs/runs.jsonl").read_text().splitlines()
                 ]
                 self.assertEqual(len(records), 32)
+                self.assertTrue(all(record["shared_git_enabled"] for record in records))
+                self.assertEqual(
+                    {record["shared_git_repo_dir"] for record in records},
+                    {str(shared_repository)},
+                )
+                progress = (root / "runtime/logs/progress.jsonl").read_text()
+                self.assertNotIn("archive_worktree", progress)
+                self.assertNotIn("archive_finalized", progress)
+                self.assertEqual(progress.count('"event": "shared_git_cleanup_completed"'), 2)
+                self.assertEqual(cleanup_calls, [shared_repository, shared_repository])
+                self.assertFalse(
+                    any(
+                        key in record
+                        for record in records
+                        for key in ("archive_merged", "archive_committed", "archive_branch")
+                    )
+                )
                 self.assertTrue(
                     all(
                         record["peer_communication_population_size"] == 16
@@ -754,6 +836,88 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                         {call["task_index"] for call in calls[8:]}, {1}
                     )
 
+    def test_completed_legacy_git_history_loads_but_partial_resume_fails_closed(self) -> None:
+        documents = Path.home() / "Documents"
+        documents.mkdir(exist_ok=True)
+        for partial in (False, True):
+            with self.subTest(partial=partial), tempfile.TemporaryDirectory(
+                dir=documents
+            ) as temp:
+                root = Path(temp)
+                runtime = root / "runtime"
+                task = root / "task.md"
+                task.write_text("# Shared Git resume fixture\n")
+                argv = [
+                    "main_loop.py",
+                    "--benchmark",
+                    "open-ended",
+                    "--task-file",
+                    str(task),
+                    "--runtime-root",
+                    str(runtime),
+                    "--worker-backend",
+                    "openrouter",
+                    "--model",
+                    "fixture/model",
+                    "--num-rollouts",
+                    "8",
+                    "--step",
+                ]
+                calls: list[dict[str, object]] = []
+
+                def worker(**kwargs: object) -> WorkerResult:
+                    calls.append(kwargs)
+                    return WorkerResult("offline", "completed", "final_message")
+
+                with patch.dict(
+                    "os.environ", {"OPENROUTER_API_KEY": "test-only-key"}
+                ), patch("sys.argv", argv), patch(
+                    "main_loop.run_worker", side_effect=worker
+                ):
+                    _run_main([])
+
+                runs_path = runtime / "logs/runs.jsonl"
+                records = [
+                    json.loads(line) for line in runs_path.read_text().splitlines()
+                ]
+                if partial:
+                    records = records[:7]
+                for record in records:
+                    for field in (
+                        "shared_git_enabled",
+                        "shared_git_version",
+                        "shared_git_fingerprint",
+                        "shared_git_repo_dir",
+                    ):
+                        record.pop(field, None)
+                runs_path.write_text(
+                    "".join(json.dumps(record) + "\n" for record in records)
+                )
+                identity_path = runtime / "runtime_benchmark.json"
+                identity = json.loads(identity_path.read_text())
+                identity["capabilities"].pop("shared_git_repository", None)
+                identity_path.write_text(json.dumps(identity))
+
+                if partial:
+                    with patch.dict(
+                        "os.environ", {"OPENROUTER_API_KEY": "test-only-key"}
+                    ), patch("sys.argv", argv), patch(
+                        "main_loop.run_worker", side_effect=worker
+                    ), self.assertRaisesRegex(RuntimeError, "shared Git capability"):
+                        _run_main([])
+                    self.assertEqual(len(calls), 8)
+                else:
+                    with patch.dict(
+                        "os.environ", {"OPENROUTER_API_KEY": "test-only-key"}
+                    ), patch("sys.argv", argv), patch(
+                        "main_loop.run_worker", side_effect=worker
+                    ):
+                        _run_main([])
+                    self.assertEqual(len(calls), 16)
+                    self.assertEqual(
+                        {call["task_index"] for call in calls[8:]}, {1}
+                    )
+
     def test_actual_opencode_orchestration_separates_system_and_user_prompts(self) -> None:
         documents = Path.home() / "Documents"
         documents.mkdir(exist_ok=True)
@@ -850,6 +1014,27 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
             )
             self.assertFalse(
                 any("benchmark_events" in str(path) or "arc_agi" in str(path) for path in calls[0]["sandbox_writable_roots"])
+            )
+            shared_repository = (
+                runtime / "logs/tmp/rollout_chain/shared_workspace/archive"
+            ).resolve()
+            self.assertEqual(
+                len({Path(str(call["workdir"])).resolve() for call in calls}),
+                24,
+            )
+            self.assertTrue(
+                all(
+                    shared_repository
+                    in {Path(str(path)).resolve() for path in call["sandbox_writable_roots"]}
+                    for call in calls
+                )
+            )
+            self.assertEqual(
+                {
+                    (Path(str(call["workdir"])) / "archive").stat().st_ino
+                    for call in calls
+                },
+                {shared_repository.stat().st_ino},
             )
             handler_context = Path(str(calls[0]["continuation_context_path"]))
             mounted_sources = {
@@ -1027,15 +1212,30 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
             self.assertIn("`seed_output/` is local writable empty directory", bootstrap_words)
             self.assertIn(
                 "`shared_workspace/` is visible to all programs running alongside you. "
-                "It is erased at the end of the round.",
+                "Files outside its `archive/` repository are batch-local and may be removed "
+                "at the end of the round.",
                 bootstrap_words,
             )
-            self.assertIn("`archive/` is durable and shared across rounds.", bootstrap_words)
             self.assertIn(
-                "Material committed there can remain available to programs that arrive later.",
+                "`archive/` is the same ordinary Git checkout for every program in the "
+                "current round.",
                 bootstrap_words,
             )
-            self.assertIn("Uncommitted changes there are discarded when you stop.", bootstrap_words)
+            self.assertIn(
+                "Its working tree, index, current branch, and refs are shared directly.",
+                bootstrap_words,
+            )
+            self.assertIn(
+                "Git commands run concurrently and may encounter normal lock, checkout, "
+                "or content races.",
+                bootstrap_words,
+            )
+            self.assertIn(
+                "Commits, refs, and the current committed HEAD persist across rounds. "
+                "Staged, modified, deleted, untracked, and ignored archive content is "
+                "discarded after the round.",
+                bootstrap_words,
+            )
 
             identity_root = root / "identity"
             identity_root.mkdir()
