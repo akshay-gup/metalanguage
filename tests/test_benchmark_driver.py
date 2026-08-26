@@ -229,6 +229,33 @@ class BenchmarkDriverTests(unittest.TestCase):
         self.assertIs(parent_pool[7], spawned_children[-1])
         self.assertEqual(parent_pool[7]["child_instance_uuid"], "child-7")
 
+        expanded_pool, expanded_bootstrap_count = (
+            _refill_parent_pool_with_bootstrap_slots(
+                spawned_children,
+                target_count=16,
+            )
+        )
+        self.assertEqual(expanded_bootstrap_count, 9)
+        self.assertEqual(
+            [slot["slot_index"] for slot in expanded_pool], list(range(16))
+        )
+        self.assertEqual(
+            [slot.get("source_rollout_index") for slot in expanded_pool[:8]],
+            [0, None, 2, 3, 4, 5, 6, 7],
+        )
+        self.assertTrue(
+            all(
+                slot["bootstrap_reinitialized"]
+                and slot["prompt"] == DEFAULT_BOOTSTRAP_INITIAL_PROMPT
+                and slot["workspace_dir"] is None
+                and slot["manifest_path"] is None
+                for slot in expanded_pool[8:]
+            )
+        )
+        self.assertEqual(
+            len({slot["child_instance_uuid"] for slot in expanded_pool}), 16
+        )
+
     def test_protocol_shape_deterministic_pool_resume_and_backend_instructions(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

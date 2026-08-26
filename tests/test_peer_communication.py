@@ -34,6 +34,8 @@ from utils.benchmark_driver import RolloutBenchmark
 from utils.codex_runner import runner_binary_path, run_codex_rollout
 from utils.openrouter import call_openrouter_with_tools
 from utils.peer_communication import (
+    BATCH_MESSAGE_LIMIT,
+    DEFAULT_PEER_ROLLOUT_COUNT,
     DELIVERY_ACK_TOOL_NAME,
     DELIVERY_ACK_BOUNDARY_TOOL_NAME,
     DELIVERY_CLAIM_TOOL_NAME,
@@ -43,16 +45,18 @@ from utils.peer_communication import (
     DELIVERY_PREPARE_TOOL_NAME,
     LEGACY_AUTOMATIC_DELIVERY_FINGERPRINT,
     LEGACY_AUTOMATIC_DELIVERY_VERSION,
+    LEGACY_DISTINCT_NAMES_FINGERPRINT,
+    LEGACY_DISTINCT_NAMES_VERSION,
     LEGACY_PEER_COMMUNICATION_FINGERPRINT,
     LEGACY_PEER_COMMUNICATION_TOOL_NAME,
     LEGACY_TWO_TOOL_FINGERPRINT,
     PEER_COMMUNICATION_CAPABILITY_NAME,
     PEER_COMMUNICATION_FINGERPRINT,
     PEER_COMMUNICATION_VERSION,
-    PEER_ROLLOUT_COUNT,
     SAFE_ENGLISH_FIRST_NAMES,
     SEND_MESSAGE_INPUT_SCHEMA,
     SEND_MESSAGE_TOOL_NAME,
+    SUPPORTED_PEER_ROLLOUT_COUNTS,
     PeerCommunicationBridge,
     PeerCommunicationScope,
     PeerCommunicationStore,
@@ -62,11 +66,16 @@ from utils.peer_communication import (
 )
 
 
-TEST_NAMES = tuple(SAFE_ENGLISH_FIRST_NAMES[:PEER_ROLLOUT_COUNT])
+TEST_NAMES = tuple(SAFE_ENGLISH_FIRST_NAMES[:DEFAULT_PEER_ROLLOUT_COUNT])
 TEST_MAPPING = dict(enumerate(TEST_NAMES))
 
 
-def scope(benchmark: str = "open-ended", task_index: int = 24, batch_id: str | None = None) -> PeerCommunicationScope:
+def scope(
+    benchmark: str = "open-ended",
+    task_index: int = 24,
+    batch_id: str | None = None,
+    population_size: int = DEFAULT_PEER_ROLLOUT_COUNT,
+) -> PeerCommunicationScope:
     return PeerCommunicationScope(
         benchmark=benchmark,
         generation=0,
@@ -74,7 +83,7 @@ def scope(benchmark: str = "open-ended", task_index: int = 24, batch_id: str | N
         task_index=task_index,
         task_id=f"batch_{task_index}",
         batch_id=batch_id or f"supervisor-batch-{task_index}",
-        population_size=PEER_ROLLOUT_COUNT,
+        population_size=population_size,
     )
 
 
@@ -95,40 +104,63 @@ class PeerCommunicationTests(unittest.TestCase):
         task_index: int = 24,
         batch_id: str | None = None,
         mapping: dict[int, str] | None = TEST_MAPPING,
+        population_size: int = DEFAULT_PEER_ROLLOUT_COUNT,
         callback=None,
     ) -> PeerCommunicationStore:
         return PeerCommunicationStore(
             root / f"task_{task_index:06d}" / f"batch_{batch_id or task_index}",
-            scope(benchmark, task_index, batch_id),
+            scope(benchmark, task_index, batch_id, population_size),
             name_mapping=mapping,
             lifecycle_callback=callback,
         )
 
-    def test_random_unique_eight_name_assignment_and_population_requirement(self) -> None:
-        with tempfile.TemporaryDirectory() as temp, patch.object(
-            peer.secrets.SystemRandom,
-            "sample",
-            return_value=list(TEST_NAMES),
-        ) as sample:
-            store = self.make_store(Path(temp), mapping=None)
-            sample.assert_called_once()
-            self.assertEqual(store.roster, TEST_NAMES)
-            self.assertEqual(len(set(store.roster)), PEER_ROLLOUT_COUNT)
-            self.assertEqual(
-                len({name[0].casefold() for name in store.roster}),
-                PEER_ROLLOUT_COUNT,
-            )
-            self.assertTrue(set(store.roster) <= set(SAFE_ENGLISH_FIRST_NAMES))
+    def test_random_unique_name_assignment_for_supported_populations(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for population_size in sorted(SUPPORTED_PEER_ROLLOUT_COUNTS):
+                expected_names = tuple(
+                    SAFE_ENGLISH_FIRST_NAMES[:population_size]
+                )
+                with patch.object(
+                    peer.secrets.SystemRandom,
+                    "sample",
+                    return_value=list(expected_names),
+                ) as sample:
+                    store = self.make_store(
+                        root / str(population_size),
+                        mapping=None,
+                        population_size=population_size,
+                    )
+                sample.assert_called_once_with(
+                    list(SAFE_ENGLISH_FIRST_NAMES), population_size
+                )
+                self.assertEqual(store.roster, expected_names)
+                self.assertEqual(len(set(store.roster)), population_size)
+                self.assertEqual(
+                    len({name[0].casefold() for name in store.roster}),
+                    population_size,
+                )
+                self.assertTrue(
+                    set(store.roster) <= set(SAFE_ENGLISH_FIRST_NAMES)
+                )
             bad_scope = PeerCommunicationScope(
                 **{**scope().metadata(), "population_size": 7}
             )
-            with self.assertRaisesRegex(ValueError, "exactly 8"):
-                PeerCommunicationStore(Path(temp) / "bad", bad_scope)
+            with self.assertRaisesRegex(ValueError, "one of: 8, 16"):
+                PeerCommunicationStore(root / "bad", bad_scope)
 
-        for _ in range(256):
-            mapping = PeerCommunicationStore.random_name_mapping()
-            names = tuple(mapping[index] for index in range(PEER_ROLLOUT_COUNT))
-            self.assertEqual(len({name[0].casefold() for name in names}), PEER_ROLLOUT_COUNT)
+        for population_size in sorted(SUPPORTED_PEER_ROLLOUT_COUNTS):
+            for _ in range(256):
+                mapping = PeerCommunicationStore.random_name_mapping(
+                    population_size
+                )
+                names = tuple(
+                    mapping[index] for index in range(population_size)
+                )
+                self.assertEqual(
+                    len({name[0].casefold() for name in names}),
+                    population_size,
+                )
 
         roster = set(SAFE_ENGLISH_FIRST_NAMES)
         for confusing_pair in (
@@ -154,7 +186,7 @@ class PeerCommunicationTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "changed during resume"):
                 self.make_store(root, mapping=changed)
             duplicate = {**TEST_MAPPING, 1: TEST_MAPPING[0]}
-            with self.assertRaisesRegex(RuntimeError, "eight distinct"):
+            with self.assertRaisesRegex(RuntimeError, "distinct safe"):
                 self.make_store(Path(temp) / "duplicate", task_index=25, mapping=duplicate)
 
             invalid_partial = Path(temp) / "invalid-partial"
@@ -169,6 +201,29 @@ class PeerCommunicationTests(unittest.TestCase):
                 (*SAFE_ENGLISH_FIRST_NAMES, "Amelia"),
             ), self.assertRaisesRegex(RuntimeError, "distinct initials"):
                 self.make_store(invalid_partial, task_index=26, mapping=None)
+
+            names_16 = tuple(SAFE_ENGLISH_FIRST_NAMES[:16])
+            mapping_16 = dict(enumerate(names_16))
+            store_16 = self.make_store(
+                root / "sixteen",
+                task_index=27,
+                mapping=mapping_16,
+                population_size=16,
+            )
+            manifest_16 = json.loads(
+                (store_16.log_dir / "manifest.json").read_text()
+            )
+            self.assertEqual(
+                manifest_16["name_mapping"],
+                {str(index): name for index, name in mapping_16.items()},
+            )
+            resumed_16 = self.make_store(
+                root / "sixteen",
+                task_index=27,
+                mapping=None,
+                population_size=16,
+            )
+            self.assertEqual(resumed_16.name_mapping, mapping_16)
 
     def test_schema_and_runtime_expose_only_named_direct_send(self) -> None:
         tools = peer_communication_openrouter_tools()
@@ -201,19 +256,20 @@ class PeerCommunicationTests(unittest.TestCase):
             '"action"',
         ):
             self.assertNotIn(forbidden, serialized)
+        names_16 = tuple(SAFE_ENGLISH_FIRST_NAMES[:16])
         runtime = _format_runtime_markdown(
             instance_uuid="instance",
             has_problem_pool=False,
-            peer_name=TEST_NAMES[0],
-            peer_roster=TEST_NAMES,
+            peer_name=names_16[0],
+            peer_roster=names_16,
         )
         peer_section = "## Peer Identity" + runtime.split("## Peer Identity", 1)[1]
         self.assertEqual(
             [line for line in peer_section.splitlines() if line],
             [
                 "## Peer Identity",
-                f"- your name: {TEST_NAMES[0]}",
-                f"- other peer names: {', '.join(TEST_NAMES[1:])}",
+                f"- your name: {names_16[0]}",
+                f"- other peer names: {', '.join(names_16[1:])}",
             ],
         )
         for forbidden in (
@@ -476,27 +532,67 @@ class PeerCommunicationTests(unittest.TestCase):
     def test_validation_caps_concurrency_and_progress_redaction(self) -> None:
         events: list[tuple[str, dict[str, object]]] = []
         with tempfile.TemporaryDirectory() as temp:
-            store = self.make_store(Path(temp), callback=lambda event, fields: events.append((event, fields)))
+            names_16 = tuple(SAFE_ENGLISH_FIRST_NAMES[:16])
+            store = self.make_store(
+                Path(temp),
+                mapping=dict(enumerate(names_16)),
+                population_size=16,
+                callback=lambda event, fields: events.append((event, fields)),
+            )
             for message, code in (
                 ("", "invalid_message"),
                 ("   ", "invalid_message"),
                 ("bad\x00control", "invalid_message_controls"),
                 ("🙂" * 513, "message_too_large"),
             ):
-                self.assertEqual(send(store, 0, TEST_NAMES[1], message)["error_code"], code)
-            barrier = threading.Barrier(8)
+                self.assertEqual(
+                    send(store, 0, names_16[1], message)["error_code"], code
+                )
+            barrier = threading.Barrier(16)
 
             def sender(index: int) -> list[int]:
                 barrier.wait()
-                receiver = TEST_NAMES[(index + 1) % PEER_ROLLOUT_COUNT]
-                return [send(store, index, receiver, f"secret-{index}:{offset}")["id"] for offset in range(10)]
+                receiver = names_16[(index + 1) % 16]
+                return [
+                    send(store, index, receiver, f"secret-{index}:{offset}")[
+                        "id"
+                    ]
+                    for offset in range(10)
+                ]
 
-            with ThreadPoolExecutor(max_workers=8) as executor:
-                ids = [item for result in executor.map(sender, range(8)) for item in result]
-            self.assertEqual(sorted(ids), list(range(1, 81)))
+            with ThreadPoolExecutor(max_workers=16) as executor:
+                ids = [
+                    item
+                    for result in executor.map(sender, range(16))
+                    for item in result
+                ]
+            self.assertEqual(sorted(ids), list(range(1, 161)))
             lifecycle = json.dumps(events)
             self.assertNotIn("secret-", lifecycle)
-            self.assertEqual(store.message_count, 80)
+            self.assertEqual(store.message_count, 160)
+            self.assertEqual(store.batch_message_limit, BATCH_MESSAGE_LIMIT)
+
+            delivery_barrier = threading.Barrier(16)
+
+            def deliver(index: int) -> int:
+                delivery_barrier.wait()
+                prepared = store.prepare_delivery(index)
+                self.assertTrue(prepared["pending"])
+                self.assertEqual(prepared["message_count"], 8)
+                acknowledged = store.acknowledge_delivery(
+                    index, prepared["delivery_id"]
+                )
+                self.assertTrue(acknowledged["committed"])
+                second = store.prepare_delivery(index)
+                self.assertTrue(second["pending"])
+                self.assertEqual(second["message_count"], 2)
+                store.acknowledge_delivery(index, second["delivery_id"])
+                self.assertFalse(store.prepare_delivery(index)["pending"])
+                return prepared["message_count"] + second["message_count"]
+
+            with ThreadPoolExecutor(max_workers=16) as executor:
+                delivered_counts = list(executor.map(deliver, range(16)))
+            self.assertEqual(delivered_counts, [10] * 16)
 
         with tempfile.TemporaryDirectory() as temp, patch.object(peer, "PER_ROLLOUT_SEND_LIMIT", 2), patch.object(peer, "BATCH_MESSAGE_LIMIT", 3):
             store = self.make_store(Path(temp))
@@ -505,6 +601,16 @@ class PeerCommunicationTests(unittest.TestCase):
             self.assertEqual(send(store, 0, TEST_NAMES[1], "three")["error_code"], "rollout_send_limit_reached")
             self.assertTrue(send(store, 1, TEST_NAMES[2], "batch third")["success"])
             self.assertEqual(send(store, 2, TEST_NAMES[3], "batch over")["error_code"], "batch_message_limit_reached")
+
+        with tempfile.TemporaryDirectory() as temp:
+            store_8 = self.make_store(Path(temp) / "eight")
+            store_16 = self.make_store(
+                Path(temp) / "sixteen",
+                mapping=dict(enumerate(SAFE_ENGLISH_FIRST_NAMES[:16])),
+                population_size=16,
+            )
+            self.assertEqual(store_8.batch_message_limit, 512)
+            self.assertEqual(store_16.batch_message_limit, 1_024)
 
     def test_cross_batch_isolation_and_capability_resume_versioning(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -517,22 +623,45 @@ class PeerCommunicationTests(unittest.TestCase):
             self.assertFalse(second.prepare_delivery(1)["pending"])
             third = self.make_store(root, task_index=25, batch_id="third")
             self.assertFalse(third.prepare_delivery(1)["pending"])
+            names_16 = tuple(SAFE_ENGLISH_FIRST_NAMES[:16])
+            sixteen = self.make_store(
+                root,
+                task_index=24,
+                batch_id="sixteen",
+                mapping=dict(enumerate(names_16)),
+                population_size=16,
+            )
+            self.assertFalse(sixteen.prepare_delivery(1)["pending"])
 
             current = {
                 "peer_communication_enabled": True,
                 "peer_communication_version": PEER_COMMUNICATION_VERSION,
                 "peer_communication_fingerprint": PEER_COMMUNICATION_FINGERPRINT,
                 "peer_communication_batch_id": "batch-current",
+                "peer_communication_population_size": 8,
             }
             self.assertTrue(_peer_communication_resume_compatible({}, require_fingerprint=False))
             self.assertFalse(_peer_communication_resume_compatible({}, require_fingerprint=True))
-            self.assertTrue(_peer_communication_resume_compatible(current, require_fingerprint=True))
+            self.assertTrue(
+                _peer_communication_resume_compatible(
+                    current, require_fingerprint=True, population_size=8
+                )
+            )
+            self.assertFalse(
+                _peer_communication_resume_compatible(
+                    current, require_fingerprint=True, population_size=16
+                )
+            )
             for version, fingerprint in (
                 (1, LEGACY_PEER_COMMUNICATION_FINGERPRINT),
                 (2, LEGACY_TWO_TOOL_FINGERPRINT),
                 (
                     LEGACY_AUTOMATIC_DELIVERY_VERSION,
                     LEGACY_AUTOMATIC_DELIVERY_FINGERPRINT,
+                ),
+                (
+                    LEGACY_DISTINCT_NAMES_VERSION,
+                    LEGACY_DISTINCT_NAMES_FINGERPRINT,
                 ),
             ):
                 legacy = {
@@ -566,13 +695,13 @@ class PeerCommunicationTests(unittest.TestCase):
             identity = json.loads(identity_path.read_text())
             identity["capabilities"][PEER_COMMUNICATION_CAPABILITY_NAME] = {
                 "enabled": True,
-                "version": LEGACY_AUTOMATIC_DELIVERY_VERSION,
-                "fingerprint": LEGACY_AUTOMATIC_DELIVERY_FINGERPRINT,
+                "version": LEGACY_DISTINCT_NAMES_VERSION,
+                "fingerprint": LEGACY_DISTINCT_NAMES_FINGERPRINT,
             }
             identity_path.write_text(json.dumps(identity))
             _claim_runtime_benchmark(identity_root, "open-ended")
             still_legacy = json.loads(identity_path.read_text())["capabilities"][PEER_COMMUNICATION_CAPABILITY_NAME]
-            self.assertEqual(still_legacy["version"], LEGACY_AUTOMATIC_DELIVERY_VERSION)
+            self.assertEqual(still_legacy["version"], LEGACY_DISTINCT_NAMES_VERSION)
             _record_current_peer_communication_capability(identity_root)
             upgraded = json.loads(identity_path.read_text())["capabilities"][PEER_COMMUNICATION_CAPABILITY_NAME]
             self.assertEqual(upgraded["version"], PEER_COMMUNICATION_VERSION)
@@ -778,7 +907,7 @@ class PeerCommunicationTests(unittest.TestCase):
                 contexts: list[Path] = []
                 commands: list[list[str]] = []
                 tokens: list[str] = []
-                for rollout_index in range(PEER_ROLLOUT_COUNT):
+                for rollout_index in range(DEFAULT_PEER_ROLLOUT_COUNT):
                     credentials = bridge.credentials(rollout_index)
                     tokens.append(credentials.token)
                     context = root / f"context-{rollout_index}.json"
@@ -800,7 +929,7 @@ class PeerCommunicationTests(unittest.TestCase):
                         )
                     )
 
-                barrier = threading.Barrier(PEER_ROLLOUT_COUNT)
+                barrier = threading.Barrier(DEFAULT_PEER_ROLLOUT_COUNT)
 
                 def probe(rollout_index: int) -> subprocess.CompletedProcess[str]:
                     barrier.wait()
@@ -823,8 +952,12 @@ class PeerCommunicationTests(unittest.TestCase):
                         check=False,
                     )
 
-                with ThreadPoolExecutor(max_workers=PEER_ROLLOUT_COUNT) as executor:
-                    results = list(executor.map(probe, range(PEER_ROLLOUT_COUNT)))
+                with ThreadPoolExecutor(
+                    max_workers=DEFAULT_PEER_ROLLOUT_COUNT
+                ) as executor:
+                    results = list(
+                        executor.map(probe, range(DEFAULT_PEER_ROLLOUT_COUNT))
+                    )
                 for result in results:
                     self.assertEqual(result.returncode, 0, result.stderr)
                     event = json.loads(result.stdout)
@@ -1069,7 +1202,7 @@ class PeerCommunicationTests(unittest.TestCase):
                         [str(runner_binary_path())],
                         input=json.dumps(
                             {
-                                "model": "gpt-5.1-codex-max",
+                                "model": "gpt-5.6-sol",
                                 "cwd": str(work),
                                 "codex_home": str(codex_home),
                                 "initial_user_text": "Use one tool, then finish.",
@@ -1094,6 +1227,35 @@ class PeerCommunicationTests(unittest.TestCase):
 
                 self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
                 self.assertEqual(len(requests), 2)
+                additional_tools = next(
+                    item
+                    for item in requests[0]["input"]
+                    if item.get("type") == "additional_tools"
+                )
+                namespaces = {
+                    tool.get("name"): tool
+                    for tool in additional_tools["tools"]
+                    if isinstance(tool, dict) and tool.get("type") == "namespace"
+                }
+                self.assertIn("functions", namespaces)
+                self.assertNotIn("collaboration", namespaces)
+                functions_description = json.dumps(namespaces["functions"])
+                self.assertIn("### `spawn_child`", functions_description)
+                self.assertIn("### `send_message`", functions_description)
+                self.assertIn("message: string;", functions_description)
+                self.assertIn("receiver: string;", functions_description)
+                native_tools = (
+                    "spawn_agent",
+                    "wait_agent",
+                    "list_agents",
+                    "followup_task",
+                    "interrupt_agent",
+                    "resume_agent",
+                    "close_agent",
+                )
+                serialized_tools = json.dumps(additional_tools)
+                for native_name in native_tools:
+                    self.assertNotIn(native_name, serialized_tools)
                 self.assertNotIn(secret, json.dumps(requests[0]))
                 self.assertIn(secret, json.dumps(requests[1]))
                 self.assertIn("call-send-1", json.dumps(requests[1]))

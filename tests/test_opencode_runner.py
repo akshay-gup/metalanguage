@@ -41,7 +41,7 @@ from utils.opencode_runner import (
 )
 from utils.peer_communication import (
     LEGACY_PEER_COMMUNICATION_TOOL_NAME,
-    PEER_ROLLOUT_COUNT,
+    DEFAULT_PEER_ROLLOUT_COUNT,
     SAFE_ENGLISH_FIRST_NAMES,
     SEND_MESSAGE_INPUT_SCHEMA,
     SEND_MESSAGE_TOOL_NAME,
@@ -1426,7 +1426,7 @@ class OpenCodeRunnerTests(unittest.TestCase):
             )
             name_mapping = {
                 index: SAFE_ENGLISH_FIRST_NAMES[index]
-                for index in range(PEER_ROLLOUT_COUNT)
+                for index in range(DEFAULT_PEER_ROLLOUT_COUNT)
             }
             store = PeerCommunicationStore(
                 root / "peer-log",
@@ -1437,7 +1437,7 @@ class OpenCodeRunnerTests(unittest.TestCase):
                     task_index=7,
                     task_id="arc_batch",
                     batch_id="test-batch",
-                    population_size=PEER_ROLLOUT_COUNT,
+                    population_size=DEFAULT_PEER_ROLLOUT_COUNT,
                 ),
                 name_mapping=name_mapping,
             )

@@ -34,6 +34,11 @@ from utils.open_ended_benchmark import (
     resolve_open_ended_task,
 )
 from utils.opencode_runner import custom_provider_configuration, custom_provider_fingerprint
+from utils.peer_communication import (
+    LEGACY_DISTINCT_NAMES_FINGERPRINT,
+    LEGACY_DISTINCT_NAMES_VERSION,
+    PEER_COMMUNICATION_CAPABILITY_NAME,
+)
 
 
 class OpenEndedBenchmarkTests(unittest.TestCase):
@@ -125,7 +130,7 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                 "--model",
                 "fixture/model-one",
                 "--num-rollouts",
-                "8",
+                "16",
                 "--step",
                 "--opencode-bin",
                 str(fake_opencode),
@@ -162,7 +167,7 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                 "main_loop.run_opencode_worker", side_effect=worker
             ):
                 _run_main([])
-            self.assertEqual(len(calls), 8)
+            self.assertEqual(len(calls), 16)
             configuration = calls[0]["custom_provider"]
             self.assertEqual(configuration["provider_id"], "fixture")
             self.assertEqual(configuration["model_id"], "model-one")
@@ -174,18 +179,22 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
             run_log = (runtime / "logs/runs.jsonl").read_text()
             self.assertNotIn("DISPATCH-PRIVATE", run_log)
             records = [json.loads(line) for line in run_log.splitlines()]
-            self.assertEqual(len(records), 8)
+            self.assertEqual(len(records), 16)
             record = records[0]
             self.assertEqual(record["opencode_custom_provider"], configuration)
             self.assertTrue(record["opencode_custom_provider_sha256"])
             self.assertTrue(record["peer_communication_enabled"])
             self.assertFalse(record["rollout_independence"])
-            self.assertEqual(len(record["peer_name_mapping"]), 8)
+            self.assertEqual(record["peer_communication_population_size"], 16)
+            self.assertEqual(
+                record["peer_communication_batch_message_limit"], 1_024
+            )
+            self.assertEqual(len(record["peer_name_mapping"]), 16)
             self.assertEqual(
                 len({entry["name"] for entry in record["peer_name_mapping"]}),
-                8,
+                16,
             )
-            self.assertEqual(len(record["peer_name_roster"]), 8)
+            self.assertEqual(len(record["peer_name_roster"]), 16)
             peer_log = (
                 runtime
                 / "logs/peer_communication/task_000000"
@@ -216,7 +225,7 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                     "--model",
                     "fixture/model",
                     "--num-rollouts",
-                    "8",
+                    "16",
                     "--step",
                 ]
                 if backend == "codex":
@@ -272,7 +281,7 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                     ):
                         _run_main([])
                 calls = codex_calls if backend == "codex" else openrouter_calls
-                self.assertEqual(len(calls), 16)
+                self.assertEqual(len(calls), 32)
                 self.assertEqual(
                     [call["initial_user_text"] for call in calls].count(
                         "INHERITED USER PROMPT"
@@ -283,7 +292,7 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                     [call["initial_user_text"] for call in calls].count(
                         DEFAULT_BOOTSTRAP_INITIAL_PROMPT
                     ),
-                    15,
+                    31,
                 )
                 instruction_key = (
                     "base_instructions" if backend == "codex" else "instructions"
@@ -298,13 +307,157 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                     json.loads(line)
                     for line in (root / "runtime/logs/runs.jsonl").read_text().splitlines()
                 ]
-                self.assertEqual(len(records), 16)
+                self.assertEqual(len(records), 32)
+                self.assertTrue(
+                    all(
+                        record["peer_communication_population_size"] == 16
+                        and len(record["peer_name_roster"]) == 16
+                        for record in records
+                    )
+                )
                 self.assertTrue(
                     all(
                         record["rollout_system_instructions_sha256"]
                         == CANONICAL_BOOTSTRAP_README_SHA256
                         for record in records
                     )
+                )
+
+    def test_completed_eight_to_sixteen_transition_and_partial_rejection(self) -> None:
+        documents = Path.home() / "Documents"
+        documents.mkdir(exist_ok=True)
+        for partial in (False, True):
+            with self.subTest(partial=partial), tempfile.TemporaryDirectory(
+                dir=documents
+            ) as temp:
+                root = Path(temp)
+                runtime = root / "runtime"
+                task = root / "task.md"
+                task.write_text("# Population transition fixture\n")
+
+                def argv(population_size: int) -> list[str]:
+                    return [
+                        "main_loop.py",
+                        "--benchmark",
+                        "open-ended",
+                        "--task-file",
+                        str(task),
+                        "--runtime-root",
+                        str(runtime),
+                        "--worker-backend",
+                        "openrouter",
+                        "--model",
+                        "fixture/model",
+                        "--num-rollouts",
+                        str(population_size),
+                        "--step",
+                    ]
+
+                calls: list[dict[str, object]] = []
+
+                def worker(**kwargs: object) -> WorkerResult:
+                    calls.append(kwargs)
+                    return WorkerResult("offline", "completed", "final_message")
+
+                with patch.dict(
+                    "os.environ", {"OPENROUTER_API_KEY": "test-only-key"}
+                ), patch("sys.argv", argv(8)), patch(
+                    "main_loop.run_worker", side_effect=worker
+                ):
+                    _run_main([])
+                self.assertEqual(len(calls), 8)
+
+                runs_path = runtime / "logs/runs.jsonl"
+                historical_records = [
+                    json.loads(line) for line in runs_path.read_text().splitlines()
+                ]
+                for record in historical_records:
+                    record["peer_communication_version"] = (
+                        LEGACY_DISTINCT_NAMES_VERSION
+                    )
+                    record["peer_communication_fingerprint"] = (
+                        LEGACY_DISTINCT_NAMES_FINGERPRINT
+                    )
+                    record.pop("peer_communication_population_size", None)
+                runs_path.write_text(
+                    "".join(
+                        json.dumps(record) + "\n"
+                        for record in historical_records
+                    )
+                )
+                identity_path = runtime / "runtime_benchmark.json"
+                identity = json.loads(identity_path.read_text())
+                identity["capabilities"][PEER_COMMUNICATION_CAPABILITY_NAME] = {
+                    "enabled": True,
+                    "version": LEGACY_DISTINCT_NAMES_VERSION,
+                    "fingerprint": LEGACY_DISTINCT_NAMES_FINGERPRINT,
+                }
+                identity_path.write_text(json.dumps(identity))
+                if partial:
+                    records = [
+                        json.loads(line) for line in runs_path.read_text().splitlines()
+                    ][:7]
+                    runs_path.write_text(
+                        "".join(json.dumps(record) + "\n" for record in records)
+                    )
+                    with patch.dict(
+                        "os.environ", {"OPENROUTER_API_KEY": "test-only-key"}
+                    ), patch("sys.argv", argv(16)), patch(
+                        "main_loop.run_worker", side_effect=worker
+                    ), self.assertRaisesRegex(
+                        RuntimeError, "peer communication capability"
+                    ):
+                        _run_main([])
+                    self.assertEqual(len(calls), 8)
+                    continue
+
+                pool_path = (
+                    runtime / "logs/tmp/rollout_chain/latest_parent_pool.json"
+                )
+                pool = json.loads(pool_path.read_text())
+                original_entries = json.loads(json.dumps(pool))
+                for slot_index in range(8, 16):
+                    pool.append(
+                        {
+                            "bootstrap_reinitialized": True,
+                            "child_instance_uuid": f"bootstrap-{slot_index}",
+                            "manifest_path": None,
+                            "parent_instance_uuid": None,
+                            "parent_rollout_username": None,
+                            "prompt": DEFAULT_BOOTSTRAP_INITIAL_PROMPT,
+                            "prompt_chars": len(DEFAULT_BOOTSTRAP_INITIAL_PROMPT),
+                            "slot_dir": None,
+                            "slot_index": slot_index,
+                            "workspace_dir": None,
+                        }
+                    )
+                pool_path.write_text(json.dumps(pool, indent=2, sort_keys=True))
+                self.assertEqual(
+                    json.loads(pool_path.read_text())[:8], original_entries
+                )
+
+                with patch.dict(
+                    "os.environ", {"OPENROUTER_API_KEY": "test-only-key"}
+                ), patch("sys.argv", argv(16)), patch(
+                    "main_loop.run_worker", side_effect=worker
+                ):
+                    _run_main([])
+                self.assertEqual(len(calls), 24)
+                transitioned = calls[8:]
+                self.assertEqual(
+                    {call["task_index"] for call in transitioned}, {1}
+                )
+                self.assertEqual(
+                    {call["rollout_index"] for call in transitioned}, set(range(16))
+                )
+                records = [
+                    json.loads(line) for line in runs_path.read_text().splitlines()
+                ]
+                self.assertEqual(
+                    [record["task_index"] for record in records].count(0), 8
+                )
+                self.assertEqual(
+                    [record["task_index"] for record in records].count(1), 16
                 )
 
     def test_opencode_resume_requires_matching_backend_configuration(self) -> None:
