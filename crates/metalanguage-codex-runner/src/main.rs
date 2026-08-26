@@ -423,6 +423,10 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
         .features
         .disable(Feature::SpawnCsv)
         .context("disable Codex spawn CSV feature")?;
+    // Feature flags alone are not authoritative: when agents remain enabled,
+    // model metadata can select the native V2 collaboration runtime. Force the
+    // pinned core's explicit disabled override before resolving model metadata.
+    config.agents_enabled = false;
     config
         .features
         .disable(Feature::Collab)
@@ -431,6 +435,12 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
         .features
         .disable(Feature::MultiAgentV2)
         .context("disable Codex multi-agent feature")?;
+    if config.agents_enabled
+        || config.features.enabled(Feature::Collab)
+        || config.features.enabled(Feature::MultiAgentV2)
+    {
+        bail!("native Codex collaboration could not be disabled");
+    }
 
     let state_db = init_state_db(&config).await;
     let auth_manager =
