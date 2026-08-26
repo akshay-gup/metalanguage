@@ -45,9 +45,9 @@ take precedence over values in `.env`.
 - `main_loop.py`: runs RLVR-style episodes end-to-end:
   1. by default, treat hard rows from the shuffled `m-a-p/SuperGPQA` split as the problem pool (override with `--dataset-name` and `--difficulty-filter`) and keep solved/cursor state in `--problem-queue`,
   1.5. use `moonshotai/kimi-k2.6` as the default OpenRouter model (override with `--model`),
-  2. run exactly 8 rollouts (`--num-rollouts` must be 8), using bootstrap rollouts for positions without spawned parents,
+  2. run a supported population of exactly 8 or 16 rollouts (`--num-rollouts`), using bootstrap rollouts for positions without spawned parents,
   3. reserve one deterministic next-iteration child opportunity for each source rollout, keyed by `source_rollout_index` and the same `slot_index`,
-  3.5. expose a shared cross-rollout workspace at `--rollout-temp-root/shared_workspace` and a bounded `send_message` tool for direct communication among the exactly eight rollouts in the current task batch (workspace files are cleaned after the batch; message-bus audit records remain under runtime logs),
+  3.5. expose a shared cross-rollout workspace at `--rollout-temp-root/shared_workspace` and a bounded `send_message` tool for direct communication among the configured 8 or 16 rollouts in the current task batch (workspace files are cleaned after the batch; message-bus audit records remain under runtime logs),
   3.6. assign every rollout instance a UUID for provenance and isolated runtime state,
   4. expose `archive/world_repo` by default as the durable cross-lineage Git archive available to every rollout (override with `--archive-repo-dir`),
      using a per-rollout temporary worktree so only committed archive changes are merged back and uncommitted archive edits are discarded,
@@ -66,7 +66,7 @@ take precedence over values in `.env`.
   - worker home/cache/temp state is written under `logs/rollout_state/<instance_uuid>/`, outside rollout and shared workspaces;
   - shared workspace write attribution is recorded only in the durable runtime log, not as supervisor-written files inside the shared workspace;
   - rollout-created or modified shared workspace files are deleted after the active rollout batch finishes;
-  - immutable peer-message records are stored under `logs/peer_communication/task_<task_index>/batch_<supervisor_batch_id>/messages/`, with protected delivery cursors and a batch manifest containing the randomly assigned eight-name mapping; these supervisor-owned logs are outside every rollout-writable root, survive normal cleanup and partial resume, and are preserved with the runtime; a fresh rerun of the same task index receives a new batch ID, fresh names, and an empty bus;
+  - immutable peer-message records are stored under `logs/peer_communication/task_<task_index>/batch_<supervisor_batch_id>/messages/`, with protected delivery cursors and a batch manifest containing the randomly assigned population-sized name mapping; these supervisor-owned logs are outside every rollout-writable root, survive normal cleanup and partial resume, and are preserved with the runtime; a fresh rerun of the same task index receives a new batch ID, fresh names, and an empty bus;
   - Hugging Face caches and process temp files are also redirected under the runtime root.
 - Benchmark events and child slots:
   - append-only scoring, selection, and official command events are written to `logs/benchmark_events.jsonl` under the runtime root;
@@ -74,12 +74,12 @@ take precedence over values in `.env`.
   - `submit_solution(uuid, answer)` scores immediately, returns `correct` and `reward`, and records `solution_scored` events;
   - there is no answer-file scoring fallback; a rollout that does not call `submit_solution` receives no solution score;
   - rollouts can call `send_message(message, receiver)`, `submit_solution(uuid, answer)`, and `spawn_child(prompt, workspace_dir)` as applicable main-loop tools; there is no model-facing read or broadcast interface;
-  - every fresh batch randomly assigns eight names from a curated fixed English-name roster containing at most one canonical name per initial, persists the exact index-to-name mapping, and gives each rollout its own name plus the other seven names in `runtime.md`;
+  - every fresh batch randomly assigns one name per rollout from a curated fixed English-name roster containing at most one canonical name per initial, persists the exact index-to-name mapping, and gives each rollout its own name plus all other batch names in `runtime.md`;
   - `send_message` requires the exact name of another rollout. Unknown names, self-addressing, extra fields, and caller-supplied sender or scope identity are rejected; communication remains optional;
   - accepted messages are durably queued only for the named recipient. Before a subsequent model inference the worker automatically injects a bounded ordered bundle labeled as untrusted peer content with sequence IDs and authenticated sender names, then advances a protected cursor only after the engine accepts that context. OpenRouter checks before every provider call; OpenCode prepares in its config-scoped pre-sampling message transform and acknowledges in the later `chat.params` hook after model-message conversion; Codex uses its synchronous `PostToolUse` additional-context hook after successful tool results and acknowledges on the first model-authored event from the following sampling cycle. Pinned Codex has no failure-result equivalent hook, so mail arriving only around a failed Codex tool can wait for a later successful tool boundary or the post-final fallback;
   - after an otherwise-final response, Codex and OpenCode retain one bounded idle follow-up check for late-arriving mail; OpenRouter likewise checks once after an otherwise-final response. This fallback reduces the final-boundary race and does not replace the per-inference hooks above. None interrupts active generation. Messages arriving after a recipient's final check can remain durably undelivered;
   - a prepared delivery lease survives interruption and is retried with the same message IDs until acknowledged. A process crash in the narrow interval after backend acceptance but before durable acknowledgement can cause that labeled bundle to be presented again; the stable IDs make the ambiguity visible;
-  - accepted sends are not deduplicated: each accepted retry receives a new strictly increasing sequence ID. Messages are capped at 2,048 UTF-8 bytes, sends at 64 per rollout and 512 per batch, and each injected bundle at 8 messages and 8,192 bytes; later boundaries drain any remaining backlog;
+  - accepted sends are not deduplicated: each accepted retry receives a new strictly increasing sequence ID. Messages are capped at 2,048 UTF-8 bytes and sends at 64 per rollout; the total batch cap scales from 512 for 8 rollouts to the hard maximum of 1,024 for 16. Each injected bundle remains capped at 8 messages and 8,192 bytes, and later boundaries drain any remaining backlog;
   - message bodies are persisted only in supervisor-owned immutable bus records and delivered through the authenticated narrow callback; generic progress and worker protocol logs retain only redacted lifecycle metadata;
   - `spawn_child` stores the required non-empty `prompt` in supervisor-side slot metadata as the child rollout's next initial user text;
   - `workspace_dir` is required and must be a workspace-local directory whose root contains a regular, non-symlinked, readable, non-blank UTF-8 `README.md`; `spawn_child` copies its contents into the reserved slot's inherited workspace, while additional files remain optional;
@@ -98,9 +98,9 @@ take precedence over values in `.env`.
   - there is no correctness gate for spawning; solved and unsolved rollouts may use their reserved child opportunity;
   - successfully spawned children form the next parent pool first; only the remaining configured population positions are reinitialized from the bootstrap seed.
 - Resume behavior:
-  - runs automatically resume from existing `--runs-log` entries that match dataset/split/model/seed/generation/config/rollout-count;
-  - completed rollouts are skipped, partial tasks continue from missing rollout indices using each task's recorded rollout count;
-  - peer communication policy/version is fingerprinted in new run records. Historical completed batches without that fingerprint remain valid, while a partial batch must match the current capability before it can resume; a newly started task index always receives an empty bus;
+  - runs automatically resume from existing `--runs-log` entries that match dataset/split/model/seed/generation/config and a supported historical rollout count;
+  - completed 8- and 16-rollout batches remain valid when the configured population changes. A partial task may continue only with its recorded rollout count and current capability; an incompatible partial population is rejected rather than rewritten;
+  - peer communication policy/version is fingerprinted in new run records. Historical completed capability-v4 8-rollout batches remain valid, while a partial batch must match the current capability-v5 fingerprint and population before it can resume; a newly started task index always receives an empty bus;
   - the canonical rollout system-instruction mode, version, and exact bootstrap README SHA-256 are likewise fingerprinted. Completed historical batches remain valid; partial batches must match both that system contract and their effective initial user prompt before resume;
   - `--problem-queue` is pool state, not the workspace copy: each task batch materializes all currently unsolved redacted problems in the shared workspace, and solved UIDs are marked only after the batch finishes so duplicate same-iteration solves can still receive reward;
   - parent lineage candidates are loaded from `--rollout-temp-root/latest_parent_pool.json`, which contains successful `spawn_child` records followed by fresh bootstrap entries for every remaining configured population position; inherited workspace directories are consumed when copied into a child rollout root;
@@ -194,14 +194,14 @@ Metalanguage-owned Codex runner, build the Rust runner once:
 cargo build --manifest-path crates/metalanguage-codex-runner/Cargo.toml
 ```
 
-Then run one Codex-backed task iteration with 8 bootstrap rollout slots:
+Then run one Codex-backed task iteration with 16 bootstrap rollout slots:
 
 ```bash
 uv run python -B main_loop.py \
   --worker-backend codex \
   --model gpt-5.5 \
   --step \
-  --num-rollouts 8
+  --num-rollouts 16
 ```
 
 Useful flags:
@@ -211,6 +211,9 @@ Useful flags:
 - `--codex-home PATH`: choose the Codex auth/config directory.
 - `--codex-sandbox-mode read-only|workspace-write|danger-full-access`: choose the
   rollout sandbox mode.
+- The runner forces the pinned Codex core's native agent system off, including
+  the explicit `agents_enabled=false` override, so only Metalanguage's dynamic
+  `spawn_child` and `send_message` collaboration tools are exposed.
 - `--codex-base-instructions-mode canonical-bootstrap`: require the exact
   bundled bootstrap README as Codex session `base_instructions` (the only mode
   and the default).
