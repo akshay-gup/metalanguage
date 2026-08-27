@@ -1,0 +1,11 @@
+/runtime/
+/recovery/
+/auth/
+/sessions/
+/evidence/
+/.runtime-init-*/
+/__pycache__/
+/hooks/__pycache__/
+/tests/__pycache__/
+*.pyc
+*.pyo

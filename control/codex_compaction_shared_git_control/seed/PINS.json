@@ -1,0 +1,49 @@
+{
+  "control_name": "codex_compaction_shared_git_control",
+  "format": "base-codex-compaction-control-pins",
+  "version": 2,
+  "archive_initial_state": {
+    "head": null,
+    "head_tree_sha256": null,
+    "initial_branch": "refs/heads/main",
+    "kind": "empty-unborn-git-repository",
+    "loose_object_count": 0,
+    "packed_object_count": 0,
+    "refs_count": 0,
+    "refs_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "remote_count": 0,
+    "tracked_file_count": 0,
+    "tracked_index_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "unborn": true
+  },
+  "task": {
+    "bytes": 173,
+    "sha256": "d112892c81d5a637f847128ca1ed713bbc962382c082774c46387df5df9ed2ef"
+  },
+  "additive_instruction": {
+    "bytes": 907,
+    "sha256": "fa132dae8495eb8f3da4c0026de0d8a3c9e26f720dec5248b1b90f6bcc1e5c83"
+  },
+  "fresh_prompt": {
+    "bytes": 6,
+    "sha256": "1b1bf47bfc927515211fab6442c68571345eb571e06c330e35b77281fb638f43",
+    "text": "Begin."
+  },
+  "continuation_input": {
+    "bytes": 54,
+    "sha256": "64dabb14ab3fc0b762a074ca4a5239976f4cd2a4a0821b961a30f60576103f57",
+    "text": "Continue until the next automatic compaction boundary."
+  },
+  "codex": {
+    "installation_root": "/home/akshay/.nvm/versions/node/v26.3.0/lib/node_modules/@openai/codex",
+    "launcher_sha256": "134063e133f0b4244fa3b251acf973d4fe4b4aeeacbdc135211bf480f59f1477",
+    "native_binary_sha256": "2e863156ed35ecc5253b1e2f907a9143077b9f7cb51942070c61996471ff6e04",
+    "version": "codex-cli 0.146.0"
+  },
+  "experiment": {
+    "config_sha256": "e6ace1942dc52cdcbf40bdd293ab879ad7e7bb586b7d0f36a9647ba83abdf651",
+    "model": "gpt-5.6-sol",
+    "reasoning_effort": "low",
+    "rollout_count": 8
+  }
+}
