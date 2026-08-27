@@ -32,6 +32,8 @@ take precedence over values in `.env`.
 
 ## Utilities
 
+- `control/codex_compaction_shared_git_control/`: isolated eight-session stock
+  Codex automatic-compaction comparison control with one empty shared Git repo.
 - `utils/reward.py`: reward/evaluation helpers used by training workflows.
 - `utils/openrouter.py`: helpers for OpenRouter Responses API calls.
 - `utils/task_store.py`: task-store persistence/redaction and rollout answer artifact helpers.
