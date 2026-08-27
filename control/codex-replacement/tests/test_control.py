@@ -128,7 +128,7 @@ class ControlTest(unittest.TestCase):
 
     def test_only_instruction_layer_differs_from_additive_control(self) -> None:
         source_root = Path(control.__file__).resolve().parent
-        additive_root = source_root.parent / "codex_compaction_shared_git_control"
+        additive_root = source_root.parent / "codex-additive"
         spec = importlib.util.spec_from_file_location(
             "additive_control_for_parity", additive_root / "control.py"
         )

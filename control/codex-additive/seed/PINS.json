@@ -1,8 +1,8 @@
 {
-  "control_name": "codex_replaced_instructions_shared_git_control",
-  "control_label": "stock-Codex replacement-instructions natural-turn and compaction-survival control",
-  "format": "stock-codex-replacement-instructions-control-pins",
-  "version": 1,
+  "control_name": "codex-additive",
+  "control_label": "Codex-Additive (CA): stock Codex built-in base instructions plus additive canonical AGENTS.md",
+  "format": "stock-codex-natural-turn-control-pins",
+  "version": 3,
   "archive_initial_state": {
     "head": null,
     "head_tree_sha256": null,
@@ -41,16 +41,9 @@
     ],
     "runtime_document_format": "stock-codex-control-runtime-facts-v1"
   },
-  "replacement_instruction": {
+  "additive_instruction": {
     "bytes": 2999,
     "sha256": "61a8b0e510f7634d974f69056852c375d4dcec8aed99650a0856b065ba9271b9"
-  },
-  "instruction_delivery": {
-    "additive_agents_discovery": false,
-    "config_key": "model_instructions_file",
-    "private_filename": "model_instructions.md",
-    "project_doc_max_bytes": 0,
-    "unavoidable_platform_tool_protocol": true
   },
   "fresh_prompt": {
     "bytes": 6,
@@ -69,7 +62,7 @@
     "version": "codex-cli 0.146.0"
   },
   "experiment": {
-    "config_sha256": "cb60c404aba84f7eafa00cd292c56167f29ac099cdb16c25c19416416a5a6d69",
+    "config_sha256": "af59b53c3cb0a86d9fbef69bee6951671435d63418cb92316b4aab6ad08257ad",
     "iteration_semantics": {
       "natural_finalization": true,
       "post_compact_observer": "passive",
@@ -86,27 +79,5 @@
     "model": "gpt-5.6-sol",
     "reasoning_effort": "low",
     "rollout_count": 8
-  },
-  "control_parity": {
-    "source_control": "../codex_compaction_shared_git_control",
-    "source_pins_sha256": "77c6c3124533a822c92c15ce7b5dee251fd608d74feec7a01df4627fb5c52dfb",
-    "identical_pin_sections": [
-      "archive_initial_state",
-      "task",
-      "canonical_bootstrap",
-      "instruction_transformation",
-      "fresh_prompt",
-      "continuation_input",
-      "codex",
-      "experiment.iteration_semantics",
-      "experiment.model",
-      "experiment.reasoning_effort",
-      "experiment.rollout_count"
-    ],
-    "reviewed_config_treatment_paths": [
-      "model_instructions_file",
-      "project_doc_max_bytes",
-      "permissions.control.filesystem.:workspace_roots.AGENTS.md"
-    ]
   }
 }

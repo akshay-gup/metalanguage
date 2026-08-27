@@ -32,8 +32,14 @@ take precedence over values in `.env`.
 
 ## Utilities
 
-- `control/codex_compaction_shared_git_control/`: isolated eight-session stock
-  Codex automatic-compaction comparison control with one empty shared Git repo.
+- `control/codex-additive/`: **Codex-Additive (CA)**, the eight-slot stock Codex
+  natural-turn/compaction-survival control using built-in base instructions plus
+  the canonical rollout contract through additive `AGENTS.md`.
+- `control/codex-replacement/`: **Codex-Replacement (CR)**, the matched control
+  that supplies the same rollout contract as replacement base instructions via
+  `model_instructions_file`, with additive instruction discovery disabled.
+- The existing main research system is **Metalanguage-Lineage (ML)**; its
+  runtime layout and command paths are unchanged.
 - `utils/reward.py`: reward/evaluation helpers used by training workflows.
 - `utils/openrouter.py`: helpers for OpenRouter Responses API calls.
 - `utils/task_store.py`: task-store persistence/redaction and rollout answer artifact helpers.
