@@ -122,9 +122,10 @@ python3 -m py_compile control.py hooks/iteration_boundary.py tests/fake_codex.py
 ```
 
 `status`, tests, offline initialization, and `preflight` make no provider/model
-call. Preflight uses local stock CLI inspection plus disposable Git and sandbox
-fixtures. It verifies the exact configured replacement path/bytes/hash, zero
-additive contract copies in prompt input, disabled AGENTS discovery,
+call. Preflight rematerializes the exact pinned shared task if normal batch-final
+cleanup removed it, then uses local stock CLI inspection plus disposable Git and
+sandbox fixtures. It verifies the exact configured replacement path/bytes/hash,
+zero additive contract copies in prompt input, disabled AGENTS discovery,
 task/runtime readability and immutability, private output/shared Git writes,
 forbidden-path denial, hook/tool controls, and config integrity.
 

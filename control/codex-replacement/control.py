@@ -1649,6 +1649,7 @@ def run_preflight(study: Study, *, real_cli: bool = True) -> dict[str, Any]:
     state = load_json(study.study_state_path)
     if not isinstance(state, dict):
         raise ControlError("study state is invalid")
+    materialize_shared_task(study)
     layout = verify_layout(study, state)
     codex_identity = executable_identity(study.codex_command)
     if codex_identity["version"] != EXPECTED_CODEX_VERSION:

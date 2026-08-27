@@ -294,6 +294,17 @@ class ControlTest(unittest.TestCase):
             with self.assertRaisesRegex(control.ControlError, "config changed"):
                 control.verify_layout(study, control.load_json(study.study_state_path))
 
+    def test_preflight_rematerializes_exact_task_after_batch_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            study, _ = self.initialize(Path(raw))
+            task = study.shared_workspace / "TASK.md"
+            task.unlink()
+            self.assertFalse(task.exists())
+            result = control.run_preflight(study, real_cli=False)
+            self.assertFalse(result["provider_call"])
+            self.assertEqual(task.read_bytes(), TASK_BYTES)
+            self.assertEqual(task.stat().st_mode & 0o777, 0o444)
+
     def test_no_stop_hook_and_passive_auto_postcompact_observer(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state = Path(raw)

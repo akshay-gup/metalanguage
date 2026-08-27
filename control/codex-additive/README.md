@@ -114,8 +114,9 @@ python3 control.py preflight
 ```
 
 `status` and `preflight` do not make provider/model calls. Preflight uses local
-stock CLI inspection and disposable Git/sandbox fixtures. It proves the single
-model-visible task and `runtime.md` are readable but not writable, the direct
+stock CLI inspection and disposable Git/sandbox fixtures. It rematerializes the
+exact pinned shared task if normal batch-final cleanup removed it, then proves
+the single model-visible task and `runtime.md` are readable but not writable, the direct
 top-level task is absent, private `seed_output/` and shared Git metadata are
 writable, forbidden live paths remain unreadable, and all private config hashes
 are unchanged after those stock CLI calls. The following two
