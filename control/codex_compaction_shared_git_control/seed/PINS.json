@@ -1,7 +1,8 @@
 {
   "control_name": "codex_compaction_shared_git_control",
-  "format": "base-codex-compaction-control-pins",
-  "version": 2,
+  "control_label": "stock-Codex natural-turn and compaction-survival control",
+  "format": "stock-codex-natural-turn-control-pins",
+  "version": 3,
   "archive_initial_state": {
     "head": null,
     "head_tree_sha256": null,
@@ -20,9 +21,29 @@
     "bytes": 173,
     "sha256": "d112892c81d5a637f847128ca1ed713bbc962382c082774c46387df5df9ed2ef"
   },
+  "canonical_bootstrap": {
+    "bytes": 2875,
+    "relative_path": "seeds/bootstrap/README.md",
+    "sha256": "7d9ce86b8d7cd58834fac958ced3aa93cecabf16b948cfe605785d6867d60bde"
+  },
+  "instruction_transformation": {
+    "version": 1,
+    "deviations": [
+      "identify-eight-stock-codex-sessions-and-private-rollouts",
+      "replace-forced-context-exhaustion-with-one-natural-turn",
+      "make-next-round-explicitly-launched",
+      "remove-send-message-interface",
+      "remove-spawn-child-interface",
+      "remove-seed-output-spawn-purpose",
+      "replace-benchmark-with-optional-shared-task",
+      "describe-auto-compaction-session-survival",
+      "qualify-batch-final-discard-as-success-only"
+    ],
+    "runtime_document_format": "stock-codex-control-runtime-facts-v1"
+  },
   "additive_instruction": {
-    "bytes": 906,
-    "sha256": "e10d0ffce86e5de79ec4302f4a6b17948e776691098594e78374246902d02727"
+    "bytes": 2999,
+    "sha256": "61a8b0e510f7634d974f69056852c375d4dcec8aed99650a0856b065ba9271b9"
   },
   "fresh_prompt": {
     "bytes": 6,
@@ -41,7 +62,20 @@
     "version": "codex-cli 0.146.0"
   },
   "experiment": {
-    "config_sha256": "e6ace1942dc52cdcbf40bdd293ab879ad7e7bb586b7d0f36a9647ba83abdf651",
+    "config_sha256": "7e605870b6553c819aa948fc4388732e4173e1ba3ddd925a15d4424cda7dcff4",
+    "iteration_semantics": {
+      "natural_finalization": true,
+      "post_compact_observer": "passive",
+      "resume_rule": "automatic-compaction-survival",
+      "slots": 8,
+      "stop_hook": false,
+      "turns_per_selected_session": 1
+    },
+    "stock_project_trust": {
+      "filesystem_access_granted": false,
+      "project_root": "/home/akshay/Documents/metalanguage",
+      "trust_level": "trusted"
+    },
     "model": "gpt-5.6-sol",
     "reasoning_effort": "low",
     "rollout_count": 8

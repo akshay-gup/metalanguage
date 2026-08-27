@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stock Codex Stop/PostCompact hook for one automatic-compaction window."""
+"""Passive stock Codex observer for automatic context compaction."""
 
 from __future__ import annotations
 
@@ -12,10 +12,6 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from typing import Any
-
-
-CONTINUATION_INPUT = "Continue until the next automatic compaction boundary."
-BOUNDARY_STOP_REASON = "Automatic compaction boundary reached."
 
 
 def utc_now() -> str:
@@ -92,23 +88,20 @@ def event_digest(event: dict[str, Any]) -> str:
 
 def handle(event: dict[str, Any], state_dir: Path) -> dict[str, Any]:
     event_name = event.get("hook_event_name")
-    if event_name not in {"Stop", "PostCompact"}:
+    if event_name != "PostCompact":
         raise RuntimeError(f"unsupported hook event: {event_name!r}")
+    if event.get("trigger") != "auto":
+        raise RuntimeError("PostCompact hook received a non-auto trigger")
 
-    lock_path = state_dir / "boundary.lock"
+    lock_path = state_dir / "compaction_counter.lock"
     lock_path.touch(mode=0o600, exist_ok=True)
     with lock_path.open("r+b") as lock_stream:
         fcntl.flock(lock_stream.fileno(), fcntl.LOCK_EX)
         counter_path = state_dir / "compaction_counter.json"
-        boundary_path = state_dir / "boundary.json"
         counter = load_json(counter_path)
-        boundary = load_json(boundary_path)
         count = counter.get("count")
-        target = boundary.get("target_count")
         if not isinstance(count, int) or count < 0:
             raise RuntimeError("invalid compaction counter")
-        if not isinstance(target, int) or target != count + 1:
-            raise RuntimeError("invalid or stale compaction target")
 
         record: dict[str, Any] = {
             "at": utc_now(),
@@ -117,30 +110,19 @@ def handle(event: dict[str, Any], state_dir: Path) -> dict[str, Any]:
             "session_id": event.get("session_id"),
             "turn_id": event.get("turn_id"),
         }
-
-        if event_name == "PostCompact":
-            if event.get("trigger") != "auto":
-                raise RuntimeError("PostCompact hook received a non-auto trigger")
-            count += 1
-            atomic_json(
-                counter_path,
-                {
-                    "count": count,
-                    "last_automatic_compaction_at": record["at"],
-                    "last_session_id": event.get("session_id"),
-                    "last_turn_id": event.get("turn_id"),
-                },
-            )
-            record["count_after"] = count
-            append_event(state_dir / "hook_events.jsonl", record)
-            return {"continue": False, "stopReason": BOUNDARY_STOP_REASON}
-
-        record["count"] = count
-        record["target_count"] = target
+        count += 1
+        atomic_json(
+            counter_path,
+            {
+                "count": count,
+                "last_automatic_compaction_at": record["at"],
+                "last_session_id": event.get("session_id"),
+                "last_turn_id": event.get("turn_id"),
+            },
+        )
+        record["count_after"] = count
         append_event(state_dir / "hook_events.jsonl", record)
-        if count < target:
-            return {"decision": "block", "reason": CONTINUATION_INPUT}
-        return {"continue": False, "stopReason": BOUNDARY_STOP_REASON}
+        return {}
 
 
 def main() -> int:
@@ -150,8 +132,10 @@ def main() -> int:
             raise ValueError("hook input must be a JSON object")
         result = handle(event, state_directory())
     except Exception as exc:
-        print(f"iteration boundary hook failed: {exc}", file=sys.stderr)
-        return 1
+        # Observation must never influence the stock turn. A missing increment
+        # naturally makes the slot ineligible for compaction survival.
+        print(f"passive compaction observer could not record event: {exc}", file=sys.stderr)
+        result = {}
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0
 

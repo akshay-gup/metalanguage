@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic launcher for the standalone stock-Codex compaction control."""
+"""Deterministic stock-Codex natural-turn compaction-survival control."""
 
 from __future__ import annotations
 
@@ -20,18 +20,39 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 from typing import Any, Iterable
 import uuid
 
 
 ROLLOUT_COUNT = 8
+CONTROL_LABEL = "stock-Codex natural-turn and compaction-survival control"
 MODEL = "gpt-5.6-sol"
 REASONING_EFFORT = "low"
 EXPECTED_CODEX_VERSION = "codex-cli 0.146.0"
 INITIAL_BRANCH = "main"
 FRESH_PROMPT = "Begin."
 CONTINUATION_INPUT = "Continue until the next automatic compaction boundary."
+CANONICAL_BOOTSTRAP_RELATIVE = Path("seeds/bootstrap/README.md")
+INSTRUCTION_TRANSFORM_VERSION = 1
+RUNTIME_DOCUMENT_FORMAT = "stock-codex-control-runtime-facts-v1"
+INSTRUCTION_DEVIATIONS = (
+    "identify-eight-stock-codex-sessions-and-private-rollouts",
+    "replace-forced-context-exhaustion-with-one-natural-turn",
+    "make-next-round-explicitly-launched",
+    "remove-send-message-interface",
+    "remove-spawn-child-interface",
+    "remove-seed-output-spawn-purpose",
+    "replace-benchmark-with-optional-shared-task",
+    "describe-auto-compaction-session-survival",
+    "qualify-batch-final-discard-as-success-only",
+)
 FORBIDDEN_COLLABORATION_TOOLS = {
+    "ask_agent",
+    "ask_agent_async",
+    "followup_task",
+    "interrupt_agent",
+    "read_messages",
     "spawn_agent",
     "send_input",
     "resume_agent",
@@ -40,6 +61,8 @@ FORBIDDEN_COLLABORATION_TOOLS = {
     "spawn_child",
     "send_message",
 }
+
+
 class ControlError(RuntimeError):
     pass
 
@@ -348,15 +371,177 @@ def toml_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+def canonical_bootstrap_path(study_root: Path) -> Path:
+    return study_root.resolve(strict=True).parent.parent / CANONICAL_BOOTSTRAP_RELATIVE
+
+
+def _replace_instruction_fragment(
+    text: str,
+    old: str,
+    new: str,
+    deviation: str,
+) -> str:
+    if text.count(old) != 1:
+        raise ControlError(
+            f"canonical bootstrap no longer supports reviewed transformation {deviation}"
+        )
+    return text.replace(old, new, 1)
+
+
+def render_aligned_instruction(canonical_text: str) -> str:
+    """Apply the complete reviewed stock-control adaptation to the canonical seed."""
+    replacements = (
+        (
+            "You are one of several programs running right now. Each is a separate\n"
+            "copy, working at the same time, in a separate workspace. `runtime.md`\n"
+            "lists how many there are and what they are called.",
+            "You are one of eight stock Codex sessions running right now. Each is a\n"
+            "separate session, working at the same time, in a separate private rollout.\n"
+            "`runtime.md` lists how many there are and what they are called.",
+            INSTRUCTION_DEVIATIONS[0],
+        ),
+        (
+            "You will stop when you run out of room to think. That happens after some\n"
+            "amount of work. Nothing continues after that except things written to\n"
+            "places that persist.",
+            "You get one ordinary turn in this round and may finish naturally when your\n"
+            "response is complete. Automatic context compaction may occur during that turn.\n"
+            "Nothing continues after the turn except things written to places that persist.",
+            INSTRUCTION_DEVIATIONS[1],
+        ),
+        (
+            "Everyone running now started together. When all of you have stopped, the\n"
+            "next set starts. One set starting, working, and stopping is a round. You\n"
+            "are in one now.",
+            "Everyone running now started together. When all of you have stopped, the\n"
+            "next set can start only in the next explicitly launched control iteration.\n"
+            "One set starting, working, and stopping is a round. You are in one now.",
+            INSTRUCTION_DEVIATIONS[2],
+        ),
+        (
+            "The other programs are running at the same moment as you. They stop when\n"
+            "they run out of room, same as you.\n\n"
+            "You can send one a message:\n\n"
+            "```text\n"
+            "send_message(message=\"...\", receiver=\"...\")\n"
+            "```\n\n"
+            "`receiver` must exactly match one of the names in `runtime.md`.",
+            "The other programs are running at the same moment as you. Each gets one\n"
+            "ordinary turn and may finish naturally, same as you.",
+            INSTRUCTION_DEVIATIONS[3],
+        ),
+        (
+            "`seed_output/` is local writable empty directory, potentially to be used for spawn child call input.",
+            "`seed_output/` is a local writable empty directory.",
+            INSTRUCTION_DEVIATIONS[5],
+        ),
+        (
+            "archive content is discarded after the round.",
+            "archive content is discarded after a successful round.",
+            INSTRUCTION_DEVIATIONS[8],
+        ),
+        (
+            "Programs arriving later are separate from you. They cannot ask you what\n"
+            "you meant or access reasoning that was never written down.",
+            "Fresh programs arriving later are separate from you. They cannot ask you\n"
+            "what you meant or access reasoning that was never written down.",
+            INSTRUCTION_DEVIATIONS[7],
+        ),
+        (
+            "`shared_workspace/BENCHMARK.md`, if present, describes a problem supplied\n"
+            "from outside and any interface associated with it. Its presence does not\n"
+            "make it an assignment.",
+            "`shared_workspace/TASK.md`, if present, describes a problem supplied from\n"
+            "outside and any interface associated with it. Its presence does not make\n"
+            "it an assignment.",
+            INSTRUCTION_DEVIATIONS[6],
+        ),
+        (
+            "You may be able to start one program for the next round:\n\n"
+            "```text\n"
+            "spawn_child(prompt=\"...\", workspace_dir=\"...\")\n"
+            "```\n\n"
+            "You provide a starting message and a folder.\n\n"
+            "You get at most one successful successor. A failed attempt can be\n"
+            "corrected and tried again. After one succeeds, later attempts fail. You\n"
+            "continue running either way.\n\n"
+            "The successor receives your message and the supplied folder. It does not\n"
+            "receive your reasoning, transient state, or anything else you did not put\n"
+            "there.\n\n"
+            "If you do not create a successor, your position in the next round is\n"
+            "filled by a fresh program with no inherited connection to you.",
+            "You cannot start or choose a successor. If this exact session naturally\n"
+            "experiences one or more automatic context compactions during its ordinary\n"
+            "turn, the control retains its session ID for this slot. It may be resumed\n"
+            "once in the next explicitly launched round with a neutral continuation.\n\n"
+            "If no automatic compaction occurs during this turn, this slot is filled in\n"
+            "the next explicitly launched round by a fresh separate session with no\n"
+            "inherited connection to you. No replacement starts in the current round.\n"
+            "You continue through the natural end of your ordinary turn either way.\n\n"
+            "A retained session receives its saved stock session context. A fresh session\n"
+            "does not receive your reasoning, transient state, or anything else you did\n"
+            "not put in a place that persists.",
+            INSTRUCTION_DEVIATIONS[4],
+        ),
+    )
+    transformed = canonical_text
+    for old, new, deviation in replacements:
+        transformed = _replace_instruction_fragment(
+            transformed, old, new, deviation
+        )
+    forbidden = ("send_message", "spawn_child", "BENCHMARK.md", "run out of room")
+    leftovers = [item for item in forbidden if item in transformed]
+    if leftovers:
+        raise ControlError(f"aligned instruction retained unavailable language: {leftovers}")
+    return transformed
+
+
+def render_runtime_document(study: "Study", index: int) -> str:
+    names = ", ".join(rollout_name(item) for item in range(ROLLOUT_COUNT))
+    others = ", ".join(
+        rollout_name(item) for item in range(ROLLOUT_COUNT) if item != index
+    )
+    return f'''# Runtime facts
+
+This file uses format `{RUNTIME_DOCUMENT_FORMAT}`.
+
+- Current program: `{rollout_name(index)}`
+- All eight programs: {names}
+- Other active programs: {others}
+- Private rollout: `{study.rollout_dir(index)}`
+- Private seed output: `{study.rollout_dir(index) / "seed_output"}`
+- Shared workspace: `{study.shared_workspace}`
+- Shared Git checkout: `{study.archive}` (also visible as `archive/`)
+- Optional external task: `shared_workspace/TASK.md`
+
+Each selected stock Codex session gets one ordinary natural turn in this round.
+Only a session that naturally auto-compacts during that turn can survive for
+this slot in the next explicitly launched round; every other later slot is a
+fresh separate session.
+'''
+
+
+def stock_project_root(study_root: Path) -> Path:
+    """Return the exact project root stock Codex trusts for rollout children."""
+    resolved = study_root.resolve(strict=True)
+    for candidate in (resolved, *resolved.parents):
+        git_marker = candidate / ".git"
+        if git_marker.is_dir() or git_marker.is_file():
+            return candidate
+    return resolved
+
+
 def render_config(
     shared_workspace: Path,
     study_root: Path,
     codex_runtime_root: Path,
 ) -> str:
     shared = toml_string(str(shared_workspace))
+    shared_task = toml_string(str(shared_workspace / "TASK.md"))
     ceiling = toml_string(str(study_root))
     codex_runtime = toml_string(str(codex_runtime_root))
-    return f'''# Generated by the base-Codex control. Runtime-local; do not hand edit.
+    project_root = toml_string(str(stock_project_root(study_root)))
+    return f'''# Generated by the stock-Codex natural-turn control. Runtime-local; do not hand edit.
 model = {toml_string(MODEL)}
 model_reasoning_effort = {toml_string(REASONING_EFFORT)}
 approval_policy = "never"
@@ -404,21 +589,42 @@ set = {{ GIT_CEILING_DIRECTORIES = {ceiling} }}
 [permissions.control]
 description = "Private rollout plus the one shared workspace, including Git metadata; no command network."
 
-[permissions.control.workspace_roots]
-{shared} = true
-
 [permissions.control.filesystem]
 ":minimal" = "read"
 {codex_runtime} = "read"
+{shared} = "write"
+{shared_task} = "read"
 
 [permissions.control.filesystem.":workspace_roots"]
 "." = "write"
 "AGENTS.md" = "read"
-"TASK.md" = "read"
+"runtime.md" = "read"
 
 [permissions.control.network]
 enabled = false
+
+[projects.{project_root}]
+trust_level = "trusted"
 '''
+
+
+def configured_project_trust(config_text: str, study_root: Path) -> dict[str, Any]:
+    try:
+        config = tomllib.loads(config_text)
+    except tomllib.TOMLDecodeError as exc:
+        raise ControlError(f"generated Codex config is invalid TOML: {exc}") from None
+    project_root = str(stock_project_root(study_root))
+    projects = config.get("projects")
+    expected = {project_root: {"trust_level": "trusted"}}
+    if projects != expected:
+        raise ControlError(
+            "private Codex config must contain only the exact pinned stock project trust entry"
+        )
+    return {
+        "project_root": project_root,
+        "trust_level": "trusted",
+        "filesystem_access_granted": False,
+    }
 
 
 def render_hooks(study_root: Path, rollout_state: Path) -> dict[str, Any]:
@@ -429,9 +635,8 @@ def render_hooks(study_root: Path, rollout_state: Path) -> dict[str, Any]:
     )
     handler = {"type": "command", "command": command, "timeout": 30}
     return {
-        "description": "One automatic-compaction iteration boundary.",
+        "description": "Passive durable observation of automatic compaction.",
         "hooks": {
-            "Stop": [{"hooks": [handler]}],
             "PostCompact": [{"matcher": "^auto$", "hooks": [handler]}],
         },
     }
@@ -497,6 +702,17 @@ def rollout_name(index: int) -> str:
     return f"rollout_{index:03d}"
 
 
+def slot_selection(session_ids: list[str | None]) -> list[dict[str, Any]]:
+    return [
+        {
+            "slot": index,
+            "mode": "resume" if isinstance(session_id, str) else "fresh",
+            "session_id": session_id,
+        }
+        for index, session_id in enumerate(session_ids)
+    ]
+
+
 @dataclass(frozen=True)
 class Study:
     root: Path
@@ -560,15 +776,56 @@ def validate_seed_pins(
     pins = load_json(pins_path)
     if not isinstance(pins, dict):
         raise ControlError("seed/PINS.json is invalid")
+    if pins.get("format") != "stock-codex-natural-turn-control-pins" or pins.get(
+        "version"
+    ) != 3:
+        raise ControlError("seed/PINS.json does not describe natural-turn semantics")
+    expected_semantics = {
+        "natural_finalization": True,
+        "post_compact_observer": "passive",
+        "resume_rule": "automatic-compaction-survival",
+        "slots": ROLLOUT_COUNT,
+        "stop_hook": False,
+        "turns_per_selected_session": 1,
+    }
+    if pins.get("experiment", {}).get("iteration_semantics") != expected_semantics:
+        raise ControlError("seed/PINS.json does not pin the natural-turn slot rules")
     if pins.get("archive_initial_state") != empty_repository_pin():
         raise ControlError("seed/PINS.json does not pin the empty unborn archive")
     if pins.get("task", {}).get("sha256") != task_identity["sha256"]:
         raise ControlError("seed task no longer matches seed/PINS.json")
     if pins.get("task", {}).get("bytes") != task_identity["bytes"]:
         raise ControlError("seed task byte count no longer matches seed/PINS.json")
+    canonical_path = canonical_bootstrap_path(study.root)
+    if not canonical_path.is_file() or canonical_path.is_symlink():
+        raise ControlError("canonical Metalanguage bootstrap is unavailable")
+    canonical_bytes = canonical_path.read_bytes()
+    canonical_pin = pins.get("canonical_bootstrap")
+    expected_canonical = {
+        "relative_path": str(CANONICAL_BOOTSTRAP_RELATIVE),
+        "bytes": len(canonical_bytes),
+        "sha256": sha256_bytes(canonical_bytes),
+    }
+    if canonical_pin != expected_canonical:
+        raise ControlError("canonical Metalanguage bootstrap no longer matches seed/PINS.json")
+    transformation_pin = pins.get("instruction_transformation")
+    expected_transformation = {
+        "version": INSTRUCTION_TRANSFORM_VERSION,
+        "deviations": list(INSTRUCTION_DEVIATIONS),
+        "runtime_document_format": RUNTIME_DOCUMENT_FORMAT,
+    }
+    if transformation_pin != expected_transformation:
+        raise ControlError("seed/PINS.json does not pin the reviewed instruction transformation")
     instruction_hash = sha256_file(study.root / "seed/AGENTS.md")
     if pins.get("additive_instruction", {}).get("sha256") != instruction_hash:
         raise ControlError("additive instructions no longer match seed/PINS.json")
+    try:
+        canonical_text = canonical_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ControlError("canonical Metalanguage bootstrap is not UTF-8") from None
+    aligned = render_aligned_instruction(canonical_text).encode("utf-8")
+    if (study.root / "seed/AGENTS.md").read_bytes() != aligned:
+        raise ControlError("additive instructions are not the reviewed canonical transformation")
     codex_pin = pins.get("codex", {})
     for key in (
         "version",
@@ -587,6 +844,13 @@ def validate_seed_pins(
     )
     if pins.get("experiment", {}).get("config_sha256") != config_hash:
         raise ControlError("generated experiment config no longer matches seed/PINS.json")
+    expected_trust = {
+        "project_root": str(stock_project_root(study.root)),
+        "trust_level": "trusted",
+        "filesystem_access_granted": False,
+    }
+    if pins.get("experiment", {}).get("stock_project_trust") != expected_trust:
+        raise ControlError("seed/PINS.json does not pin the exact stock project trust entry")
     return pins
 
 
@@ -596,7 +860,6 @@ def prepare_rollout_layout(
     codex_identity: dict[str, Any],
 ) -> list[dict[str, Any]]:
     instruction = study.root / "seed/AGENTS.md"
-    task = study.root / "seed/TASK.md"
     layouts: list[dict[str, Any]] = []
     for index in range(ROLLOUT_COUNT):
         rollout = study.rollout_dir(index)
@@ -607,9 +870,11 @@ def prepare_rollout_layout(
         codex_home.mkdir(mode=0o700)
         shutil.copy2(instruction, rollout / "AGENTS.md", follow_symlinks=False)
         os.chmod(rollout / "AGENTS.md", 0o444)
+        runtime_document = render_runtime_document(study, index).encode("utf-8")
+        atomic_write(rollout / "runtime.md", runtime_document, 0o444)
+        (rollout / "seed_output").mkdir(mode=0o700)
         os.symlink(study.shared_workspace, rollout / "shared_workspace", target_is_directory=True)
         os.symlink(study.archive, rollout / "archive", target_is_directory=True)
-        os.symlink(study.shared_workspace / "TASK.md", rollout / "TASK.md")
         os.symlink(auth_file, codex_home / "auth.json")
         config = render_config(
             study.shared_workspace,
@@ -627,12 +892,19 @@ def prepare_rollout_layout(
                 "state_dir": str(state_dir),
                 "state_identity": lstat_identity(state_dir),
                 "codex_home": str(codex_home),
+                "runtime_document_format": RUNTIME_DOCUMENT_FORMAT,
+                "runtime_md_sha256": sha256_file(rollout / "runtime.md"),
+                "runtime_md_bytes": (rollout / "runtime.md").stat().st_size,
+                "seed_output": str(rollout / "seed_output"),
+                "seed_output_initially_empty": True,
                 "config_sha256": sha256_file(codex_home / "config.toml"),
                 "hooks_sha256": sha256_file(codex_home / "hooks.json"),
                 "auth_strategy": "symlink-to-existing-Codex-auth",
                 "shared_workspace_resolved": str((rollout / "shared_workspace").resolve()),
                 "archive_resolved": str((rollout / "archive").resolve()),
-                "task_resolved": str((rollout / "TASK.md").resolve()),
+                "task_visible_path": str(rollout / "shared_workspace/TASK.md"),
+                "task_resolved": str((rollout / "shared_workspace/TASK.md").resolve()),
+                "direct_task_alias": False,
             }
         )
     return layouts
@@ -671,7 +943,7 @@ def initialize_study(
         raise ControlError(
             f"expected {EXPECTED_CODEX_VERSION}, got {codex_identity['version']}"
         )
-    validate_seed_pins(
+    seed_pins = validate_seed_pins(
         study,
         task_identity=task_identity,
         codex_identity=codex_identity,
@@ -683,33 +955,56 @@ def initialize_study(
     materialize_shared_task(study)
     layouts = prepare_rollout_layout(study, auth_file, codex_identity)
     instruction_hash = sha256_file(study.root / "seed/AGENTS.md")
+    canonical_path = canonical_bootstrap_path(study.root)
+    canonical_hash = sha256_file(canonical_path) if canonical_path.is_file() else None
+    if seed_pins is not None and canonical_hash is None:
+        raise ControlError("pinned canonical Metalanguage bootstrap is unavailable")
     state = {
-        "format": "base-codex-compaction-control-state",
-        "version": 2,
+        "format": "stock-codex-natural-turn-control-state",
+        "version": 3,
         "control_name": "codex_compaction_shared_git_control",
+        "control_label": CONTROL_LABEL,
         "initialized_at": utc_now(),
         "status": "initialized",
         "rollout_count": ROLLOUT_COUNT,
         "completed_iterations": 0,
-        "sessions": [None for _ in range(ROLLOUT_COUNT)],
+        "next_slot_session_ids": [None for _ in range(ROLLOUT_COUNT)],
+        "seen_fresh_session_ids": [],
         "compaction_counts": [0 for _ in range(ROLLOUT_COUNT)],
         "archive_identity": destination["identity"],
         "archive_initial_state": destination["empty_repository_identity"],
         "task_sha256": task_identity["sha256"],
         "instruction_sha256": instruction_hash,
+        "canonical_bootstrap_sha256": canonical_hash,
+        "instruction_transform_version": INSTRUCTION_TRANSFORM_VERSION,
+        "runtime_document_format": RUNTIME_DOCUMENT_FORMAT,
+        "runtime_md_sha256_by_rollout": [item["runtime_md_sha256"] for item in layouts],
         "fresh_prompt_sha256": sha256_bytes(FRESH_PROMPT.encode()),
         "continuation_input_sha256": sha256_bytes(CONTINUATION_INPUT.encode()),
         "config_sha256": layouts[0]["config_sha256"],
+        "stock_project_trust": configured_project_trust(
+            (study.codex_home(0) / "config.toml").read_text(encoding="utf-8"),
+            study.root,
+        ),
         "hooks_sha256_by_rollout": [item["hooks_sha256"] for item in layouts],
         "codex": codex_identity,
     }
     atomic_json(study.study_state_path, state)
     init_manifest = {
-        "format": "base-codex-compaction-control-init",
-        "version": 2,
+        "format": "stock-codex-natural-turn-control-init",
+        "version": 3,
         "created_at": utc_now(),
         "control_name": "codex_compaction_shared_git_control",
+        "control_label": CONTROL_LABEL,
         "provider_call": False,
+        "iteration_semantics": {
+            "slots": ROLLOUT_COUNT,
+            "turns_per_selected_session": 1,
+            "natural_finalization": True,
+            "stop_hook": False,
+            "post_compact_observer": "passive",
+            "next_slot_rule": "resume only sessions compacted during their successful turn; otherwise fresh",
+        },
         "archive_seed": empty_repository_pin(),
         "destination_archive": str(study.archive),
         "destination": destination,
@@ -718,6 +1013,13 @@ def initialize_study(
             "path": str(study.root / "seed/AGENTS.md"),
             "sha256": instruction_hash,
             "bytes": (study.root / "seed/AGENTS.md").stat().st_size,
+        },
+        "canonical_bootstrap": {
+            "path": str(canonical_path) if canonical_hash is not None else None,
+            "sha256": state["canonical_bootstrap_sha256"],
+            "transformation_version": INSTRUCTION_TRANSFORM_VERSION,
+            "reviewed_deviations": list(INSTRUCTION_DEVIATIONS),
+            "delivery": "additive stock Codex AGENTS.md",
         },
         "fresh_prompt": {"text": FRESH_PROMPT, "sha256": state["fresh_prompt_sha256"]},
         "continuation_input": {
@@ -728,6 +1030,7 @@ def initialize_study(
         "model": MODEL,
         "reasoning_effort": REASONING_EFFORT,
         "permissions": "custom control profile: private rollout + shared workspace write, command network disabled",
+        "stock_project_trust": state["stock_project_trust"],
         "rollouts": layouts,
         "auth": {
             "strategy": "one symlink per private CODEX_HOME to existing auth.json",
@@ -759,6 +1062,12 @@ def verify_layout(study: Study, state: dict[str, Any]) -> dict[str, Any]:
     recorded_hooks = state.get("hooks_sha256_by_rollout")
     if not isinstance(recorded_hooks, list) or len(recorded_hooks) != ROLLOUT_COUNT:
         raise ControlError("study state does not pin eight private hook configurations")
+    recorded_runtime_documents = state.get("runtime_md_sha256_by_rollout")
+    if (
+        not isinstance(recorded_runtime_documents, list)
+        or len(recorded_runtime_documents) != ROLLOUT_COUNT
+    ):
+        raise ControlError("study state does not pin eight private runtime documents")
     for index in range(ROLLOUT_COUNT):
         rollout = study.rollout_dir(index)
         state_dir = study.rollout_state(index)
@@ -769,26 +1078,48 @@ def verify_layout(study: Study, state: dict[str, Any]) -> dict[str, Any]:
         shared_link = rollout / "shared_workspace"
         archive_link = rollout / "archive"
         task_link = rollout / "TASK.md"
-        if not shared_link.is_symlink() or not archive_link.is_symlink() or not task_link.is_symlink():
+        if not shared_link.is_symlink() or not archive_link.is_symlink():
             raise ControlError(f"shared path links changed for rollout {index}")
+        if task_link.exists() or task_link.is_symlink():
+            raise ControlError(f"redundant direct TASK.md exposure exists for rollout {index}")
         resolved_shared.add(str(shared_link.resolve(strict=True)))
         resolved_archive.add(str(archive_link.resolve(strict=True)))
-        if task_link.resolve(strict=True) != (study.shared_workspace / "TASK.md").resolve(strict=True):
-            raise ControlError(f"TASK.md link changed for rollout {index}")
+        visible_task = rollout / "shared_workspace/TASK.md"
+        if visible_task.resolve(strict=True) != (study.shared_workspace / "TASK.md").resolve(strict=True):
+            raise ControlError(f"shared_workspace/TASK.md changed for rollout {index}")
         if (rollout / "AGENTS.md").read_bytes() != (study.root / "seed/AGENTS.md").read_bytes():
             raise ControlError(f"base instructions changed for rollout {index}")
+        runtime_path = rollout / "runtime.md"
+        expected_runtime = render_runtime_document(study, index).encode("utf-8")
+        if runtime_path.is_symlink() or runtime_path.read_bytes() != expected_runtime:
+            raise ControlError(f"runtime.md changed for rollout {index}")
+        runtime_hash = sha256_bytes(expected_runtime)
+        if recorded_runtime_documents[index] != runtime_hash:
+            raise ControlError(f"recorded runtime.md changed for rollout {index}")
+        seed_output = rollout / "seed_output"
+        if seed_output.is_symlink() or not seed_output.is_dir():
+            raise ControlError(f"private seed_output changed for rollout {index}")
         rollout_identities.append(
             {
                 "index": index,
                 "rollout": lstat_identity(rollout),
                 "state": lstat_identity(state_dir),
                 "codex_home": lstat_identity(study.codex_home(index)),
+                "runtime_md": lstat_identity(runtime_path),
+                "runtime_md_sha256": runtime_hash,
+                "seed_output": lstat_identity(seed_output),
                 "config_sha256": sha256_file(study.codex_home(index) / "config.toml"),
                 "hooks_sha256": sha256_file(study.codex_home(index) / "hooks.json"),
             }
         )
         if state.get("config_sha256") != rollout_identities[-1]["config_sha256"]:
             raise ControlError(f"private Codex config changed for rollout {index}")
+        project_trust = configured_project_trust(
+            (study.codex_home(index) / "config.toml").read_text(encoding="utf-8"),
+            study.root,
+        )
+        if project_trust != state.get("stock_project_trust"):
+            raise ControlError(f"private Codex project trust changed for rollout {index}")
         expected_hooks_hash = sha256_bytes(
             (
                 json.dumps(render_hooks(study.root, state_dir), indent=2, sort_keys=True)
@@ -810,6 +1141,9 @@ def verify_layout(study: Study, state: dict[str, Any]) -> dict[str, Any]:
         "archive": archive_identity,
         "shared_workspace_resolved": expected_shared,
         "archive_resolved": expected_archive,
+        "task_visible_relative_path": "shared_workspace/TASK.md",
+        "task_resolved": str((study.shared_workspace / "TASK.md").resolve(strict=True)),
+        "direct_task_alias": False,
         "rollouts": rollout_identities,
     }
 
@@ -850,6 +1184,29 @@ def configured_tool_controls(config_text: str, feature_output: str | None = None
     }
 
 
+def configured_hook_controls(hooks_value: Any) -> dict[str, Any]:
+    if not isinstance(hooks_value, dict):
+        raise ControlError("private hook configuration is not an object")
+    hooks = hooks_value.get("hooks")
+    if not isinstance(hooks, dict) or set(hooks) != {"PostCompact"}:
+        raise ControlError("hook configuration must contain only PostCompact")
+    handlers = hooks.get("PostCompact")
+    if not isinstance(handlers, list) or len(handlers) != 1:
+        raise ControlError("hook configuration must contain one PostCompact matcher")
+    matcher = handlers[0] if isinstance(handlers[0], dict) else {}
+    if matcher.get("matcher") != "^auto$":
+        raise ControlError("PostCompact hook must match only automatic compaction")
+    commands = matcher.get("hooks")
+    if not isinstance(commands, list) or len(commands) != 1:
+        raise ControlError("PostCompact hook must contain one passive observer command")
+    return {
+        "configured_events": ["PostCompact"],
+        "stop_hook": False,
+        "post_compact_matcher": "^auto$",
+        "post_compact_behavior": "passive durable observer",
+    }
+
+
 def private_cli_environment(study: Study, index: int) -> dict[str, str]:
     environment = study.codex_env(index)
     # Provider authentication is read through the auth.json symlink. Do not pass
@@ -877,7 +1234,16 @@ def provider_free_sandbox_check(
         shared.mkdir()
         custom_home.mkdir()
         legacy_home.mkdir()
+        seed_output = rollout / "seed_output"
+        seed_output.mkdir()
+        instruction_bytes = (study.root / "seed/AGENTS.md").read_bytes()
+        runtime_bytes = b"# Runtime facts\n\nDisposable provider-free sandbox fixture.\n"
+        atomic_write(rollout / "AGENTS.md", instruction_bytes, 0o444)
+        atomic_write(rollout / "runtime.md", runtime_bytes, 0o444)
         os.symlink(shared, rollout / "shared_workspace", target_is_directory=True)
+        os.symlink(archive, rollout / "archive", target_is_directory=True)
+        task_bytes = (study.root / "seed/TASK.md").read_bytes()
+        atomic_write(shared / "TASK.md", task_bytes, 0o644)
         _run(["git", "init", "-b", "main", str(archive)])
         git(archive, "config", "user.name", "control-preflight")
         git(archive, "config", "user.email", "control-preflight@invalid")
@@ -919,6 +1285,123 @@ def provider_free_sandbox_check(
         if git(archive, "rev-parse", "--verify", ref, check=False).returncode != 0:
             raise ControlError("custom permission profile did not create the test ref")
         git(archive, "update-ref", "-d", ref)
+        visible_task = rollout / "shared_workspace/TASK.md"
+        task_read = _run(
+            [
+                codex_executable,
+                "sandbox",
+                "-P",
+                "control",
+                "-C",
+                str(rollout),
+                "--",
+                "/usr/bin/cat",
+                str(visible_task),
+            ],
+            env=custom_env,
+            check=False,
+        )
+        if task_read.returncode != 0 or task_read.stdout != task_bytes:
+            raise ControlError(
+                "custom permission profile did not expose the exact shared task read-only: "
+                + task_read.stderr.decode("utf-8", "replace")[:800]
+            )
+        task_write = _run(
+            [
+                codex_executable,
+                "sandbox",
+                "-P",
+                "control",
+                "-C",
+                str(rollout),
+                "--",
+                "/bin/sh",
+                "-c",
+                'printf mutation > "$1"',
+                "sandbox-task-write",
+                str(visible_task),
+            ],
+            env=custom_env,
+            check=False,
+        )
+        if task_write.returncode == 0 or (shared / "TASK.md").read_bytes() != task_bytes:
+            raise ControlError("custom permission profile allowed shared task mutation")
+        direct_task = _run(
+            [
+                codex_executable,
+                "sandbox",
+                "-P",
+                "control",
+                "-C",
+                str(rollout),
+                "--",
+                "/usr/bin/test",
+                "!",
+                "-e",
+                str(rollout / "TASK.md"),
+            ],
+            env=custom_env,
+            check=False,
+        )
+        if direct_task.returncode != 0:
+            raise ControlError("custom permission profile synthesized a direct TASK.md alias")
+        runtime_read = _run(
+            [
+                codex_executable,
+                "sandbox",
+                "-P",
+                "control",
+                "-C",
+                str(rollout),
+                "--",
+                "/usr/bin/cat",
+                str(rollout / "runtime.md"),
+            ],
+            env=custom_env,
+            check=False,
+        )
+        if runtime_read.returncode != 0 or runtime_read.stdout != runtime_bytes:
+            raise ControlError("custom permission profile did not expose runtime.md read-only")
+        runtime_write = _run(
+            [
+                codex_executable,
+                "sandbox",
+                "-P",
+                "control",
+                "-C",
+                str(rollout),
+                "--",
+                "/bin/sh",
+                "-c",
+                'printf mutation > "$1"',
+                "sandbox-runtime-write",
+                str(rollout / "runtime.md"),
+            ],
+            env=custom_env,
+            check=False,
+        )
+        if runtime_write.returncode == 0 or (rollout / "runtime.md").read_bytes() != runtime_bytes:
+            raise ControlError("custom permission profile allowed runtime.md mutation")
+        seed_write = _run(
+            [
+                codex_executable,
+                "sandbox",
+                "-P",
+                "control",
+                "-C",
+                str(rollout),
+                "--",
+                "/bin/sh",
+                "-c",
+                'printf seed > "$1"',
+                "sandbox-seed-write",
+                str(seed_output / "probe.txt"),
+            ],
+            env=custom_env,
+            check=False,
+        )
+        if seed_write.returncode != 0 or (seed_output / "probe.txt").read_bytes() != b"seed":
+            raise ControlError("custom permission profile cannot write private seed_output")
         denied_read_results: list[dict[str, Any]] = []
         denied_paths = (
             Path.home() / ".codex/auth.json",
@@ -965,6 +1448,15 @@ def provider_free_sandbox_check(
             "custom_profile": "control",
             "custom_profile_exit_status": custom.returncode,
             "custom_profile_git_metadata_write": True,
+            "model_visible_task_path": "shared_workspace/TASK.md",
+            "model_visible_task_read": True,
+            "model_visible_task_write": False,
+            "direct_task_alias": False,
+            "model_visible_runtime_path": "runtime.md",
+            "model_visible_runtime_read": True,
+            "model_visible_runtime_write": False,
+            "private_seed_output_path": "seed_output/",
+            "private_seed_output_write": True,
             "legacy_workspace_write_exit_status": legacy.returncode,
             "legacy_workspace_write_git_metadata_write": False,
             "forbidden_path_reads": denied_read_results,
@@ -1001,12 +1493,15 @@ def run_preflight(study: Study, *, real_cli: bool = True) -> dict[str, Any]:
     initial_archive_verification: dict[str, Any] | None = None
     if (
         state.get("completed_iterations") == 0
-        and state.get("sessions") == [None for _ in range(ROLLOUT_COUNT)]
+        and state.get("next_slot_session_ids") == [None for _ in range(ROLLOUT_COUNT)]
         and state.get("compaction_counts") == [0 for _ in range(ROLLOUT_COUNT)]
     ):
         initial_archive_verification = verify_initial_empty_repository(study.archive)
     config_path = study.codex_home(0) / "config.toml"
     config_text = config_path.read_text(encoding="utf-8")
+    hook_controls = configured_hook_controls(
+        load_json(study.codex_home(0) / "hooks.json")
+    )
     environment = private_cli_environment(study, 0)
     feature_result = _run(
         [study.codex_command, "features", "list"],
@@ -1072,22 +1567,46 @@ def run_preflight(study: Study, *, real_cli: bool = True) -> dict[str, Any]:
         str(Path(shutil.which(study.codex_command) or study.codex_command)),
         Path(codex_identity["installation_root"]),
     ) if real_cli else {"provider_call": False, "skipped_for_fake": True}
+    layout_after_provider_free_checks = verify_layout(study, state)
+    canonical_path = canonical_bootstrap_path(study.root)
+    canonical_available = canonical_path.is_file()
+    canonical_record = {
+        "path": str(canonical_path) if canonical_available else None,
+        "sha256": sha256_file(canonical_path) if canonical_available else None,
+        "transformation_version": INSTRUCTION_TRANSFORM_VERSION,
+        "reviewed_deviations": list(INSTRUCTION_DEVIATIONS),
+        "transformed_bytes_match_seed": (
+            render_aligned_instruction(canonical_path.read_text(encoding="utf-8")).encode(
+                "utf-8"
+            )
+            == instruction
+            if canonical_available
+            else None
+        ),
+        "delivery": "additive stock Codex AGENTS.md",
+        "validation_skipped_without_seed_pins": not canonical_available,
+    }
     preflight = {
-        "format": "base-codex-compaction-control-preflight",
-        "version": 2,
+        "format": "stock-codex-natural-turn-control-preflight",
+        "version": 3,
         "at": utc_now(),
         "provider_call": False,
+        "control_label": CONTROL_LABEL,
         "layout": layout,
+        "layout_after_provider_free_checks": layout_after_provider_free_checks,
         "initial_empty_archive": initial_archive_verification,
         "codex": codex_identity,
         "model": MODEL,
         "reasoning_effort": REASONING_EFFORT,
         "stock_base_instructions_sha256": sha256_bytes(base_instructions.encode()),
+        "canonical_bootstrap": canonical_record,
         "additive_instruction_sha256": sha256_bytes(instruction),
         "rendered_prompt_input_sha256": sha256_bytes(prompt_bytes),
         "fresh_prompt_sha256": sha256_bytes(FRESH_PROMPT.encode()),
         "config_sha256": sha256_file(config_path),
+        "stock_project_trust": configured_project_trust(config_text, study.root),
         "tool_controls": tool_controls,
+        "hook_controls": hook_controls,
         "sandbox": sandbox,
     }
     preflight_dir = study.runtime / "preflight"
@@ -1099,6 +1618,34 @@ def run_preflight(study: Study, *, real_cli: bool = True) -> dict[str, Any]:
 
 def shared_non_archive_entries(study: Study) -> list[str]:
     return sorted(entry.name for entry in study.shared_workspace.iterdir() if entry.name != "archive")
+
+
+def reset_private_seed_outputs(study: Study) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for index in range(ROLLOUT_COUNT):
+        directory = ensure_real_directory(
+            study.rollout_dir(index) / "seed_output",
+            f"private seed_output for rollout {index}",
+        )
+        removed: list[str] = []
+        for entry in sorted(directory.iterdir(), key=lambda item: item.name):
+            if entry.parent != directory or entry.name in {"", ".", ".."}:
+                raise ControlError(f"unsafe private seed_output cleanup target: {entry}")
+            info = entry.lstat()
+            if stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode):
+                shutil.rmtree(entry)
+            else:
+                entry.unlink()
+            removed.append(entry.name)
+        results.append(
+            {
+                "rollout_index": index,
+                "path": str(directory),
+                "removed_entries": removed,
+                "empty": not any(directory.iterdir()),
+            }
+        )
+    return results
 
 
 def safe_remove_entry(entry: Path, shared_workspace: Path) -> None:
@@ -1236,6 +1783,7 @@ def parse_jsonl_evidence(data: bytes) -> dict[str, Any]:
     errors: list[str] = []
     inventory_tools: set[str] = set()
     invalid_lines = 0
+    turn_completed_count = 0
 
     def inspect(value: Any) -> None:
         if isinstance(value, dict):
@@ -1263,6 +1811,8 @@ def parse_jsonl_evidence(data: bytes) -> dict[str, Any]:
             continue
         if not isinstance(event, dict):
             continue
+        if event.get("type") == "turn.completed":
+            turn_completed_count += 1
         inspect(event)
         if event.get("type") == "thread.started" and isinstance(event.get("thread_id"), str):
             session_ids.append(event["thread_id"])
@@ -1282,6 +1832,7 @@ def parse_jsonl_evidence(data: bytes) -> dict[str, Any]:
         "final_message": final_messages[-1] if final_messages else None,
         "agent_message_count": len(final_messages),
         "errors": errors,
+        "turn_completed_count": turn_completed_count,
         "invalid_jsonl_line_count": invalid_lines,
         "emitted_or_used_tool_names": sorted(inventory_tools),
         "forbidden_collaboration_tools": forbidden,
@@ -1307,7 +1858,6 @@ def build_codex_command(
         "--json",
         "--strict-config",
         "--ignore-rules",
-        "--dangerously-bypass-hook-trust",
         "--skip-git-repo-check",
         "-m",
         MODEL,
@@ -1424,22 +1974,44 @@ def run_iteration(
                 f"study is not runnable after status {state.get('status')!r}; inspect the last manifest"
             )
         completed = state.get("completed_iterations")
-        sessions = state.get("sessions")
+        selected_sessions = state.get("next_slot_session_ids")
+        seen_fresh_sessions = state.get("seen_fresh_session_ids")
         recorded_counts = state.get("compaction_counts")
-        if not isinstance(completed, int) or not isinstance(sessions, list) or not isinstance(
-            recorded_counts, list
+        if (
+            not isinstance(completed, int)
+            or not isinstance(selected_sessions, list)
+            or not isinstance(seen_fresh_sessions, list)
+            or not isinstance(recorded_counts, list)
         ):
             raise ControlError("study state fields are invalid")
-        if len(sessions) != ROLLOUT_COUNT or len(recorded_counts) != ROLLOUT_COUNT:
+        if len(selected_sessions) != ROLLOUT_COUNT or len(recorded_counts) != ROLLOUT_COUNT:
             raise ControlError("study state does not describe exactly eight rollouts")
+        if any(
+            item is not None and (not isinstance(item, str) or not item)
+            for item in selected_sessions
+        ):
+            raise ControlError("next-slot sessions must be session ids or null")
+        resumed_session_ids = [
+            item for item in selected_sessions if isinstance(item, str)
+        ]
+        if len(set(resumed_session_ids)) != len(resumed_session_ids):
+            raise ControlError("next-slot resumed session ids must be distinct")
+        if (
+            any(not isinstance(item, str) or not item for item in seen_fresh_sessions)
+            or len(set(seen_fresh_sessions)) != len(seen_fresh_sessions)
+        ):
+            raise ControlError("seen fresh-session history is invalid")
+        if not set(resumed_session_ids) <= set(seen_fresh_sessions):
+            raise ControlError("next-slot state refers to an unknown stock Codex session")
         if resume:
-            if completed < 1 or not all(isinstance(item, str) for item in sessions):
-                raise ControlError("resume-next-iteration requires eight completed persistent sessions")
+            if completed < 1:
+                raise ControlError("resume-next-iteration requires a completed prior iteration")
         else:
-            if completed != 0 or any(item is not None for item in sessions):
+            if completed != 0 or any(item is not None for item in selected_sessions):
                 raise ControlError("run-one-iteration is only valid for eight fresh sessions")
             verify_initial_empty_repository(study.archive)
 
+        seed_output_reset = reset_private_seed_outputs(study)
         materialize_shared_task(study)
         layout_before = verify_layout(study, state)
         actual_counts = [read_compaction_count(study.rollout_state(i)) for i in range(ROLLOUT_COUNT)]
@@ -1459,42 +2031,32 @@ def run_iteration(
             raise ControlError(f"iteration evidence already exists: {iteration_dir}")
         iteration_dir.mkdir(parents=True, mode=0o700)
 
-        targets = [count + 1 for count in actual_counts]
-        for index, target in enumerate(targets):
-            atomic_json(
-                study.rollout_state(index) / "boundary.json",
-                {
-                    "iteration_index": iteration_index,
-                    "starting_count": actual_counts[index],
-                    "target_count": target,
-                    "continuation_input": CONTINUATION_INPUT,
-                    "continuation_input_sha256": sha256_bytes(CONTINUATION_INPUT.encode()),
-                    "configured_at": utc_now(),
-                },
-            )
-
         manifest_path = iteration_dir / "manifest.json"
         running_manifest: dict[str, Any] = {
-            "format": "base-codex-compaction-control-iteration",
-            "version": 2,
+            "format": "stock-codex-natural-turn-control-iteration",
+            "version": 3,
             "control_name": "codex_compaction_shared_git_control",
+            "control_label": CONTROL_LABEL,
             "iteration_index": iteration_index,
-            "mode": "resume" if resume else "fresh",
+            "mode": "mixed-next-pool" if resume else "initial-fresh",
             "status": "running",
             "started_at": utc_now(),
             "rollout_count": ROLLOUT_COUNT,
+            "turns_per_selected_session": 1,
+            "natural_finalization": True,
             "model": MODEL,
             "reasoning_effort": REASONING_EFFORT,
             "permissions": "control",
-            "fresh_prompt": FRESH_PROMPT if not resume else None,
+            "fresh_prompt": FRESH_PROMPT,
             "continuation_input": CONTINUATION_INPUT,
+            "slot_selection_before": slot_selection(selected_sessions),
+            "private_seed_output_reset": seed_output_reset,
             "task_sha256": state["task_sha256"],
             "instruction_sha256": state["instruction_sha256"],
             "codex": executable_identity(study.codex_command),
             "layout_before": layout_before,
             "archive_before": archive_before,
             "compaction_counts_before": actual_counts,
-            "compaction_targets": targets,
             "preflight": preflight_record,
             "rollouts": [],
         }
@@ -1504,11 +2066,12 @@ def run_iteration(
         launch_error: str | None = None
         try:
             for index in range(ROLLOUT_COUNT):
+                selected_session = selected_sessions[index]
                 command, prompt = build_codex_command(
                     study,
                     index,
-                    resume=resume,
-                    session_id=sessions[index] if isinstance(sessions[index], str) else None,
+                    resume=isinstance(selected_session, str),
+                    session_id=selected_session,
                 )
                 evidence_dir = iteration_dir / rollout_name(index)
                 evidence_dir.mkdir(mode=0o700)
@@ -1567,45 +2130,86 @@ def run_iteration(
         rollout_results.sort(key=lambda item: item["rollout_index"])
 
         counts_after = [read_compaction_count(study.rollout_state(i)) for i in range(ROLLOUT_COUNT)]
-        captured_sessions = list(sessions)
-        barrier_failures: list[str] = []
+        compaction_deltas = [
+            counts_after[index] - actual_counts[index] for index in range(ROLLOUT_COUNT)
+        ]
+        captured_sessions: list[str | None] = [None for _ in range(ROLLOUT_COUNT)]
+        finalization_failures: list[str] = []
         if launch_error is not None:
-            barrier_failures.append(f"launch error: {launch_error}")
+            finalization_failures.append(f"launch error: {launch_error}")
         if len(rollout_results) != ROLLOUT_COUNT:
-            barrier_failures.append(
+            finalization_failures.append(
                 f"only {len(rollout_results)} of {ROLLOUT_COUNT} processes were launched"
             )
+        for index, delta in enumerate(compaction_deltas):
+            if delta < 0:
+                finalization_failures.append(
+                    f"rollout {index} durable compaction count moved backwards"
+                )
         for result in rollout_results:
             index = result["rollout_index"]
-            emitted_sessions = result["stream"]["session_ids"]
-            if not emitted_sessions:
-                barrier_failures.append(f"rollout {index} emitted no session id")
-            else:
-                current_session = emitted_sessions[0]
-                if resume and current_session != sessions[index]:
-                    barrier_failures.append(f"rollout {index} resumed a different session id")
-                captured_sessions[index] = current_session
-            if result["stream"]["forbidden_collaboration_tools"]:
-                barrier_failures.append(
-                    f"rollout {index} exposed forbidden collaboration tools: "
-                    f"{result['stream']['forbidden_collaboration_tools']}"
+            stream = result["stream"]
+            if result["exit_status"] != 0:
+                finalization_failures.append(
+                    f"rollout {index} exited with status {result['exit_status']}"
                 )
-            if counts_after[index] != targets[index]:
-                barrier_failures.append(
-                    f"rollout {index} count {counts_after[index]} did not advance exactly to {targets[index]}"
+            if stream["errors"]:
+                finalization_failures.append(
+                    f"rollout {index} emitted {len(stream['errors'])} error event(s)"
+                )
+            if stream["invalid_jsonl_line_count"]:
+                finalization_failures.append(
+                    f"rollout {index} emitted "
+                    f"{stream['invalid_jsonl_line_count']} invalid JSONL line(s)"
+                )
+            if stream["turn_completed_count"] != 1:
+                finalization_failures.append(
+                    f"rollout {index} emitted {stream['turn_completed_count']} completed turns instead of one"
+                )
+            emitted_sessions = stream["session_ids"]
+            distinct_emitted = list(dict.fromkeys(emitted_sessions))
+            if len(distinct_emitted) != 1:
+                finalization_failures.append(
+                    f"rollout {index} emitted {len(distinct_emitted)} distinct session ids"
+                )
+            else:
+                current_session = distinct_emitted[0]
+                selected_session = selected_sessions[index]
+                if isinstance(selected_session, str) and current_session != selected_session:
+                    finalization_failures.append(
+                        f"rollout {index} resumed a different session id"
+                    )
+                if selected_session is None and current_session in seen_fresh_sessions:
+                    finalization_failures.append(
+                        f"rollout {index} fresh selection reused a prior session id"
+                    )
+                captured_sessions[index] = current_session
+            if stream["forbidden_collaboration_tools"]:
+                finalization_failures.append(
+                    f"rollout {index} exposed forbidden collaboration tools: "
+                    f"{stream['forbidden_collaboration_tools']}"
                 )
         if len({item for item in captured_sessions if isinstance(item, str)}) != ROLLOUT_COUNT:
-            barrier_failures.append("the study does not have exactly eight distinct session ids")
+            finalization_failures.append(
+                "the batch did not finish with exactly eight distinct session ids"
+            )
         try:
             layout_after_processes = verify_layout(study, state)
         except ControlError as exc:
             layout_after_processes = {"error": str(exc)}
-            barrier_failures.append(str(exc))
+            finalization_failures.append(str(exc))
+
+        candidate_next_sessions: list[str | None] | None = None
+        if not finalization_failures:
+            candidate_next_sessions = [
+                captured_sessions[index] if compaction_deltas[index] >= 1 else None
+                for index in range(ROLLOUT_COUNT)
+            ]
 
         archive_after_processes: dict[str, Any] | None = None
         cleanup: dict[str, Any] | None = None
         cleanup_error: str | None = None
-        if not barrier_failures:
+        if not finalization_failures:
             try:
                 archive_after_processes = git_snapshot(study.archive)
                 cleanup = clean_shared_workspace(
@@ -1619,41 +2223,61 @@ def run_iteration(
             "rollouts": rollout_results,
             "session_ids": captured_sessions,
             "compaction_counts_after": counts_after,
-            "barrier_reached": not barrier_failures,
-            "barrier_failures": barrier_failures,
+            "compaction_deltas": compaction_deltas,
+            "compacted_slots": [
+                index for index, delta in enumerate(compaction_deltas) if delta >= 1
+            ],
+            "all_natural_turns_succeeded": not finalization_failures,
+            "finalization_failures": finalization_failures,
+            "candidate_next_slot_session_ids": candidate_next_sessions,
             "layout_after_processes": layout_after_processes,
             "archive_after_processes": archive_after_processes,
             "cleanup": cleanup,
             "cleanup_error": cleanup_error,
         }
-        if barrier_failures:
+        if finalization_failures:
             manifest["status"] = "incomplete"
             state["status"] = "blocked_incomplete"
-            state["sessions"] = captured_sessions
             state["compaction_counts"] = counts_after
+            state["last_observed_turn_session_ids"] = captured_sessions
             state["last_iteration_manifest"] = str(manifest_path)
             atomic_json(study.study_state_path, state)
             atomic_json(manifest_path, manifest)
             raise ControlError(
                 "iteration incomplete; no relaunch and no cleanup were performed: "
-                + "; ".join(barrier_failures)
+                + "; ".join(finalization_failures)
             )
         if cleanup_error is not None:
-            manifest["status"] = "cleanup_failed"
-            state["status"] = "cleanup_failed"
-            state["sessions"] = captured_sessions
+            manifest["status"] = "incomplete"
+            manifest["incomplete_reason"] = "cleanup_failed"
+            state["status"] = "blocked_incomplete"
             state["compaction_counts"] = counts_after
+            state["last_observed_turn_session_ids"] = captured_sessions
             state["last_iteration_manifest"] = str(manifest_path)
             atomic_json(study.study_state_path, state)
             atomic_json(manifest_path, manifest)
             raise ControlError(
-                f"all rollouts reached the boundary, but cleanup failed closed: {cleanup_error}"
+                f"all natural turns exited successfully, but cleanup failed closed: {cleanup_error}"
             )
+        if candidate_next_sessions is None or any(
+            not isinstance(item, str) for item in captured_sessions
+        ):
+            raise AssertionError("successful turn finalization omitted session state")
+        fresh_sessions_this_turn = [
+            captured_sessions[index]
+            for index, selected_session in enumerate(selected_sessions)
+            if selected_session is None
+        ]
         manifest["status"] = "complete"
+        manifest["next_slot_session_ids"] = candidate_next_sessions
+        manifest["next_slot_selection"] = slot_selection(candidate_next_sessions)
         state["status"] = "ready"
         state["completed_iterations"] = iteration_index
-        state["sessions"] = captured_sessions
+        state["next_slot_session_ids"] = candidate_next_sessions
+        state["seen_fresh_session_ids"] = seen_fresh_sessions + fresh_sessions_this_turn
         state["compaction_counts"] = counts_after
+        state["last_turn_session_ids"] = captured_sessions
+        state["last_compaction_deltas"] = compaction_deltas
         state["last_iteration_manifest"] = str(manifest_path)
         state["last_completed_at"] = manifest["ended_at"]
         atomic_json(study.study_state_path, state)
@@ -1667,20 +2291,32 @@ def status_record(study: Study) -> dict[str, Any]:
         raise ControlError("study state is invalid")
     archive = git_snapshot(study.archive)
     counts = [read_compaction_count(study.rollout_state(i)) for i in range(ROLLOUT_COUNT)]
+    next_sessions = state.get("next_slot_session_ids")
+    if not isinstance(next_sessions, list) or len(next_sessions) != ROLLOUT_COUNT:
+        raise ControlError("study state does not contain eight next slots")
     return {
         "control_name": "codex_compaction_shared_git_control",
+        "control_label": CONTROL_LABEL,
         "root": str(study.root),
         "state": state,
+        "next_slot_selection": slot_selection(next_sessions),
         "durable_compaction_counts": counts,
+        "durable_counts_match_state": counts == state.get("compaction_counts"),
         "archive": archive,
         "shared_non_archive_entries": shared_non_archive_entries(study),
+        "instruction_alignment": {
+            "canonical_bootstrap_sha256": state.get("canonical_bootstrap_sha256"),
+            "additive_instruction_sha256": state.get("instruction_sha256"),
+            "transformation_version": state.get("instruction_transform_version"),
+            "delivery": "additive stock Codex AGENTS.md",
+        },
         "provider_call": False,
     }
 
 
 def command_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Standalone eight-session stock-Codex automatic-compaction control"
+        description="Eight-slot stock-Codex natural-turn and compaction-survival control"
     )
     parser.add_argument(
         "--root", type=Path, default=Path(__file__).resolve().parent, help=argparse.SUPPRESS
@@ -1688,7 +2324,7 @@ def command_parser() -> argparse.ArgumentParser:
     parser.add_argument("--codex", default="codex", help="stock Codex executable")
     subparsers = parser.add_subparsers(dest="command", required=True)
     init = subparsers.add_parser(
-        "init", help="prepare an empty shared archive and eight private sessions"
+        "init", help="prepare an empty shared archive and eight fresh/null slots"
     )
     init.add_argument("--auth-home", type=Path, default=Path.home() / ".codex")
     init.add_argument(
@@ -1699,7 +2335,10 @@ def command_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("status", help="show local control state without a provider call")
     subparsers.add_parser("preflight", help="run provider-free config, prompt, and sandbox checks")
     subparsers.add_parser("run-one-iteration", help="start iteration 1 with eight fresh sessions")
-    subparsers.add_parser("resume-next-iteration", help="resume all eight sessions for one boundary")
+    subparsers.add_parser(
+        "resume-next-iteration",
+        help="run one turn for a mixed pool of compacted survivors and fresh slots",
+    )
     return parser
 
 
