@@ -73,28 +73,6 @@ from utils.open_ended_benchmark import (
     OpenEndedTask,
     resolve_open_ended_task,
 )
-from utils.peer_communication import (
-    DELIVERY_ACK_TOOL_NAME,
-    DELIVERY_PREPARE_TOOL_NAME,
-    LEGACY_AUTOMATIC_DELIVERY_FINGERPRINT,
-    LEGACY_AUTOMATIC_DELIVERY_VERSION,
-    LEGACY_DISTINCT_NAMES_FINGERPRINT,
-    LEGACY_DISTINCT_NAMES_VERSION,
-    LEGACY_PEER_COMMUNICATION_FINGERPRINT,
-    LEGACY_PEER_COMMUNICATION_VERSION,
-    LEGACY_TWO_TOOL_FINGERPRINT,
-    LEGACY_TWO_TOOL_VERSION,
-    PEER_COMMUNICATION_CAPABILITY_NAME,
-    PEER_COMMUNICATION_FINGERPRINT,
-    PEER_COMMUNICATION_TOOL_NAMES,
-    PEER_COMMUNICATION_VERSION,
-    SUPPORTED_PEER_ROLLOUT_COUNTS,
-    PeerCommunicationBridge,
-    PeerCommunicationScope,
-    PeerCommunicationStore,
-    forward_peer_message_tool,
-    peer_communication_openrouter_tools,
-)
 from utils.supergpqa_benchmark import SuperGpqaBenchmarkDriver, SuperGpqaConfig
 
 
@@ -150,9 +128,17 @@ INTERIM_ROLLOUT_SYSTEM_INSTRUCTIONS_FINGERPRINT = (
     f"{ROLLOUT_SYSTEM_INSTRUCTIONS_MODE}:v{INTERIM_ROLLOUT_SYSTEM_INSTRUCTIONS_VERSION}:"
     f"{INTERIM_CANONICAL_BOOTSTRAP_README_SHA256}"
 )
-ROLLOUT_SYSTEM_INSTRUCTIONS_VERSION = 3
-CANONICAL_BOOTSTRAP_README_SHA256 = (
+PRIOR_ROLLOUT_SYSTEM_INSTRUCTIONS_VERSION = 3
+PRIOR_CANONICAL_BOOTSTRAP_README_SHA256 = (
     "7d9ce86b8d7cd58834fac958ced3aa93cecabf16b948cfe605785d6867d60bde"
+)
+PRIOR_ROLLOUT_SYSTEM_INSTRUCTIONS_FINGERPRINT = (
+    f"{ROLLOUT_SYSTEM_INSTRUCTIONS_MODE}:v{PRIOR_ROLLOUT_SYSTEM_INSTRUCTIONS_VERSION}:"
+    f"{PRIOR_CANONICAL_BOOTSTRAP_README_SHA256}"
+)
+ROLLOUT_SYSTEM_INSTRUCTIONS_VERSION = 4
+CANONICAL_BOOTSTRAP_README_SHA256 = (
+    "670e2b4cd8ab1bc560ce9b6bb382a98906403d1f576598f4ac62ee66c6458519"
 )
 ROLLOUT_SYSTEM_INSTRUCTIONS_FINGERPRINT = (
     f"{ROLLOUT_SYSTEM_INSTRUCTIONS_MODE}:v{ROLLOUT_SYSTEM_INSTRUCTIONS_VERSION}:"
@@ -337,9 +323,6 @@ def _format_runtime_markdown(
     problem_pool_markdown_path: str | None = None,
     configured_problem_pool_size: int | None = None,
     problem_pool_count: int | None = None,
-    live_peer_instances: list[dict[str, Any]] | None = None,
-    peer_name: str | None = None,
-    peer_roster: tuple[str, ...] | list[str] | None = None,
     parent_instance_uuid: str | None = None,
     has_problem_pool: bool = True,
 ) -> str:
@@ -401,15 +384,6 @@ def _format_runtime_markdown(
                 "- this profile has no evaluator, score, reward, solved status, or ranking.",
             ]
         )
-    lines.extend(
-        [
-            "",
-            "## Peer Identity",
-            "",
-            f"- your name: {peer_name or 'unavailable'}",
-            f"- other peer names: {', '.join(name for name in (peer_roster or ()) if name != peer_name) or 'unavailable'}",
-        ]
-    )
     return "\n".join(lines) + "\n"
 
 
@@ -475,7 +449,6 @@ def _make_continuation_context(
     shared_workspace_dir: Path,
     spawn_slots_path: Path,
     spawn_slots_dir: Path,
-    live_peer_instances: list[dict[str, Any]],
     progress_log_path: Path,
     population_size: int,
     generation: int,
@@ -493,8 +466,6 @@ def _make_continuation_context(
     codex_sandbox_mode: str,
     codex_initial_prompt: str,
     codex_base_instructions: str | None,
-    peer_communication_endpoint: str,
-    peer_communication_token: str,
     parent_instance_uuid: str | None = None,
 ) -> dict[str, Any]:
     return {
@@ -510,7 +481,6 @@ def _make_continuation_context(
         "spawn_slots_path": str(spawn_slots_path),
         "spawn_slots_dir": str(spawn_slots_dir),
         "population_size": population_size,
-        "live_peer_instances": live_peer_instances,
         "progress_log": str(progress_log_path),
         "generation": generation,
         "seed": seed,
@@ -528,10 +498,6 @@ def _make_continuation_context(
         "codex_sandbox_mode": codex_sandbox_mode,
         "codex_initial_prompt": codex_initial_prompt,
         "codex_base_instructions": codex_base_instructions,
-        "peer_communication_endpoint": peer_communication_endpoint,
-        "peer_communication_token": peer_communication_token,
-        "peer_communication_version": PEER_COMMUNICATION_VERSION,
-        "peer_communication_fingerprint": PEER_COMMUNICATION_FINGERPRINT,
     }
 
 
@@ -919,11 +885,6 @@ def _check_runtime_benchmark(runtime_root: Path, requested: str) -> None:
 def _claim_runtime_benchmark(runtime_root: Path, requested: str) -> None:
     _check_runtime_benchmark(runtime_root, requested)
     identity_path = runtime_root / RUNTIME_BENCHMARK_IDENTITY_FILENAME
-    peer_capability = {
-        "enabled": True,
-        "version": PEER_COMMUNICATION_VERSION,
-        "fingerprint": PEER_COMMUNICATION_FINGERPRINT,
-    }
     instruction_capability = {
         "enabled": True,
         "version": ROLLOUT_SYSTEM_INSTRUCTIONS_VERSION,
@@ -945,6 +906,13 @@ def _claim_runtime_benchmark(runtime_root: Path, requested: str) -> None:
         "mode": ROLLOUT_SYSTEM_INSTRUCTIONS_MODE,
         "sha256": INTERIM_CANONICAL_BOOTSTRAP_README_SHA256,
     }
+    prior_instruction_capability = {
+        "enabled": True,
+        "version": PRIOR_ROLLOUT_SYSTEM_INSTRUCTIONS_VERSION,
+        "fingerprint": PRIOR_ROLLOUT_SYSTEM_INSTRUCTIONS_FINGERPRINT,
+        "mode": ROLLOUT_SYSTEM_INSTRUCTIONS_MODE,
+        "sha256": PRIOR_CANONICAL_BOOTSTRAP_README_SHA256,
+    }
     shared_git_capability = {
         "enabled": True,
         "version": SHARED_GIT_VERSION,
@@ -964,36 +932,16 @@ def _claim_runtime_benchmark(runtime_root: Path, requested: str) -> None:
             capabilities = {}
         if not isinstance(capabilities, dict):
             raise RuntimeError("Runtime benchmark capabilities are invalid.")
-        recorded_peer = capabilities.get(PEER_COMMUNICATION_CAPABILITY_NAME)
-        legacy_peer_capabilities = (
-            {
-                "enabled": True,
-                "version": LEGACY_PEER_COMMUNICATION_VERSION,
-                "fingerprint": LEGACY_PEER_COMMUNICATION_FINGERPRINT,
-            },
-            {
-                "enabled": True,
-                "version": LEGACY_TWO_TOOL_VERSION,
-                "fingerprint": LEGACY_TWO_TOOL_FINGERPRINT,
-            },
-            {
-                "enabled": True,
-                "version": LEGACY_AUTOMATIC_DELIVERY_VERSION,
-                "fingerprint": LEGACY_AUTOMATIC_DELIVERY_FINGERPRINT,
-            },
-            {
-                "enabled": True,
-                "version": LEGACY_DISTINCT_NAMES_VERSION,
-                "fingerprint": LEGACY_DISTINCT_NAMES_FINGERPRINT,
-            },
-        )
-        if (
-            recorded_peer is not None
-            and recorded_peer != peer_capability
-            and recorded_peer not in legacy_peer_capabilities
+        legacy_messaging = capabilities.get("peer_communication")
+        if legacy_messaging is not None and (
+            not isinstance(legacy_messaging, dict)
+            or legacy_messaging.get("enabled") is not True
+            or not isinstance(legacy_messaging.get("version"), int)
+            or not isinstance(legacy_messaging.get("fingerprint"), str)
+            or not legacy_messaging["fingerprint"]
         ):
             raise RuntimeError(
-                "Runtime peer communication capability is incompatible with this version."
+                "Runtime legacy messaging capability is incompatible with this version."
             )
         recorded_instructions = capabilities.get(
             ROLLOUT_SYSTEM_INSTRUCTIONS_CAPABILITY_NAME
@@ -1003,6 +951,7 @@ def _claim_runtime_benchmark(runtime_root: Path, requested: str) -> None:
             and recorded_instructions != instruction_capability
             and recorded_instructions != legacy_instruction_capability
             and recorded_instructions != interim_instruction_capability
+            and recorded_instructions != prior_instruction_capability
         ):
             raise RuntimeError(
                 "Runtime rollout system-instruction capability is incompatible with this version."
@@ -1024,7 +973,6 @@ def _claim_runtime_benchmark(runtime_root: Path, requested: str) -> None:
             "version": 1,
             "benchmark": requested,
             "capabilities": {
-                PEER_COMMUNICATION_CAPABILITY_NAME: peer_capability,
                 ROLLOUT_SYSTEM_INSTRUCTIONS_CAPABILITY_NAME: instruction_capability,
                 SHARED_GIT_CAPABILITY_NAME: shared_git_capability,
             },
@@ -1043,11 +991,6 @@ def _record_current_runtime_capabilities(runtime_root: Path) -> None:
         capabilities = {}
     if not isinstance(capabilities, dict):
         raise RuntimeError("Runtime benchmark capabilities are invalid.")
-    peer_capability = {
-        "enabled": True,
-        "version": PEER_COMMUNICATION_VERSION,
-        "fingerprint": PEER_COMMUNICATION_FINGERPRINT,
-    }
     instruction_capability = {
         "enabled": True,
         "version": ROLLOUT_SYSTEM_INSTRUCTIONS_VERSION,
@@ -1061,7 +1004,7 @@ def _record_current_runtime_capabilities(runtime_root: Path) -> None:
         "fingerprint": SHARED_GIT_FINGERPRINT,
     }
     if (
-        capabilities.get(PEER_COMMUNICATION_CAPABILITY_NAME) == peer_capability
+        "peer_communication" not in capabilities
         and capabilities.get(ROLLOUT_SYSTEM_INSTRUCTIONS_CAPABILITY_NAME)
         == instruction_capability
         and capabilities.get(SHARED_GIT_CAPABILITY_NAME) == shared_git_capability
@@ -1072,8 +1015,11 @@ def _record_current_runtime_capabilities(runtime_root: Path) -> None:
         {
             **identity,
             "capabilities": {
-                **capabilities,
-                PEER_COMMUNICATION_CAPABILITY_NAME: peer_capability,
+                **{
+                    key: value
+                    for key, value in capabilities.items()
+                    if key != "peer_communication"
+                },
                 ROLLOUT_SYSTEM_INSTRUCTIONS_CAPABILITY_NAME: instruction_capability,
                 SHARED_GIT_CAPABILITY_NAME: shared_git_capability,
             },
@@ -1312,37 +1258,12 @@ def _rollout_prompt_resume_compatible(
     )
 
 
-def _peer_communication_resume_compatible(
-    record: dict[str, Any],
-    *,
-    require_fingerprint: bool,
-    population_size: int | None = None,
-) -> bool:
-    recorded = (
-        record.get("peer_communication_enabled"),
-        record.get("peer_communication_version"),
-        record.get("peer_communication_fingerprint"),
+def _record_has_legacy_messaging(record: dict[str, Any]) -> bool:
+    return (
+        any(str(key).startswith("peer_") for key in record)
+        or record.get("rollout_coordination") == "collaborative_same_batch"
+        or record.get("rollout_independence") is False
     )
-    if recorded == (None, None, None):
-        return not require_fingerprint
-    capability_matches = recorded == (
-        True,
-        PEER_COMMUNICATION_VERSION,
-        PEER_COMMUNICATION_FINGERPRINT,
-    )
-    if not capability_matches:
-        return False
-    recorded_population = record.get("peer_communication_population_size")
-    if (
-        isinstance(recorded_population, bool)
-        or not isinstance(recorded_population, int)
-        or recorded_population not in SUPPORTED_PEER_ROLLOUT_COUNTS
-        or population_size is not None
-        and recorded_population != population_size
-    ):
-        return False
-    batch_id = record.get("peer_communication_batch_id")
-    return not require_fingerprint or isinstance(batch_id, str) and bool(batch_id)
 
 
 def _shared_git_resume_compatible(
@@ -1673,7 +1594,6 @@ def run_worker(
     continuation_context: dict[str, Any],
     benchmark_driver: BenchmarkDriver,
     rollout_benchmark: RolloutBenchmark,
-    peer_communication_store: PeerCommunicationStore,
     initial_user_text: str,
     instructions: str,
     progress_callback: Any = None,
@@ -1696,7 +1616,6 @@ def run_worker(
     turn_count = 0
     spawned_child_slots: list[dict[str, Any]] = []
     started_at = time.monotonic()
-    prepared_delivery: dict[str, Any] | None = None
 
     while True:
         turn_count += 1
@@ -1723,22 +1642,6 @@ def run_worker(
                 turn_count=turn_count,
                 conversation_items=len(conversation),
             )
-        delivery = prepared_delivery or peer_communication_store.prepare_delivery(
-            rollout_index
-        )
-        prepared_delivery = None
-        delivery_id: str | None = None
-        if delivery.get("pending"):
-            injection = delivery.get("injection")
-            delivery_id = delivery.get("delivery_id")
-            if not isinstance(injection, str) or not isinstance(delivery_id, str):
-                raise RuntimeError("peer delivery preparation returned malformed data")
-            conversation.append(
-                {
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": injection}],
-                }
-            )
         def retry_callback(event: dict[str, Any]) -> None:
             if progress_callback is not None:
                 progress_callback(
@@ -1757,7 +1660,6 @@ def run_worker(
                 tools=[
                     bash_tool,
                     *rollout_benchmark.model_metadata.get("tools", []),
-                    *peer_communication_openrouter_tools(),
                     spawn_child_tool,
                 ],
                 tool_choice="auto",
@@ -1780,14 +1682,6 @@ def run_worker(
         if not isinstance(response, dict):
             raise RuntimeError("Unexpected non-JSON response in non-stream mode.")
 
-        if delivery_id is not None:
-            acknowledgement = peer_communication_store.acknowledge_delivery(
-                rollout_index,
-                delivery_id,
-            )
-            if not acknowledgement.get("success"):
-                raise RuntimeError("peer delivery acknowledgement failed")
-
         status, code, message = _response_limit_stop(response)
         if status is not None:
             return WorkerResult(
@@ -1809,16 +1703,6 @@ def run_worker(
             )
         if not tool_calls:
             final_text = _extract_text_from_response(response)
-            prepared_delivery = peer_communication_store.prepare_delivery(
-                rollout_index
-            )
-            if prepared_delivery.get("pending"):
-                response_output = response.get("output")
-                if isinstance(response_output, list):
-                    conversation.extend(
-                        item for item in response_output if isinstance(item, dict)
-                    )
-                continue
             break
 
         for call in tool_calls:
@@ -1854,74 +1738,67 @@ def run_worker(
 
             tool_name = str(call.get("name") or "")
             command = str(args.get("command", "")).strip()
-            if tool_name in PEER_COMMUNICATION_TOOL_NAMES:
-                tool_result = peer_communication_store.handle(
-                    rollout_index,
-                    tool_name,
-                    args,
+            benchmark_tool_result = benchmark_driver.handle_tool(
+                rollout_benchmark,
+                tool_name,
+                args,
+            )
+            if benchmark_tool_result is not None:
+                tool_result = benchmark_tool_result
+            elif tool_name == "spawn_child":
+                tool_result = _spawn_child_continuation(
+                    context=continuation_context,
+                    args=args,
+                    progress_callback=progress_callback,
                 )
+                if tool_result.get("child_spawned"):
+                    spawned_child_slots.append(tool_result)
+            elif tool_name != "run_bash":
+                tool_result = {"error": f"unsupported tool '{call.get('name')}'"}
+            elif not command:
+                tool_result = {"error": "missing or malformed 'command' argument"}
             else:
-                benchmark_tool_result = benchmark_driver.handle_tool(
-                    rollout_benchmark,
-                    tool_name,
-                    args,
+                command_index += 1
+                if progress_callback is not None:
+                    progress_callback(
+                        "worker_tool_started",
+                        elapsed_seconds=round(time.monotonic() - started_at, 3),
+                        turn_count=turn_count,
+                        command_index=command_index,
+                        command=command[:1000],
+                    )
+                wd = str(args.get("working_directory") or workdir)
+                try:
+                    resolved_wd = Path(wd).resolve()
+                    allowed_roots = [
+                        workdir.resolve(),
+                        seed_output_dir.resolve(),
+                        archive_repo_dir.resolve(),
+                        shared_workspace_dir.resolve(),
+                    ]
+                    safe_wd = str(workdir)
+                    for root in allowed_roots:
+                        if _is_within(resolved_wd, root):
+                            safe_wd = str(resolved_wd)
+                            break
+                except Exception:
+                    safe_wd = str(workdir)
+                tool_result = _run_bash_tool(
+                    command=command,
+                    working_directory=safe_wd,
+                    worker_state_dir=worker_state_dir,
+                    timeout_seconds=bash_timeout_seconds,
+                    rollout_username=rollout_username,
                 )
-                if benchmark_tool_result is not None:
-                    tool_result = benchmark_tool_result
-                elif tool_name == "spawn_child":
-                    tool_result = _spawn_child_continuation(
-                        context=continuation_context,
-                        args=args,
-                        progress_callback=progress_callback,
+                if progress_callback is not None:
+                    progress_callback(
+                        "worker_tool_completed",
+                        elapsed_seconds=round(time.monotonic() - started_at, 3),
+                        turn_count=turn_count,
+                        command_index=command_index,
+                        exit_code=tool_result.get("exit_code"),
+                        timed_out=tool_result.get("timed_out"),
                     )
-                    if tool_result.get("child_spawned"):
-                        spawned_child_slots.append(tool_result)
-                elif tool_name != "run_bash":
-                    tool_result = {"error": f"unsupported tool '{call.get('name')}'"}
-                elif not command:
-                    tool_result = {"error": "missing or malformed 'command' argument"}
-                else:
-                    command_index += 1
-                    if progress_callback is not None:
-                        progress_callback(
-                            "worker_tool_started",
-                            elapsed_seconds=round(time.monotonic() - started_at, 3),
-                            turn_count=turn_count,
-                            command_index=command_index,
-                            command=command[:1000],
-                        )
-                    wd = str(args.get("working_directory") or workdir)
-                    try:
-                        resolved_wd = Path(wd).resolve()
-                        allowed_roots = [
-                            workdir.resolve(),
-                            seed_output_dir.resolve(),
-                            archive_repo_dir.resolve(),
-                            shared_workspace_dir.resolve(),
-                        ]
-                        safe_wd = str(workdir)
-                        for root in allowed_roots:
-                            if _is_within(resolved_wd, root):
-                                safe_wd = str(resolved_wd)
-                                break
-                    except Exception:
-                        safe_wd = str(workdir)
-                    tool_result = _run_bash_tool(
-                        command=command,
-                        working_directory=safe_wd,
-                        worker_state_dir=worker_state_dir,
-                        timeout_seconds=bash_timeout_seconds,
-                        rollout_username=rollout_username,
-                    )
-                    if progress_callback is not None:
-                        progress_callback(
-                            "worker_tool_completed",
-                            elapsed_seconds=round(time.monotonic() - started_at, 3),
-                            turn_count=turn_count,
-                            command_index=command_index,
-                            exit_code=tool_result.get("exit_code"),
-                            timed_out=tool_result.get("timed_out"),
-                        )
 
             conversation.append(call)
             conversation.append(
@@ -2886,13 +2763,8 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
     args = parse_args()
     args.difficulty_filter = _normalize_difficulty_filter(args.difficulty_filter)
     difficulty_filter_payload = list(args.difficulty_filter) if args.difficulty_filter is not None else None
-    if args.num_rollouts not in SUPPORTED_PEER_ROLLOUT_COUNTS:
-        supported = ", ".join(
-            str(value) for value in sorted(SUPPORTED_PEER_ROLLOUT_COUNTS)
-        )
-        raise ValueError(
-            f"--num-rollouts must be one of {supported} while peer communication is enabled"
-        )
+    if args.num_rollouts <= 0:
+        raise ValueError("--num-rollouts must be > 0")
     if args.worker_timeout_seconds <= 0:
         raise ValueError("--worker-timeout-seconds must be > 0")
     if args.bash_timeout_seconds <= 0:
@@ -3146,13 +3018,17 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
     if not args.no_resume:
         all_records = load_existing_run_records(runs_log_path)
         def _matches_run(rec: dict[str, Any]) -> bool:
+            recorded_population = rec.get(
+                "bootstrap_rollout_count", rec.get("num_rollouts")
+            )
             if not (
                 rec.get("benchmark", "supergpqa") == args.benchmark
                 and rec.get("model") == args.model
                 and rec.get("seed") == args.seed
                 and rec.get("generation") == args.generation
-                and rec.get("bootstrap_rollout_count", rec.get("num_rollouts"))
-                in SUPPORTED_PEER_ROLLOUT_COUNTS
+                and isinstance(recorded_population, int)
+                and not isinstance(recorded_population, bool)
+                and recorded_population > 0
                 and rec.get("worker_backend", "openrouter")
                 == args.worker_backend
             ):
@@ -3201,15 +3077,11 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
         def _partial_prompt_matches(record: dict[str, Any]) -> bool:
             if record.get("task_index") not in partial_tasks:
                 return True
-            if not _peer_communication_resume_compatible(
-                record,
-                require_fingerprint=True,
-                population_size=args.num_rollouts,
-            ):
+            if _record_has_legacy_messaging(record):
                 raise RuntimeError(
-                    "partial task resume is incompatible with the current peer communication capability; "
-                    "completed earlier tasks remain valid, but this partial batch must be resumed with its "
-                    "recorded capability or restarted explicitly"
+                    "partial task resume contains legacy peer-messaging state and is "
+                    "incompatible with this no-messaging runtime; completed earlier tasks "
+                    "remain valid, but this partial batch must be restarted explicitly"
                 )
             if not _shared_git_resume_compatible(
                 record,
@@ -3257,8 +3129,9 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
         existing_records = [record for record in existing_records if _partial_prompt_matches(record)]
 
     # Do not rewrite a legacy runtime marker until every partial task has been
-    # proven compatible. Completed historical batches remain valid and the
-    # next fresh batch then records the current delivery and instruction capabilities.
+    # proven compatible. Completed historical batches remain valid; the next
+    # clean boundary removes the retired messaging marker and records the
+    # current instruction capability.
     _record_current_runtime_capabilities(runtime_root)
     ensure_shared_git_repo(
         shared_git_repo_dir,
@@ -3342,14 +3215,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             raise RuntimeError(
                 f"No rollout population positions available for task_index={task_index}."
             )
-        if task_rollout_count not in SUPPORTED_PEER_ROLLOUT_COUNTS:
-            supported = ", ".join(
-                str(value) for value in sorted(SUPPORTED_PEER_ROLLOUT_COUNTS)
-            )
-            raise RuntimeError(
-                "peer communication rollout population must be one of: "
-                f"{supported}"
-            )
         task_instance_uuids: dict[int, str] = {}
         for rollout_index in range(task_rollout_count):
             if rollout_index in existing_task_records:
@@ -3363,15 +3228,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 )
                 continue
             task_instance_uuids[rollout_index] = new_instance_uuid()
-        live_peer_instances = [
-            {
-                "rollout_index": rollout_index,
-                "rollout_username": _rollout_username(rollout_index),
-                "instance_uuid": task_instance_uuids[rollout_index],
-            }
-            for rollout_index in range(task_rollout_count)
-            if rollout_index not in existing_task_records
-        ]
         spawn_slots_path = rollout_root / (
             f"{task_index:06d}_{_sanitize_for_path(task_id)}_spawn_slots.json"
         )
@@ -3380,21 +3236,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
         )
         if len(existing_task_records) >= task_rollout_count:
             continue
-
-        recorded_peer_batch_ids = {
-            record.get("peer_communication_batch_id")
-            for record in existing_task_records.values()
-            if isinstance(record.get("peer_communication_batch_id"), str)
-            and record.get("peer_communication_batch_id")
-        }
-        if existing_task_records:
-            if len(recorded_peer_batch_ids) != 1:
-                raise RuntimeError(
-                    "partial task resume has inconsistent peer communication batch identity"
-                )
-            peer_communication_batch_id = next(iter(recorded_peer_batch_ids))
-        else:
-            peer_communication_batch_id = new_instance_uuid()
 
         benchmark_readme_path = shared_workspace_dir / BENCHMARK_README_FILENAME
         prepared_benchmark_batch = benchmark_driver.prepare_batch(
@@ -3430,71 +3271,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 ),
             }
         )
-        batch_reporting.update(
-            {
-                "peer_communication_enabled": True,
-                "peer_communication_version": PEER_COMMUNICATION_VERSION,
-                "peer_communication_fingerprint": PEER_COMMUNICATION_FINGERPRINT,
-                "peer_communication_batch_id": peer_communication_batch_id,
-                "peer_communication_population_size": task_rollout_count,
-                "rollout_coordination": "collaborative_same_batch",
-                "rollout_independence": False,
-            }
-        )
-
-        def _peer_communication_lifecycle(
-            event: str, fields: dict[str, Any]
-        ) -> None:
-            append_progress_log(
-                progress_log_path,
-                progress_log_lock,
-                {
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "event": event,
-                    "benchmark": args.benchmark,
-                    "generation": args.generation,
-                    "seed": args.seed,
-                    "task_index": task_index,
-                    "task_id": task_id,
-                    **batch_reporting,
-                    **fields,
-                },
-            )
-
-        peer_communication_store = PeerCommunicationStore(
-            runtime_root
-            / "logs"
-            / "peer_communication"
-            / f"task_{task_index:06d}"
-            / f"batch_{_sanitize_for_path(peer_communication_batch_id)}",
-            PeerCommunicationScope(
-                benchmark=args.benchmark,
-                generation=args.generation,
-                seed=args.seed,
-                task_index=task_index,
-                task_id=task_id,
-                batch_id=peer_communication_batch_id,
-                population_size=task_rollout_count,
-            ),
-            lifecycle_callback=_peer_communication_lifecycle,
-        )
-        batch_reporting.update(
-            {
-                "peer_name_mapping": [
-                    {
-                        "rollout_index": index,
-                        "name": peer_communication_store.name_for(index),
-                    }
-                    for index in range(task_rollout_count)
-                ],
-                "peer_name_roster": list(peer_communication_store.roster),
-                "peer_communication_batch_message_limit": (
-                    peer_communication_store.batch_message_limit
-                ),
-                "peer_delivery_mode": "automatic_safe_inference_boundary",
-            }
-        )
-
         def _run_one_rollout(rollout_index: int) -> RolloutResult:
             existing = existing_task_records.get(rollout_index)
             if existing is not None:
@@ -3509,13 +3285,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             rollout_control_dir = runtime_root / "logs" / "rollout_control" / instance_uuid
             rollout_state_dir = runtime_root / "logs" / "rollout_state" / instance_uuid
             opencode_mcp_control_dir = rollout_control_dir / "mcp"
-            rollout_live_peer_instances = [
-                peer
-                for peer in live_peer_instances
-                if peer.get("instance_uuid") != instance_uuid
-            ]
-            peer_credentials = peer_communication_credentials[rollout_index]
-            peer_name = peer_communication_store.name_for(rollout_index)
             started_at = time.monotonic()
 
             def _progress(event: str, **fields: Any) -> None:
@@ -3527,7 +3296,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                     "task_index": task_index,
                     "rollout_index": rollout_index,
                     "rollout_username": rollout_username,
-                    "peer_name": peer_name,
                     "task_id": task_id,
                     **({"problem_uid": problem_uid} if has_problem_pool else {}),
                     **batch_reporting,
@@ -3621,7 +3389,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 spawn_slots_path=spawn_slots_path,
                 spawn_slots_dir=spawn_slots_dir,
                 population_size=args.num_rollouts,
-                live_peer_instances=rollout_live_peer_instances,
                 progress_log_path=progress_log_path,
                 generation=args.generation,
                 seed=args.seed,
@@ -3638,8 +3405,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 codex_sandbox_mode=args.codex_sandbox_mode,
                 codex_initial_prompt=args.codex_initial_prompt,
                 codex_base_instructions=codex_base_instructions,
-                peer_communication_endpoint=peer_credentials.endpoint,
-                peer_communication_token=peer_credentials.token,
             )
             planned_context_path = (
                 opencode_mcp_control_dir / CONTINUATION_CONTEXT_FILENAME
@@ -3682,9 +3447,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                     ),
                     configured_problem_pool_size=args.problem_pool_size,
                     problem_pool_count=problem_pool_count,
-                    live_peer_instances=rollout_live_peer_instances,
-                    peer_name=peer_name,
-                    peer_roster=peer_communication_store.roster,
                     has_problem_pool=has_problem_pool,
                 ),
                 encoding="utf-8",
@@ -3888,7 +3650,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                         continuation_context=continuation_context,
                         benchmark_driver=benchmark_driver,
                         rollout_benchmark=rollout_benchmark,
-                        peer_communication_store=peer_communication_store,
                         initial_user_text=rollout_initial_prompt,
                         instructions=rollout_system_instructions,
                         progress_callback=_progress,
@@ -4015,7 +3776,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 "task_index": task_index,
                 "rollout_index": rollout_index,
                 "rollout_username": rollout_username,
-                "peer_name": peer_name,
                 "instance_uuid": instance_uuid,
                 "task_id": record_task_id,
                 "scheduler_task_id": task_id,
@@ -4249,7 +4009,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 summary = (
                     f"gen={args.generation} seed={args.seed} task_index={task_index} rollout_index={rollout_index} "
                     f"rollout_username={rollout_username} task_id={record_task_id or 'unassigned'} "
-                    "coordination=collaborative_same_batch "
                     f"benchmark_attempted={benchmark_outcome.attempted} "
                     f"benchmark_solved={benchmark_outcome.solved} output={output_dir}"
                 )
@@ -4257,7 +4016,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 summary = (
                     f"gen={args.generation} seed={args.seed} task_index={task_index} rollout_index={rollout_index} "
                     f"rollout_username={rollout_username} task_id={record_task_id} "
-                    "coordination=collaborative_same_batch "
                     f"evaluation=unconfigured output={output_dir}"
                 )
             if worker_result.status == "error":
@@ -4284,14 +4042,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
         )
         results: list[RolloutResult] = []
         if missing_rollout_indices:
-            with (
-                PeerCommunicationBridge(peer_communication_store) as peer_communication_bridge,
-                ThreadPoolExecutor(max_workers=len(missing_rollout_indices)) as executor,
-            ):
-                peer_communication_credentials = {
-                    rollout_index: peer_communication_bridge.credentials(rollout_index)
-                    for rollout_index in range(task_rollout_count)
-                }
+            with ThreadPoolExecutor(max_workers=len(missing_rollout_indices)) as executor:
                 futures = {
                     executor.submit(_run_one_rollout, rollout_index): rollout_index
                     for rollout_index in missing_rollout_indices
@@ -4552,7 +4303,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                                         f"gen={args.generation} seed={args.seed} task_index={task_index} "
                                         f"rollout_index={rollout_index} rollout_username={_rollout_username(rollout_index)} "
                                         f"task_id={task_id} "
-                                        "coordination=collaborative_same_batch "
                                         + (
                                             "evaluation=unconfigured "
                                             if args.benchmark == "open-ended"
@@ -4732,27 +4482,6 @@ def run_child_tool_handler(context_path: Path) -> None:
                 context=context,
                 args=args,
             )
-        elif tool in PEER_COMMUNICATION_TOOL_NAMES:
-            result = forward_peer_message_tool(
-                context.get("peer_communication_endpoint"),
-                context.get("peer_communication_token"),
-                {
-                    "tool": tool,
-                    "namespace": payload.get("namespace"),
-                    "call_id": payload.get("call_id"),
-                    "arguments": args,
-                },
-            )
-        elif tool in {DELIVERY_PREPARE_TOOL_NAME, DELIVERY_ACK_TOOL_NAME}:
-            result = forward_peer_message_tool(
-                context.get("peer_communication_endpoint"),
-                context.get("peer_communication_token"),
-                {
-                    "tool": tool,
-                    "namespace": None,
-                    "arguments": args,
-                },
-            )
         else:
             result = _spawn_failure(
                 f"unsupported dynamic tool: {tool}",
@@ -4760,24 +4489,11 @@ def run_child_tool_handler(context_path: Path) -> None:
                 retryable=True,
             )
     except BaseException as exc:
-        if tool in {
-            *PEER_COMMUNICATION_TOOL_NAMES,
-            DELIVERY_PREPARE_TOOL_NAME,
-            DELIVERY_ACK_TOOL_NAME,
-        }:
-            result = {
-                "success": False,
-                "tool": tool,
-                "error_code": "peer_communication_handler_failed",
-                "error": "peer communication supervisor request failed",
-                "retryable": True,
-            }
-        else:
-            result = _spawn_failure(
-                f"{type(exc).__name__}: {exc}",
-                error_code="spawn_child_handler_failed",
-                retryable=True,
-            )
+        result = _spawn_failure(
+            f"{type(exc).__name__}: {exc}",
+            error_code="spawn_child_handler_failed",
+            retryable=True,
+        )
 
     result = {
         **result,
