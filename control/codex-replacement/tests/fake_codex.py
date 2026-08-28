@@ -180,7 +180,7 @@ def main() -> int:
             "archive_realpath": str((Path.cwd() / "archive").resolve()),
             "archive_device": (Path.cwd() / "archive").stat().st_dev,
             "archive_inode": (Path.cwd() / "archive").stat().st_ino,
-            "runtime_document_format_present": "stock-codex-control-runtime-facts-v1" in runtime_text,
+            "runtime_document_format_present": "stock-codex-control-runtime-facts-v2" in runtime_text,
             "runtime_current_program_present": f"rollout_{index:03d}" in runtime_text,
             "seed_output_entries_at_turn_start": seed_output_entries,
             "replacement_instruction_path": str(instruction_path),
