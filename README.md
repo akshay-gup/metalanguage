@@ -32,11 +32,12 @@ take precedence over values in `.env`.
 
 ## Utilities
 
-- `control/codex-additive/`: **Codex-Additive (CA)**, the eight-slot stock Codex
-  natural-turn/compaction-survival control using built-in base instructions plus
-  the canonical rollout contract through additive `AGENTS.md`.
-- `control/codex-replacement/`: **Codex-Replacement (CR)**, the matched control
-  that supplies the same rollout contract as replacement base instructions via
+- `control/codex-additive/`: **Codex-Additive (CA-v2)**, the eight-slot stock Codex
+  high-reasoning natural-turn/compaction-survival control using built-in base
+  instructions plus the close-match canonical environment contract through
+  additive `AGENTS.md`.
+- `control/codex-replacement/`: **Codex-Replacement (CR-v2)**, the matched control
+  that supplies the same environment contract as replacement base instructions via
   `model_instructions_file`, with additive instruction discovery disabled.
 - The existing main research system is **Metalanguage-Lineage (ML)**; its
   runtime layout and command paths are unchanged.

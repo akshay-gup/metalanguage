@@ -1,4 +1,4 @@
-# Codex-Additive (CA)
+# Codex-Additive (CA-v2)
 
 Codex-Additive is the in-tree comparison control that runs exactly eight slots
 of the installed, unmodified stock Codex CLI. It is not a Metalanguage runtime:
@@ -6,17 +6,20 @@ it has no custom
 worker, model-facing messaging, spawn operation, native multi-agent feature, or
 supervisor that chooses branches, merges, or commits.
 
+CA-v2 pins `gpt-5.6-sol` at high reasoning effort in its capability identity,
+generated private config, manifests, and every future launch command. The
+reasoning-qualified capability identity makes the prior zero-state low-effort
+runtime incompatible rather than resumable.
+
 The model-visible additive `AGENTS.md` is the exact output of a reviewed,
 fail-closed transformation of the current canonical Metalanguage bootstrap at
-`seeds/bootstrap/README.md`. It preserves the canonical headings, order, tone,
-and compatible paragraphs. The explicit deviations identify eight stock Codex
-sessions/private rollouts, replace context exhaustion with one natural turn,
-make later rounds explicit, remove unavailable messaging and spawning, change
-`BENCHMARK.md` to optional `shared_workspace/TASK.md`, and describe passive
-automatic-compaction survival. It also minimally qualifies the canonical
-archive discard as occurring after a successful round, matching fail-closed
-incomplete-batch behavior. Validation pins both the canonical source and
-the transformed output; an unreviewed independent paraphrase is rejected.
+`seeds/bootstrap/README.md`. It preserves the canonical heading order, tone,
+paragraphs, round wording, work-until-room-runs-out wording, shared Git cleanup,
+`BENCHMARK.md` wording, and no-assignment neutrality. The only changes remove
+the unavailable `send_message` block, remove the complete `Leaving a successor`
+section for unavailable `spawn_child`, and remove the false spawn-input purpose
+from the `seed_output/` line. Validation byte-pins both the canonical source and
+the 2,029-byte transformed output, so any additional drift fails closed.
 
 Every iteration launches one ordinary turn for each slot and accepts its
 natural final answer and process completion. The control never installs a
@@ -43,10 +46,10 @@ incomplete without retry, cleanup, or next-slot advancement.
 All slots see one literal `shared_workspace/archive/` checkout, including the
 same worktree, index, `HEAD`, current branch, refs, and locks. It starts as a
 genuinely empty repository with unborn `main`, no refs, objects, tracked files,
-worktree files, or remotes. The exact task is hash-pinned outside Git and is
-visible once at `shared_workspace/TASK.md`, read-only. There is deliberately no
-second top-level `TASK.md` symlink: that redundant crossing conflicts with the
-stock sandbox's read-only task mount.
+worktree files, or remotes. The exact 173-byte external problem is hash-pinned
+outside Git and visible once at the common Metalanguage location
+`shared_workspace/BENCHMARK.md`, read-only. No evaluator is configured, and
+there is no model-visible `TASK.md`.
 
 Each slot has a private rollout directory and private `CODEX_HOME`. Only the
 existing stock Codex `auth.json` is referenced by symlink; authentication bytes
@@ -69,8 +72,8 @@ startup; any other config mutation still fails closed. Project trust only
 allows the configured passive hook to load and does not grant filesystem or
 network access. No hook-trust bypass flag is used. The shared workspace is an
 explicit narrowly writable filesystem path rather than a second stock workspace
-root; its exact task path is a more-specific read-only exception. This avoids
-synthetic top-level task mounts and conflicting shared project-document binds.
+root; its exact benchmark path is a more-specific read-only exception. This
+avoids synthetic top-level mounts and conflicting shared project-document binds.
 
 After all eight turns stop successfully, cleanup validates the canonical root
 and `.git` identities, lock and operation state, then uses `git reset --hard
@@ -78,9 +81,8 @@ HEAD` for committed `HEAD` or `git read-tree --empty` for unborn `HEAD`, followe
 by `git clean -ffdx`. It preserves committed objects, refs, `HEAD`, and the
 current branch while discarding staged, uncommitted, untracked, ignored, and
 batch-local shared state. Unknown or incomplete cleanup fails closed and does
-not advance the next-slot pool. Recovery bundles are never active state.
-Historical iteration manifests remain immutable control evidence; previously
-deleted failed-run evidence remains absent.
+not advance the next-slot pool. CA-v1 runtime/recovery evidence was irreversibly
+deleted before this independently initialized v2 state.
 
 ## Layout
 
@@ -89,13 +91,13 @@ control/codex-additive/
   control.py
   hooks/iteration_boundary.py   passive PostCompact observer only
   seed/AGENTS.md
-  seed/TASK.md
+  seed/BENCHMARK.md
   seed/PINS.json
   tests/fake_codex.py
   tests/test_control.py
   runtime/                      ignored active state/evidence
     shared_workspace/archive/   one empty shared Git repository
-    shared_workspace/TASK.md    exact 173-byte read-only task
+    shared_workspace/BENCHMARK.md exact 173-byte read-only problem
     rollouts/rollout_000..007/
       runtime.md                read-only exact roster/path facts
       seed_output/              private writable, empty at round start
@@ -115,9 +117,9 @@ python3 control.py preflight
 
 `status` and `preflight` do not make provider/model calls. Preflight uses local
 stock CLI inspection and disposable Git/sandbox fixtures. It rematerializes the
-exact pinned shared task if normal batch-final cleanup removed it, then proves
-the single model-visible task and `runtime.md` are readable but not writable, the direct
-top-level task is absent, private `seed_output/` and shared Git metadata are
+exact pinned shared benchmark if normal batch-final cleanup removed it, then
+proves `BENCHMARK.md` and `runtime.md` are readable but not writable, direct
+`TASK.md` is absent, private `seed_output/` and shared Git metadata are
 writable, forbidden live paths remain unreadable, and all private config hashes
 are unchanged after those stock CLI calls. The following two
 commands do make provider/model calls and are intentionally not part of setup
@@ -155,7 +157,6 @@ The standalone reference at
 never used or modified by this control.
 
 The narrow in-repository compatibility symlink
-`control/codex_compaction_shared_git_control -> codex-additive` keeps absolute
-paths recorded by the first ten CA iterations usable. New commands, generated
-metadata, and documentation use only the canonical `control/codex-additive`
-path; historical iteration manifests are not rewritten.
+`control/codex_compaction_shared_git_control -> codex-additive` remains valid.
+New commands, generated metadata, and documentation use only the canonical
+`control/codex-additive` path.

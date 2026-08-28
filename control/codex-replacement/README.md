@@ -1,12 +1,14 @@
-# Codex-Replacement (CR)
+# Codex-Replacement (CR-v2)
 
 Codex-Replacement is the second in-tree stock-Codex control. It is derived from
 `../codex-additive` and keeps the same eight-slot harness,
-model, reasoning, task, prompts, permissions, authentication isolation, passive
+model, benchmark, prompts, permissions, authentication isolation, passive
 compaction observer, natural-turn barrier, session-survival rule, shared Git
 checkout, evidence redaction, and batch-final cleanup.
 
-The sole experimental treatment is instruction delivery. The source instruction
+The instruction-delivery treatment remains replacement, while both active v2
+controls pin the same high reasoning effort. No other harness behavior changes.
+The source instruction
 is `seed/model_instructions.md`, byte-for-byte equal to the aligned canonical
 control text used by the additive control. Every private `CODEX_HOME` receives a
 read-only copy named `model_instructions.md`, and its strict `config.toml` sets:
@@ -15,6 +17,14 @@ read-only copy named `model_instructions.md`, and its strict `config.toml` sets:
 model_instructions_file = "model_instructions.md"
 project_doc_max_bytes = 0
 ```
+
+The shared 2,029-byte text preserves the canonical heading order except for the
+removed successor heading, as well as its tone, paragraph order, work-until-room-
+runs-out language, round language, shared Git cleanup, `BENCHMARK.md`, and
+no-assignment neutrality. Its only deltas remove the unavailable `send_message`
+block, remove the full successor section for unavailable `spawn_child`, and
+remove the false spawn-input purpose from the `seed_output/` line. The canonical
+source and output are byte-pinned so extra drift fails closed.
 
 The current official Codex config reference describes
 `model_instructions_file` as a replacement for built-in instructions instead of
@@ -60,8 +70,9 @@ lock, checkout, and content races. On successful finalization, cleanup preserves
 commits, refs, `HEAD`, and branch while removing staged, modified, deleted,
 untracked, ignored, and batch-local shared state.
 
-The exact 173-byte task is outside Git and visible read-only only at
-`shared_workspace/TASK.md`; its presence is optional and not an assignment.
+The exact 173-byte external problem is outside Git and visible read-only only at
+the common Metalanguage location `shared_workspace/BENCHMARK.md`; its presence
+is optional and not an assignment, and no evaluator is configured.
 Every rollout has a read-only `runtime.md`, a private writable `seed_output/`
 emptied before each explicit iteration, and a private `CODEX_HOME`. The only
 authentication reference is a symlink to the existing stock `auth.json`; auth
@@ -82,13 +93,13 @@ control/codex-replacement/
   control.py
   hooks/iteration_boundary.py       passive PostCompact observer only
   seed/model_instructions.md        pinned replacement base instructions
-  seed/TASK.md                      exact 173-byte task
+  seed/BENCHMARK.md                 exact 173-byte external problem
   seed/PINS.json                    identity, treatment, and parity pins
   tests/fake_codex.py
   tests/test_control.py
   runtime/                          ignored independent active state/evidence
     shared_workspace/archive/       one empty unborn Git repository
-    shared_workspace/TASK.md        read-only task
+    shared_workspace/BENCHMARK.md   read-only external problem
     rollouts/rollout_000..007/
       runtime.md                    read-only roster/path facts
       seed_output/                  private writable output
@@ -99,10 +110,10 @@ control/codex-replacement/
 
 `seed/PINS.json` records the source control pins and reviewed config differences.
 The focused parity test compares parsed configs after normalizing only control
-paths. It permits exactly three treatment differences: adding
+paths. It permits exactly three delivery differences: adding
 `model_instructions_file`, changing `project_doc_max_bytes` from 32768 to 0, and
 removing the rollout `AGENTS.md` read exception. It separately requires equality
-of the archive seed, exact task, canonical transformation, prompts, pinned CLI,
+of the archive seed, exact benchmark, canonical transformation, prompts, pinned CLI,
 model, reasoning effort, slot count, and iteration semantics. The replacement
 file must also remain the exact reviewed transformation of the current canonical
 Metalanguage bootstrap at `../../seeds/bootstrap/README.md`.
@@ -122,11 +133,11 @@ python3 -m py_compile control.py hooks/iteration_boundary.py tests/fake_codex.py
 ```
 
 `status`, tests, offline initialization, and `preflight` make no provider/model
-call. Preflight rematerializes the exact pinned shared task if normal batch-final
+call. Preflight rematerializes the exact pinned shared benchmark if normal batch-final
 cleanup removed it, then uses local stock CLI inspection plus disposable Git and
 sandbox fixtures. It verifies the exact configured replacement path/bytes/hash,
 zero additive contract copies in prompt input, disabled AGENTS discovery,
-task/runtime readability and immutability, private output/shared Git writes,
+benchmark/runtime readability and immutability, private output/shared Git writes,
 forbidden-path denial, hook/tool controls, and config integrity.
 
 These are the only commands that launch live model turns, and are intentionally
