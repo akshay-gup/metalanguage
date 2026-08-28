@@ -72,14 +72,12 @@ class ControlTest(unittest.TestCase):
         self.assertEqual(control.render_aligned_instruction(canonical), instruction)
         self.assertEqual(
             [
-                "## The others",
                 "## Places",
                 "## What is already there",
             ],
             [line for line in instruction.splitlines() if line.startswith("## ")],
         )
         for unavailable in (
-            "send_message",
             "spawn_child",
             "## Leaving a successor",
             "natural turn",
@@ -138,7 +136,7 @@ class ControlTest(unittest.TestCase):
         source_root = Path(control.__file__).resolve().parent
         pins = json.loads((source_root / "seed/PINS.json").read_text(encoding="utf-8"))
         expected_capability = (
-            "stock-codex-passive-observer-no-peer-no-spawn-reasoning-high-v2"
+            "stock-codex-passive-observer-no-spawn-reasoning-high-v2"
         )
         self.assertEqual(control.TREATMENT_VERSION, "CA-v2")
         self.assertEqual(control.REASONING_EFFORT, "high")
@@ -170,7 +168,7 @@ class ControlTest(unittest.TestCase):
 
             state = control.load_json(study.study_state_path)
             state["capability_identity"] = (
-                "stock-codex-passive-observer-no-peer-no-spawn-v2"
+                "stock-codex-passive-observer-no-spawn-v1"
             )
             control.atomic_json(study.study_state_path, state)
             with self.assertRaisesRegex(control.ControlError, "not a resumable"):

@@ -18,12 +18,12 @@ model_instructions_file = "model_instructions.md"
 project_doc_max_bytes = 0
 ```
 
-The shared 2,029-byte text preserves the canonical heading order except for the
+The shared 1,799-byte text preserves the canonical heading order except for the
 removed successor heading, as well as its tone, paragraph order, work-until-room-
 runs-out language, round language, shared Git cleanup, `BENCHMARK.md`, and
-no-assignment neutrality. Its only deltas remove the unavailable `send_message`
-block, remove the full successor section for unavailable `spawn_child`, and
-remove the false spawn-input purpose from the `seed_output/` line. The canonical
+no-assignment neutrality. Its only deltas remove the full successor section for
+unavailable `spawn_child` and the false spawn-input purpose from the
+`seed_output/` line. The canonical
 source and output are byte-pinned so extra drift fails closed.
 
 The current official Codex config reference describes
@@ -77,7 +77,7 @@ Every rollout has a read-only `runtime.md`, a private writable `seed_output/`
 emptied before each explicit iteration, and a private `CODEX_HOME`. The only
 authentication reference is a symlink to the existing stock `auth.json`; auth
 bytes are not copied and captured output is redacted. Network, web search, MCP,
-apps, plugins, native multi-agent, messaging, spawning, browser/computer/image
+apps, plugins, native multi-agent, spawning, browser/computer/image
 features, goals, and memories are disabled or absent.
 
 The exact stock project trust entry is preseeded and the complete config hash is
@@ -101,7 +101,7 @@ control/codex-replacement/
     shared_workspace/archive/       one empty unborn Git repository
     shared_workspace/BENCHMARK.md   read-only external problem
     rollouts/rollout_000..007/
-      runtime.md                    read-only roster/path facts
+      runtime.md                    read-only slot/path facts
       seed_output/                  private writable output
     state/rollout_000..007/codex_home/
       config.toml

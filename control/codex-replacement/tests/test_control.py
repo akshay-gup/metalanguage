@@ -80,14 +80,12 @@ class ControlTest(unittest.TestCase):
         self.assertEqual(control.render_aligned_instruction(canonical), instruction)
         self.assertEqual(
             [
-                "## The others",
                 "## Places",
                 "## What is already there",
             ],
             [line for line in instruction.splitlines() if line.startswith("## ")],
         )
         for unavailable in (
-            "send_message",
             "spawn_child",
             "## Leaving a successor",
             "natural turn",
@@ -162,7 +160,7 @@ class ControlTest(unittest.TestCase):
         self.assertEqual(control.CONTINUATION_INPUT, additive.CONTINUATION_INPUT)
         self.assertEqual(
             control.CAPABILITY_IDENTITY,
-            "stock-codex-passive-observer-no-peer-no-spawn-reasoning-high-v2",
+            "stock-codex-passive-observer-no-spawn-reasoning-high-v2",
         )
         self.assertEqual(control.CAPABILITY_IDENTITY, additive.CAPABILITY_IDENTITY)
         self.assertEqual(control.FORBIDDEN_EXPERIMENT_TOOLS, additive.FORBIDDEN_EXPERIMENT_TOOLS)

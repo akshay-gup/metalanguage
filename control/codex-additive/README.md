@@ -2,8 +2,7 @@
 
 Codex-Additive is the in-tree comparison control that runs exactly eight slots
 of the installed, unmodified stock Codex CLI. It is not a Metalanguage runtime:
-it has no custom
-worker, model-facing messaging, spawn operation, native multi-agent feature, or
+it has no custom worker, spawn operation, native multi-agent feature, or
 supervisor that chooses branches, merges, or commits.
 
 CA-v2 pins `gpt-5.6-sol` at high reasoning effort in its capability identity,
@@ -16,10 +15,10 @@ fail-closed transformation of the current canonical Metalanguage bootstrap at
 `seeds/bootstrap/README.md`. It preserves the canonical heading order, tone,
 paragraphs, round wording, work-until-room-runs-out wording, shared Git cleanup,
 `BENCHMARK.md` wording, and no-assignment neutrality. The only changes remove
-the unavailable `send_message` block, remove the complete `Leaving a successor`
-section for unavailable `spawn_child`, and remove the false spawn-input purpose
-from the `seed_output/` line. Validation byte-pins both the canonical source and
-the 2,029-byte transformed output, so any additional drift fails closed.
+the complete `Leaving a successor` section for unavailable `spawn_child` and
+the false spawn-input purpose from the `seed_output/` line. Validation byte-pins
+both the canonical source and the 1,799-byte transformed output, so any
+additional drift fails closed.
 
 Every iteration launches one ordinary turn for each slot and accepts its
 natural final answer and process completion. The control never installs a
@@ -59,7 +58,7 @@ from each freshly initialized private home. Native multi-agent features are
 disabled, while private stock session history is retained only to support an
 eligible slot's exact-session resume in a later iteration.
 
-Each rollout also has a read-only `runtime.md` containing its exact slot roster
+Each rollout also has a read-only `runtime.md` containing its exact slot layout
 and relevant private/shared paths, plus a private writable `seed_output/` that
 is emptied before every explicitly launched round. These are real minimal
 equivalents of the canonical bootstrap references; neither adds a tool or
@@ -99,7 +98,7 @@ control/codex-additive/
     shared_workspace/archive/   one empty shared Git repository
     shared_workspace/BENCHMARK.md exact 173-byte read-only problem
     rollouts/rollout_000..007/
-      runtime.md                read-only exact roster/path facts
+      runtime.md                read-only exact slot/path facts
       seed_output/              private writable, empty at round start
     state/rollout_000..007/codex_home/
     iterations/

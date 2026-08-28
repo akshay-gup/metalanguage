@@ -2,7 +2,7 @@
   "control_name": "codex-replacement",
   "control_label": "Codex-Replacement (CR-v2): close-match canonical Metalanguage instructions replace stock Codex built-in base instructions via model_instructions_file",
   "treatment_version": "CR-v2",
-  "capability_identity": "stock-codex-passive-observer-no-peer-no-spawn-reasoning-high-v2",
+  "capability_identity": "stock-codex-passive-observer-no-spawn-reasoning-high-v2",
   "format": "stock-codex-replacement-v2-control-pins",
   "version": 2,
   "archive_initial_state": {
@@ -27,22 +27,21 @@
     "sha256": "d112892c81d5a637f847128ca1ed713bbc962382c082774c46387df5df9ed2ef"
   },
   "canonical_bootstrap": {
-    "bytes": 2875,
+    "bytes": 2494,
     "relative_path": "seeds/bootstrap/README.md",
-    "sha256": "7d9ce86b8d7cd58834fac958ced3aa93cecabf16b948cfe605785d6867d60bde"
+    "sha256": "670e2b4cd8ab1bc560ce9b6bb382a98906403d1f576598f4ac62ee66c6458519"
   },
   "instruction_transformation": {
-    "version": 2,
+    "version": 3,
     "deviations": [
-      "remove-send-message-interface",
       "remove-leaving-a-successor-spawn-child-block",
       "remove-seed-output-spawn-purpose"
     ],
     "runtime_document_format": "stock-codex-control-runtime-facts-v2"
   },
   "replacement_instruction": {
-    "bytes": 2029,
-    "sha256": "48464a0a1777ed3afd03ca9040d8509fe37762593aeec8cdb447a563ec52b912"
+    "bytes": 1799,
+    "sha256": "d2dfa60817fddbf155224e705fd4efd2d19ae2ef683a2224376fd67319e2fbee"
   },
   "instruction_delivery": {
     "additive_agents_discovery": false,
@@ -69,7 +68,7 @@
     "version": "codex-cli 0.146.0"
   },
   "experiment": {
-    "config_sha256": "9e8bbb7f912cf6a180b1e76a5f53853aeb3705ce43a978e3e9be5e8a151a7548",
+    "config_sha256": "272f044075fea3af25474a2da81a573b5a160d2351704937a359015d66bb554e",
     "iteration_semantics": {
       "natural_finalization": true,
       "post_compact_observer": "passive",
@@ -89,7 +88,7 @@
   },
   "control_parity": {
     "source_control": "../codex-additive",
-    "source_pins_sha256": "d7502025a3999fbf5251d313f1929b3e1bf291c9bdbfdce3e3d116b798d822cf",
+    "source_pins_sha256": "78a48c8fd62ddeede1bfbe802680b8b04ac4d6871b2ade97a77626da339f2658",
     "identical_pin_sections": [
       "archive_initial_state",
       "benchmark",
