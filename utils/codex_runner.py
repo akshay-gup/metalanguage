@@ -13,9 +13,6 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from utils.peer_communication import peer_communication_handler_command
-
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUNNER_CRATE_DIR = PROJECT_ROOT / "crates" / "metalanguage-codex-runner"
 RUNNER_MANIFEST = RUNNER_CRATE_DIR / "Cargo.toml"
@@ -239,36 +236,6 @@ def run_codex_rollout(
             str(spawn_child_handler_context_path),
         ]
         request["spawn_child_handler_command"] = handler_command
-        try:
-            continuation_context = json.loads(
-                spawn_child_handler_context_path.read_text(encoding="utf-8")
-            )
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            continuation_context = {}
-        if not isinstance(continuation_context, dict):
-            continuation_context = {}
-        peer_endpoint = continuation_context.get("peer_communication_endpoint")
-        peer_token = continuation_context.get("peer_communication_token")
-        if (peer_endpoint is None) != (peer_token is None):
-            raise RuntimeError(
-                "peer communication capability has incomplete supervisor credentials"
-            )
-        if peer_endpoint is not None:
-            if (
-                not isinstance(peer_endpoint, str)
-                or not peer_endpoint
-                or not isinstance(peer_token, str)
-                or not peer_token
-            ):
-                raise RuntimeError(
-                    "peer communication capability has invalid supervisor credentials"
-                )
-            request["peer_communication_handler_command"] = (
-                peer_communication_handler_command(
-                    spawn_child_handler_context_path,
-                    python_executable=sys.executable,
-                )
-            )
     if benchmark_mcp_servers:
         request["mcp_servers"] = benchmark_mcp_servers
     if sensitive_mcp_tools:
