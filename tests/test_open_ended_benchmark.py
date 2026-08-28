@@ -35,13 +35,6 @@ from utils.open_ended_benchmark import (
     resolve_open_ended_task,
 )
 from utils.opencode_runner import custom_provider_configuration, custom_provider_fingerprint
-from utils.peer_communication import (
-    LEGACY_DISTINCT_NAMES_FINGERPRINT,
-    LEGACY_DISTINCT_NAMES_VERSION,
-    PEER_COMMUNICATION_CAPABILITY_NAME,
-)
-
-
 class OpenEndedBenchmarkTests(unittest.TestCase):
     def test_cli_accepts_open_ended_task_file(self) -> None:
         with patch(
@@ -184,25 +177,13 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
             record = records[0]
             self.assertEqual(record["opencode_custom_provider"], configuration)
             self.assertTrue(record["opencode_custom_provider_sha256"])
-            self.assertTrue(record["peer_communication_enabled"])
-            self.assertFalse(record["rollout_independence"])
-            self.assertEqual(record["peer_communication_population_size"], 16)
-            self.assertEqual(
-                record["peer_communication_batch_message_limit"], 1_024
+            self.assertFalse((runtime / "logs/peer_communication").exists())
+            self.assertNotIn("send_message", calls[0]["system_instructions"])
+            continuation = json.loads(
+                Path(calls[0]["continuation_context_path"]).read_text()
             )
-            self.assertEqual(len(record["peer_name_mapping"]), 16)
-            self.assertEqual(
-                len({entry["name"] for entry in record["peer_name_mapping"]}),
-                16,
-            )
-            self.assertEqual(len(record["peer_name_roster"]), 16)
-            peer_log = (
-                runtime
-                / "logs/peer_communication/task_000000"
-                / f"batch_{record['peer_communication_batch_id']}"
-            )
-            self.assertTrue((peer_log / "manifest.json").is_file())
-            self.assertEqual(list((peer_log / "messages").glob("*.json")), [])
+            self.assertFalse(any(key.startswith("peer_") for key in record))
+            self.assertFalse(any(key.startswith("peer_") for key in continuation))
 
     def test_codex_and_openrouter_separate_system_and_inherited_user_prompts(self) -> None:
         documents = Path.home() / "Documents"
@@ -390,10 +371,10 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                         for key in ("archive_merged", "archive_committed", "archive_branch")
                     )
                 )
+                self.assertTrue(all("send_message" not in call[instruction_key] for call in calls))
                 self.assertTrue(
                     all(
-                        record["peer_communication_population_size"] == 16
-                        and len(record["peer_name_roster"]) == 16
+                        not any(key.startswith("peer_") for key in record)
                         for record in records
                     )
                 )
@@ -405,7 +386,7 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                     )
                 )
 
-    def test_completed_eight_to_sixteen_transition_and_partial_rejection(self) -> None:
+    def test_clean_boundary_migrates_legacy_messaging_and_partial_fails_closed(self) -> None:
         documents = Path.home() / "Documents"
         documents.mkdir(exist_ok=True)
         for partial in (False, True):
@@ -454,13 +435,17 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                     json.loads(line) for line in runs_path.read_text().splitlines()
                 ]
                 for record in historical_records:
-                    record["peer_communication_version"] = (
-                        LEGACY_DISTINCT_NAMES_VERSION
+                    record.update(
+                        {
+                            "peer_communication_enabled": True,
+                            "peer_communication_version": 5,
+                            "peer_communication_fingerprint": "legacy-fixture",
+                            "peer_communication_population_size": 8,
+                            "peer_communication_batch_id": "legacy-batch",
+                            "rollout_coordination": "collaborative_same_batch",
+                            "rollout_independence": False,
+                        }
                     )
-                    record["peer_communication_fingerprint"] = (
-                        LEGACY_DISTINCT_NAMES_FINGERPRINT
-                    )
-                    record.pop("peer_communication_population_size", None)
                 runs_path.write_text(
                     "".join(
                         json.dumps(record) + "\n"
@@ -469,10 +454,10 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                 )
                 identity_path = runtime / "runtime_benchmark.json"
                 identity = json.loads(identity_path.read_text())
-                identity["capabilities"][PEER_COMMUNICATION_CAPABILITY_NAME] = {
+                identity["capabilities"]["peer_communication"] = {
                     "enabled": True,
-                    "version": LEGACY_DISTINCT_NAMES_VERSION,
-                    "fingerprint": LEGACY_DISTINCT_NAMES_FINGERPRINT,
+                    "version": 5,
+                    "fingerprint": "legacy-fixture",
                 }
                 identity_path.write_text(json.dumps(identity))
                 if partial:
@@ -482,15 +467,19 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                     runs_path.write_text(
                         "".join(json.dumps(record) + "\n" for record in records)
                     )
+                    identity_before = identity_path.read_bytes()
+                    runs_before = runs_path.read_bytes()
                     with patch.dict(
                         "os.environ", {"OPENROUTER_API_KEY": "test-only-key"}
                     ), patch("sys.argv", argv(16)), patch(
                         "main_loop.run_worker", side_effect=worker
                     ), self.assertRaisesRegex(
-                        RuntimeError, "peer communication capability"
+                        RuntimeError, "legacy peer-messaging state"
                     ):
                         _run_main([])
                     self.assertEqual(len(calls), 8)
+                    self.assertEqual(identity_path.read_bytes(), identity_before)
+                    self.assertEqual(runs_path.read_bytes(), runs_before)
                     continue
 
                 pool_path = (
@@ -540,6 +529,16 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     [record["task_index"] for record in records].count(1), 16
+                )
+                migrated_identity = json.loads(identity_path.read_text())
+                self.assertNotIn(
+                    "peer_communication", migrated_identity["capabilities"]
+                )
+                self.assertEqual(
+                    migrated_identity["capabilities"][
+                        main_loop.ROLLOUT_SYSTEM_INSTRUCTIONS_CAPABILITY_NAME
+                    ]["version"],
+                    ROLLOUT_SYSTEM_INSTRUCTIONS_VERSION,
                 )
 
     def test_opencode_resume_requires_matching_backend_configuration(self) -> None:
@@ -1185,30 +1184,15 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
             self.assertIn("no evaluator, score, reward, solved status, or ranking", runtime_text)
             self.assertNotIn("problem_pool", runtime_text)
             self.assertNotIn("Benchmark Pool Semantics", runtime_text)
-            peer_section = "## Peer Identity" + runtime_text.split("## Peer Identity", 1)[1]
-            self.assertEqual(
-                [line for line in peer_section.splitlines() if line],
-                [
-                    "## Peer Identity",
-                    "- your name: unavailable",
-                    "- other peer names: unavailable",
-                ],
-            )
-            self.assertNotIn("send_message", peer_section)
+            self.assertNotIn("Peer Identity", runtime_text)
             bootstrap = (
                 Path(__file__).resolve().parents[1] / "seeds/bootstrap/README.md"
             ).read_text(encoding="utf-8")
             bootstrap_words = " ".join(bootstrap.split())
             self.assertIn("Nobody has assigned you an objective.", bootstrap_words)
-            self.assertIn(
-                "`runtime.md` lists how many there are and what they are called.",
-                bootstrap_words,
-            )
-            self.assertIn('send_message(message="...", receiver="...")', bootstrap)
-            self.assertIn(
-                "`receiver` must exactly match one of the names in `runtime.md`.",
-                bootstrap_words,
-            )
+            self.assertNotIn("send_message", bootstrap)
+            self.assertNotIn("## The others", bootstrap)
+            self.assertNotIn("what they are called", bootstrap_words)
             self.assertIn("`seed_output/` is local writable empty directory", bootstrap_words)
             self.assertIn(
                 "`shared_workspace/` is visible to all programs running alongside you. "
