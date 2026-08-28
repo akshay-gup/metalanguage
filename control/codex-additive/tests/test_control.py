@@ -12,7 +12,7 @@ from unittest import mock
 import control
 
 
-TASK_BYTES = (
+BENCHMARK_BYTES = (
     b"# Task\n\nProve the Riemann hypothesis.\n\n"
     b"The Riemann hypothesis states that every nontrivial zero of the analytically\n"
     b"continued Riemann zeta function \xce\xb6(s) has real part 1/2.\n"
@@ -33,7 +33,7 @@ class ControlTest(unittest.TestCase):
         (root / "hooks").mkdir()
         shutil.copy2(Path(control.__file__).parent / "seed/AGENTS.md", root / "seed/AGENTS.md")
         shutil.copy2(Path(control.__file__).parent / "hooks/iteration_boundary.py", root / "hooks/iteration_boundary.py")
-        (root / "seed/TASK.md").write_bytes(TASK_BYTES)
+        (root / "seed/BENCHMARK.md").write_bytes(BENCHMARK_BYTES)
         fake = Path(control.__file__).parent / "tests/fake_codex.py"
         fake.chmod(0o755)
         return control.Study(root, str(fake))
@@ -64,25 +64,37 @@ class ControlTest(unittest.TestCase):
         canonical_path = control.canonical_bootstrap_path(source_root)
         canonical = canonical_path.read_text(encoding="utf-8")
         instruction = (source_root / "seed/AGENTS.md").read_text(encoding="utf-8")
+        self.assertEqual(len(canonical.encode("utf-8")), control.CANONICAL_BOOTSTRAP_BYTES)
+        self.assertEqual(
+            control.sha256_bytes(canonical.encode("utf-8")),
+            control.CANONICAL_BOOTSTRAP_SHA256,
+        )
         self.assertEqual(control.render_aligned_instruction(canonical), instruction)
         self.assertEqual(
-            [line for line in canonical.splitlines() if line.startswith("## ")],
+            [
+                "## The others",
+                "## Places",
+                "## What is already there",
+            ],
             [line for line in instruction.splitlines() if line.startswith("## ")],
         )
         for unavailable in (
             "send_message",
             "spawn_child",
-            "BENCHMARK.md",
-            "run out of room",
+            "## Leaving a successor",
+            "natural turn",
+            "compaction",
+            "session survival",
+            "evaluator",
         ):
             self.assertNotIn(unavailable, instruction)
         for required in (
-            "shared_workspace/TASK.md",
-            "one ordinary turn",
-            "finish naturally",
-            "automatic context compactions",
-            "next explicitly launched round",
-            "fresh separate session",
+            "shared_workspace/BENCHMARK.md",
+            "run out of room",
+            "next set starts",
+            "One set starting, working, and stopping is a round.",
+            "Nobody has assigned you an objective.",
+            "make it an assignment.",
             "same ordinary Git checkout",
             "Git commands run concurrently",
             "Staged, modified, deleted, untracked, and ignored",
@@ -90,6 +102,10 @@ class ControlTest(unittest.TestCase):
             "runtime.md",
         ):
             self.assertIn(required, instruction)
+        with self.assertRaisesRegex(
+            control.ControlError, "canonical bootstrap content is not the byte-pinned"
+        ):
+            control.render_aligned_instruction(canonical + "\nextra drift\n")
         pins = json.loads((source_root / "seed/PINS.json").read_text(encoding="utf-8"))
         self.assertEqual(
             pins["instruction_transformation"],
@@ -103,6 +119,62 @@ class ControlTest(unittest.TestCase):
             pins["canonical_bootstrap"]["sha256"],
             control.sha256_file(canonical_path),
         )
+        self.assertEqual(
+            pins["additive_instruction"]["sha256"],
+            control.sha256_file(source_root / "seed/AGENTS.md"),
+        )
+        self.assertEqual(
+            pins["instruction_delivery"],
+            {
+                "additive_agents_discovery": True,
+                "config_key": None,
+                "private_filename": "AGENTS.md",
+                "project_doc_max_bytes": 32768,
+                "stock_builtins_retained": True,
+            },
+        )
+
+    def test_high_reasoning_is_fingerprinted_and_low_state_cannot_resume(self) -> None:
+        source_root = Path(control.__file__).resolve().parent
+        pins = json.loads((source_root / "seed/PINS.json").read_text(encoding="utf-8"))
+        expected_capability = (
+            "stock-codex-passive-observer-no-peer-no-spawn-reasoning-high-v2"
+        )
+        self.assertEqual(control.TREATMENT_VERSION, "CA-v2")
+        self.assertEqual(control.REASONING_EFFORT, "high")
+        self.assertEqual(control.CAPABILITY_IDENTITY, expected_capability)
+        self.assertEqual(pins["treatment_version"], "CA-v2")
+        self.assertEqual(pins["capability_identity"], expected_capability)
+        self.assertEqual(pins["experiment"]["reasoning_effort"], "high")
+        rendered = control.render_config(
+            source_root / "runtime/shared_workspace",
+            source_root,
+            Path(pins["codex"]["installation_root"]),
+        )
+        self.assertIn('model_reasoning_effort = "high"', rendered)
+        self.assertNotIn('model_reasoning_effort = "low"', rendered)
+        self.assertEqual(
+            pins["experiment"]["config_sha256"],
+            control.sha256_bytes(rendered.encode()),
+        )
+
+        with tempfile.TemporaryDirectory() as raw:
+            study, _ = self.initialize(Path(raw))
+            init = control.load_json(study.runtime / "manifests/init.json")
+            self.assertEqual(init["reasoning_effort"], "high")
+            command, _ = control.build_codex_command(
+                study, 0, resume=False, session_id=None
+            )
+            self.assertIn('model_reasoning_effort="high"', command)
+            self.assertNotIn('model_reasoning_effort="low"', command)
+
+            state = control.load_json(study.study_state_path)
+            state["capability_identity"] = (
+                "stock-codex-passive-observer-no-peer-no-spawn-v2"
+            )
+            control.atomic_json(study.study_state_path, state)
+            with self.assertRaisesRegex(control.ControlError, "not a resumable"):
+                control.status_record(study)
 
     def test_init_creates_genuinely_empty_unborn_shared_archive(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -128,7 +200,8 @@ class ControlTest(unittest.TestCase):
                 self.assertFalse((rollout / "TASK.md").exists())
                 self.assertFalse((rollout / "TASK.md").is_symlink())
                 self.assertEqual(
-                    (rollout / "shared_workspace/TASK.md").read_bytes(), TASK_BYTES
+                    (rollout / "shared_workspace/BENCHMARK.md").read_bytes(),
+                    BENCHMARK_BYTES,
                 )
                 self.assertEqual(
                     (rollout / "runtime.md").read_text(encoding="utf-8"),
@@ -164,7 +237,8 @@ class ControlTest(unittest.TestCase):
                 )
                 self.assertEqual(control.sha256_file(config_path), expected_hash)
                 self.assertNotIn("[permissions.control.workspace_roots]", config_text)
-                self.assertNotIn('"TASK.md" = "read"', config_text)
+                self.assertIn("BENCHMARK.md", config_text)
+                self.assertNotIn("TASK.md", config_text)
             command, _ = control.build_codex_command(
                 study, 0, resume=False, session_id=None
             )
@@ -174,16 +248,28 @@ class ControlTest(unittest.TestCase):
             with self.assertRaisesRegex(control.ControlError, "config changed"):
                 control.verify_layout(study, control.load_json(study.study_state_path))
 
-    def test_preflight_rematerializes_exact_task_after_batch_cleanup(self) -> None:
+    def test_v1_state_identity_cannot_resume_as_v2(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             study, _ = self.initialize(Path(raw))
-            task = study.shared_workspace / "TASK.md"
-            task.unlink()
-            self.assertFalse(task.exists())
+            state = control.load_json(study.study_state_path)
+            state["format"] = "stock-codex-natural-turn-control-state"
+            state["version"] = 3
+            state.pop("treatment_version")
+            state.pop("capability_identity")
+            control.atomic_json(study.study_state_path, state)
+            with self.assertRaisesRegex(control.ControlError, "not a resumable"):
+                control.status_record(study)
+
+    def test_preflight_rematerializes_exact_benchmark_after_batch_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            study, _ = self.initialize(Path(raw))
+            benchmark = study.shared_workspace / "BENCHMARK.md"
+            benchmark.unlink()
+            self.assertFalse(benchmark.exists())
             result = control.run_preflight(study, real_cli=False)
             self.assertFalse(result["provider_call"])
-            self.assertEqual(task.read_bytes(), TASK_BYTES)
-            self.assertEqual(task.stat().st_mode & 0o777, 0o444)
+            self.assertEqual(benchmark.read_bytes(), BENCHMARK_BYTES)
+            self.assertEqual(benchmark.stat().st_mode & 0o777, 0o444)
 
     def test_no_stop_hook_and_passive_auto_postcompact_observer(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -375,7 +461,7 @@ class ControlTest(unittest.TestCase):
             self.assertEqual(sum(state["compaction_counts"]), 7)
             self.assertEqual(state["next_slot_session_ids"], [None] * 8)
             self.assertEqual(state["seen_fresh_session_ids"], [])
-            self.assertTrue((study.shared_workspace / "TASK.md").exists())
+            self.assertTrue((study.shared_workspace / "BENCHMARK.md").exists())
             manifest = control.load_json(Path(state["last_iteration_manifest"]))
             self.assertFalse(manifest["all_natural_turns_succeeded"])
             self.assertIsNone(manifest["candidate_next_slot_session_ids"])
