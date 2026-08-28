@@ -1,8 +1,10 @@
 {
   "control_name": "codex-additive",
-  "control_label": "Codex-Additive (CA): stock Codex built-in base instructions plus additive canonical AGENTS.md",
-  "format": "stock-codex-natural-turn-control-pins",
-  "version": 3,
+  "control_label": "Codex-Additive (CA-v2): stock Codex built-in base instructions plus additive close-match canonical Metalanguage AGENTS.md",
+  "treatment_version": "CA-v2",
+  "capability_identity": "stock-codex-passive-observer-no-peer-no-spawn-reasoning-high-v2",
+  "format": "stock-codex-additive-v2-control-pins",
+  "version": 2,
   "archive_initial_state": {
     "head": null,
     "head_tree_sha256": null,
@@ -17,8 +19,11 @@
     "tracked_index_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "unborn": true
   },
-  "task": {
+  "benchmark": {
     "bytes": 173,
+    "filename": "BENCHMARK.md",
+    "model_visible_path": "shared_workspace/BENCHMARK.md",
+    "evaluator_configured": false,
     "sha256": "d112892c81d5a637f847128ca1ed713bbc962382c082774c46387df5df9ed2ef"
   },
   "canonical_bootstrap": {
@@ -27,23 +32,24 @@
     "sha256": "7d9ce86b8d7cd58834fac958ced3aa93cecabf16b948cfe605785d6867d60bde"
   },
   "instruction_transformation": {
-    "version": 1,
+    "version": 2,
     "deviations": [
-      "identify-eight-stock-codex-sessions-and-private-rollouts",
-      "replace-forced-context-exhaustion-with-one-natural-turn",
-      "make-next-round-explicitly-launched",
       "remove-send-message-interface",
-      "remove-spawn-child-interface",
-      "remove-seed-output-spawn-purpose",
-      "replace-benchmark-with-optional-shared-task",
-      "describe-auto-compaction-session-survival",
-      "qualify-batch-final-discard-as-success-only"
+      "remove-leaving-a-successor-spawn-child-block",
+      "remove-seed-output-spawn-purpose"
     ],
-    "runtime_document_format": "stock-codex-control-runtime-facts-v1"
+    "runtime_document_format": "stock-codex-control-runtime-facts-v2"
   },
   "additive_instruction": {
-    "bytes": 2999,
-    "sha256": "61a8b0e510f7634d974f69056852c375d4dcec8aed99650a0856b065ba9271b9"
+    "bytes": 2029,
+    "sha256": "48464a0a1777ed3afd03ca9040d8509fe37762593aeec8cdb447a563ec52b912"
+  },
+  "instruction_delivery": {
+    "additive_agents_discovery": true,
+    "config_key": null,
+    "private_filename": "AGENTS.md",
+    "project_doc_max_bytes": 32768,
+    "stock_builtins_retained": true
   },
   "fresh_prompt": {
     "bytes": 6,
@@ -62,7 +68,7 @@
     "version": "codex-cli 0.146.0"
   },
   "experiment": {
-    "config_sha256": "af59b53c3cb0a86d9fbef69bee6951671435d63418cb92316b4aab6ad08257ad",
+    "config_sha256": "08e24f88f087f979e5168c7648924c5749eebe2c130f895dbd04097c5fb46b0c",
     "iteration_semantics": {
       "natural_finalization": true,
       "post_compact_observer": "passive",
@@ -77,7 +83,7 @@
       "trust_level": "trusted"
     },
     "model": "gpt-5.6-sol",
-    "reasoning_effort": "low",
+    "reasoning_effort": "high",
     "rollout_count": 8
   }
 }
