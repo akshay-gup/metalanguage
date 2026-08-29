@@ -28,7 +28,7 @@
   },
   "canonical_bootstrap": {
     "bytes": 2494,
-    "relative_path": "seeds/bootstrap/README.md",
+    "relative_path": "control/shared-git-bootstrap-v2.md",
     "sha256": "670e2b4cd8ab1bc560ce9b6bb382a98906403d1f576598f4ac62ee66c6458519"
   },
   "instruction_transformation": {

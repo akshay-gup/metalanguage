@@ -11,9 +11,9 @@ reasoning-qualified capability identity makes the prior zero-state low-effort
 runtime incompatible rather than resumable.
 
 The model-visible additive `AGENTS.md` is the exact output of a reviewed,
-fail-closed transformation of the current canonical Metalanguage bootstrap at
-`seeds/bootstrap/README.md`. It preserves the canonical heading order, tone,
-paragraphs, round wording, work-until-room-runs-out wording, shared Git cleanup,
+fail-closed transformation of the byte-pinned CA-v2 shared-Git bootstrap at
+`control/shared-git-bootstrap-v2.md`. It preserves the canonical heading order,
+tone, paragraphs, round wording, work-until-room-runs-out wording, shared Git cleanup,
 `BENCHMARK.md` wording, and no-assignment neutrality. The only changes remove
 the complete `Leaving a successor` section for unavailable `spawn_child` and
 the false spawn-input purpose from the `seed_output/` line. Validation byte-pins

@@ -115,8 +115,8 @@ paths. It permits exactly three delivery differences: adding
 removing the rollout `AGENTS.md` read exception. It separately requires equality
 of the archive seed, exact benchmark, canonical transformation, prompts, pinned CLI,
 model, reasoning effort, slot count, and iteration semantics. The replacement
-file must also remain the exact reviewed transformation of the current canonical
-Metalanguage bootstrap at `../../seeds/bootstrap/README.md`.
+file must also remain the exact reviewed transformation of the pinned CA-v2/CR-v2
+shared-Git bootstrap fixture at `../shared-git-bootstrap-v2.md`.
 
 ## Provider-free setup and validation
 

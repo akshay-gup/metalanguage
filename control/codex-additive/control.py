@@ -38,7 +38,7 @@ EXPECTED_CODEX_VERSION = "codex-cli 0.146.0"
 INITIAL_BRANCH = "main"
 FRESH_PROMPT = "Begin."
 CONTINUATION_INPUT = "Continue until the next automatic compaction boundary."
-CANONICAL_BOOTSTRAP_RELATIVE = Path("seeds/bootstrap/README.md")
+CANONICAL_BOOTSTRAP_RELATIVE = Path("control/shared-git-bootstrap-v2.md")
 CANONICAL_BOOTSTRAP_BYTES = 2494
 CANONICAL_BOOTSTRAP_SHA256 = "670e2b4cd8ab1bc560ce9b6bb382a98906403d1f576598f4ac62ee66c6458519"
 INSTRUCTION_TRANSFORM_VERSION = 3
@@ -389,6 +389,7 @@ def toml_string(value: str) -> str:
 
 
 def canonical_bootstrap_path(study_root: Path) -> Path:
+    # CA-v2 remains pinned to the pre-isolation shared-Git treatment text.
     return study_root.resolve(strict=True).parent.parent / CANONICAL_BOOTSTRAP_RELATIVE
 
 

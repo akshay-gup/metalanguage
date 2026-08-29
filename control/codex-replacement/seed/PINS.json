@@ -28,7 +28,7 @@
   },
   "canonical_bootstrap": {
     "bytes": 2494,
-    "relative_path": "seeds/bootstrap/README.md",
+    "relative_path": "control/shared-git-bootstrap-v2.md",
     "sha256": "670e2b4cd8ab1bc560ce9b6bb382a98906403d1f576598f4ac62ee66c6458519"
   },
   "instruction_transformation": {
@@ -88,7 +88,7 @@
   },
   "control_parity": {
     "source_control": "../codex-additive",
-    "source_pins_sha256": "78a48c8fd62ddeede1bfbe802680b8b04ac4d6871b2ade97a77626da339f2658",
+    "source_pins_sha256": "244534c6a7c70b57ee0e26bffd7fe6e05f8cd43ac7e85e392f395da99dba1cd5",
     "identical_pin_sections": [
       "archive_initial_state",
       "benchmark",
