@@ -15,8 +15,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from main_loop import (
+    READ_README_TASK_INSTRUCTIONS,
     WorkerResult,
-    canonical_rollout_system_instructions,
     run_opencode_worker,
 )
 from utils.opencode_runner import (
@@ -431,7 +431,7 @@ class OpenCodeRunnerTests(unittest.TestCase):
     def test_vertical_slice_exact_prompt_state_isolation_and_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            canonical_instructions = canonical_rollout_system_instructions()
+            canonical_instructions = READ_README_TASK_INSTRUCTIONS
             result = self._run(
                 root,
                 agent="build",
@@ -444,6 +444,7 @@ class OpenCodeRunnerTests(unittest.TestCase):
             self.assertTrue(result["isolated_state_cleaned"])
             prompt = json.loads((root / "workdir/fake_prompt.json").read_text())
             self.assertEqual(prompt["system"], canonical_instructions)
+            self.assertNotIn("# Environment", prompt["system"])
             request = json.loads(Path(str(result["request_path"])).read_text())
             self.assertEqual(request["system_instructions"], canonical_instructions)
             self.assertEqual(

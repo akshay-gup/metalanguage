@@ -202,9 +202,6 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
         .features
         .disable(Feature::SpawnCsv)
         .context("disable Codex spawn CSV feature")?;
-    // Feature flags alone are not authoritative: model metadata can otherwise
-    // select Codex's native multi-agent runtime.
-    config.agents_enabled = false;
     config
         .features
         .disable(Feature::Collab)
@@ -213,12 +210,6 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
         .features
         .disable(Feature::MultiAgentV2)
         .context("disable Codex multi-agent feature")?;
-    if config.agents_enabled
-        || config.features.enabled(Feature::Collab)
-        || config.features.enabled(Feature::MultiAgentV2)
-    {
-        bail!("native Codex collaboration could not be disabled");
-    }
 
     let state_db = init_state_db(&config).await;
     let auth_manager =
@@ -596,34 +587,36 @@ fn bail_with_event(code: &str) -> anyhow::Result<()> {
 }
 
 fn metalanguage_dynamic_tools() -> Vec<DynamicToolSpec> {
-    vec![DynamicToolSpec::Function(DynamicToolFunctionSpec {
-        name: "spawn_child".to_string(),
-        description: concat!(
-            "Spawn this rollout's one possible next-iteration child. The child receives ",
-            "the supplied initial prompt and a copied workspace-local directory whose ",
-            "root contains a regular, non-symlinked, readable, non-blank UTF-8 README.md. ",
-            "Invalid or failed attempts can be corrected and retried. After one successful ",
-            "spawn, later calls from this rollout fail. Every call returns feedback and the ",
-            "parent rollout continues normally."
-        )
-        .to_string(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "prompt": {
-                    "type": "string",
-                    "description": "Required non-empty initial user message stored for the child rollout."
+    vec![
+        DynamicToolSpec::Function(DynamicToolFunctionSpec {
+            name: "spawn_child".to_string(),
+            description: concat!(
+                "Spawn this rollout's one possible next-iteration child. The child receives ",
+                "the supplied initial prompt and a copied workspace-local directory whose ",
+                "root contains a regular, non-symlinked, readable, non-blank UTF-8 README.md. ",
+                "Invalid or failed attempts can be corrected and retried. After one successful ",
+                "spawn, later calls from this rollout fail. Every call returns feedback and the ",
+                "parent rollout continues normally."
+            )
+            .to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "Required non-empty initial user message stored for the child rollout."
+                    },
+                    "workspace_dir": {
+                        "type": "string",
+                        "description": "Required workspace-local directory copied for the child. Its root must contain a regular, non-symlinked, readable, non-blank UTF-8 README.md. Additional files are optional. The source is consumed after the parent rollout finishes only when spawning succeeds."
+                    }
                 },
-                "workspace_dir": {
-                    "type": "string",
-                    "description": "Required workspace-local directory copied for the child. Its root must contain a regular, non-symlinked, readable, non-blank UTF-8 README.md. Additional files are optional. The source is consumed after the parent rollout finishes only when spawning succeeds."
-                }
-            },
-            "required": ["prompt", "workspace_dir"],
-            "additionalProperties": false,
+                "required": ["prompt", "workspace_dir"],
+                "additionalProperties": false,
+            }),
+            defer_loading: false,
         }),
-        defer_loading: false,
-    })]
+    ]
 }
 
 #[cfg(test)]
@@ -709,21 +702,13 @@ fn handle_spawn_child_tool(
     let Some(command) = spawn_child_handler_command else {
         return dynamic_tool_json_response(
             false,
-            spawn_child_failure(
-                "spawn_child_handler_unavailable",
-                "spawn_child handler command is not configured",
-                true,
-            ),
+            spawn_child_failure("spawn_child_handler_unavailable", "spawn_child handler command is not configured", true),
         );
     };
     if command.is_empty() {
         return dynamic_tool_json_response(
             false,
-            spawn_child_failure(
-                "spawn_child_handler_unavailable",
-                "spawn_child handler command is empty",
-                true,
-            ),
+            spawn_child_failure("spawn_child_handler_unavailable", "spawn_child handler command is empty", true),
         );
     }
     let handler_payload = json!({
@@ -739,7 +724,7 @@ fn handle_spawn_child_tool(
             return dynamic_tool_json_response(
                 false,
                 spawn_child_failure("spawn_child_handler_failed", &message, true),
-            );
+            )
         }
     };
     let success = output
@@ -879,7 +864,6 @@ fn agent_message_text(content: &[AgentMessageContent]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codex_protocol::ThreadId;
     use codex_protocol::items::DynamicToolCallItem;
     use codex_protocol::items::DynamicToolCallStatus;
     use codex_protocol::items::McpToolCallError;
@@ -891,6 +875,7 @@ mod tests {
     use codex_protocol::protocol::McpInvocation;
     use codex_protocol::protocol::McpToolCallBeginEvent;
     use codex_protocol::protocol::McpToolCallEndEvent;
+    use codex_protocol::ThreadId;
 
     const ARGUMENT_SENTINEL: &str = "sensitive-argument-sentinel";
     const RESULT_SENTINEL: &str = "sensitive-result-sentinel";
@@ -950,7 +935,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_tool_inventory_is_spawn_child_only() {
+    fn native_tools_never_include_submit_solution() {
         let names = metalanguage_dynamic_tools()
             .into_iter()
             .map(|tool| dynamic_tool_name(&tool).to_string())
@@ -1034,9 +1019,13 @@ mod tests {
             logged_mcp_tool_end_event(&completed_with_error),
         ];
         for item_event in [&started, &completed] {
-            let notification =
-                mapped_item_notification(item_event, "thread", Some("turn"), &sensitive_tools)
-                    .expect("map item event");
+            let notification = mapped_item_notification(
+                item_event,
+                "thread",
+                Some("turn"),
+                &sensitive_tools,
+            )
+            .expect("map item event");
             assert!(notification.is_none());
             if let Some(notification) = notification {
                 emitted.push(json!({
@@ -1059,10 +1048,14 @@ mod tests {
     #[test]
     fn non_sensitive_mcp_and_spawn_child_items_remain_mapped() {
         let non_sensitive = item_completed(TurnItem::McpToolCall(sensitive_mcp_item()));
-        let non_sensitive_notification =
-            mapped_item_notification(&non_sensitive, "thread", Some("turn"), &[])
-                .expect("map non-sensitive MCP item")
-                .expect("retain non-sensitive MCP item");
+        let non_sensitive_notification = mapped_item_notification(
+            &non_sensitive,
+            "thread",
+            Some("turn"),
+            &[],
+        )
+        .expect("map non-sensitive MCP item")
+        .expect("retain non-sensitive MCP item");
         let non_sensitive_json = non_sensitive_notification.to_string();
         for sentinel in [ARGUMENT_SENTINEL, RESULT_SENTINEL, ERROR_SENTINEL] {
             assert!(non_sensitive_json.contains(sentinel));
@@ -1081,10 +1074,14 @@ mod tests {
             error: Some(ERROR_SENTINEL.to_string()),
             duration: Some(Duration::from_millis(1)),
         }));
-        let spawn_child_notification =
-            mapped_item_notification(&spawn_child, "thread", Some("turn"), &sensitive_mcp_tools())
-                .expect("map spawn_child item")
-                .expect("retain spawn_child item");
+        let spawn_child_notification = mapped_item_notification(
+            &spawn_child,
+            "thread",
+            Some("turn"),
+            &sensitive_mcp_tools(),
+        )
+        .expect("map spawn_child item")
+        .expect("retain spawn_child item");
         let spawn_child_json = spawn_child_notification.to_string();
         for sentinel in [ARGUMENT_SENTINEL, RESULT_SENTINEL] {
             assert!(spawn_child_json.contains(sentinel));

@@ -13,6 +13,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUNNER_CRATE_DIR = PROJECT_ROOT / "crates" / "metalanguage-codex-runner"
 RUNNER_MANIFEST = RUNNER_CRATE_DIR / "Cargo.toml"
@@ -213,8 +214,8 @@ def run_codex_rollout(
         str(shared_workspace_dir),
         str(worker_state_dir),
     ]
-    # The shared checkout's ordinary .git directory must be writable through
-    # the same sandbox boundary as its working tree.
+    # Linked archive worktrees write their index through the per-worktree
+    # gitdir and objects/refs through the persistent repository's common .git.
     _append_unique_path(additional_writable_roots, _resolve_git_dir(archive_repo_dir))
     _append_unique_path(additional_writable_roots, archive_git_dir)
 
@@ -229,13 +230,12 @@ def run_codex_rollout(
         "additional_writable_roots": additional_writable_roots,
     }
     if spawn_child_handler_context_path is not None:
-        handler_command = [
+        request["spawn_child_handler_command"] = [
             sys.executable,
             str(PROJECT_ROOT / "main_loop.py"),
             "--child-tool-handler",
             str(spawn_child_handler_context_path),
         ]
-        request["spawn_child_handler_command"] = handler_command
     if benchmark_mcp_servers:
         request["mcp_servers"] = benchmark_mcp_servers
     if sensitive_mcp_tools:
@@ -347,7 +347,6 @@ def run_codex_rollout(
                     final_text = str(event.get("final_text") or "")
 
         return_code = proc.wait()
-        proc.stdout.close()
     thread_id = thread_id or state.get("thread_id") or None
     session_id = session_id or state.get("session_id") or None
     final_text = final_text or state.get("final_text", "")

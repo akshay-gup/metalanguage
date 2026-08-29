@@ -1,32 +1,23 @@
 from __future__ import annotations
 
-import hashlib
 import json
+import hashlib
 import shutil
 import tempfile
-import threading
 import unittest
 from argparse import Namespace
 from pathlib import Path
 from unittest.mock import patch
 
-import main_loop
 from main_loop import (
-    CANONICAL_BOOTSTRAP_README_SHA256,
-    DEFAULT_BOOTSTRAP_INITIAL_PROMPT,
-    ROLLOUT_SYSTEM_INSTRUCTIONS_FINGERPRINT,
-    ROLLOUT_SYSTEM_INSTRUCTIONS_MODE,
-    ROLLOUT_SYSTEM_INSTRUCTIONS_VERSION,
     _validate_opencode_containment,
     _create_benchmark_driver,
     _format_runtime_markdown,
-    _rollout_prompt_resume_compatible,
     _runtime_benchmark,
     _run_main,
     _spawn_child_continuation,
     _worker_backend_resume_compatible,
     WorkerResult,
-    canonical_rollout_system_instructions,
     parse_args,
 )
 from utils.open_ended_benchmark import (
@@ -35,6 +26,8 @@ from utils.open_ended_benchmark import (
     resolve_open_ended_task,
 )
 from utils.opencode_runner import custom_provider_configuration, custom_provider_fingerprint
+
+
 class OpenEndedBenchmarkTests(unittest.TestCase):
     def test_cli_accepts_open_ended_task_file(self) -> None:
         with patch(
@@ -66,16 +59,7 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
         ):
             args = parse_args()
         self.assertEqual(args.worker_backend, "opencode")
-        self.assertEqual(
-            args.opencode_base_instructions_mode,
-            ROLLOUT_SYSTEM_INSTRUCTIONS_MODE,
-        )
-        self.assertEqual(args.opencode_initial_prompt, DEFAULT_BOOTSTRAP_INITIAL_PROMPT)
-        self.assertEqual(
-            args.codex_base_instructions_mode,
-            ROLLOUT_SYSTEM_INSTRUCTIONS_MODE,
-        )
-        self.assertEqual(args.codex_initial_prompt, DEFAULT_BOOTSTRAP_INITIAL_PROMPT)
+        self.assertEqual(args.opencode_base_instructions_mode, "read-readme")
         self.assertEqual(args.opencode_allowed_versions, "1.18.21")
         self.assertEqual(args.opencode_allowed_bun_versions, "1.3.14")
         self.assertEqual(args.opencode_sandbox_mode, "bubblewrap")
@@ -124,7 +108,7 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                 "--model",
                 "fixture/model-one",
                 "--num-rollouts",
-                "16",
+                "1",
                 "--step",
                 "--opencode-bin",
                 str(fake_opencode),
@@ -161,7 +145,7 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                 "main_loop.run_opencode_worker", side_effect=worker
             ):
                 _run_main([])
-            self.assertEqual(len(calls), 16)
+            self.assertEqual(len(calls), 1)
             configuration = calls[0]["custom_provider"]
             self.assertEqual(configuration["provider_id"], "fixture")
             self.assertEqual(configuration["model_id"], "model-one")
@@ -172,23 +156,13 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
             )
             run_log = (runtime / "logs/runs.jsonl").read_text()
             self.assertNotIn("DISPATCH-PRIVATE", run_log)
-            records = [json.loads(line) for line in run_log.splitlines()]
-            self.assertEqual(len(records), 16)
-            record = records[0]
+            record = json.loads(run_log)
             self.assertEqual(record["opencode_custom_provider"], configuration)
             self.assertTrue(record["opencode_custom_provider_sha256"])
-            self.assertFalse((runtime / "logs/peer_communication").exists())
-            self.assertNotIn("send_message", calls[0]["system_instructions"])
-            continuation = json.loads(
-                Path(calls[0]["continuation_context_path"]).read_text()
-            )
-            self.assertFalse(any(key.startswith("peer_") for key in record))
-            self.assertFalse(any(key.startswith("peer_") for key in continuation))
 
-    def test_codex_and_openrouter_separate_system_and_inherited_user_prompts(self) -> None:
+    def test_custom_provider_defaults_do_not_change_codex_or_openrouter_dispatch(self) -> None:
         documents = Path.home() / "Documents"
         documents.mkdir(exist_ok=True)
-        canonical_instructions = canonical_rollout_system_instructions()
         for backend in ("codex", "openrouter"):
             with self.subTest(backend=backend), tempfile.TemporaryDirectory(dir=documents) as temp:
                 root = Path(temp)
@@ -207,339 +181,33 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                     "--model",
                     "fixture/model",
                     "--num-rollouts",
-                    "16",
+                    "1",
                     "--step",
                 ]
                 if backend == "codex":
                     argv.extend(["--codex-runner-bin", "/bin/true", "--codex-home", str(root / "codex-home")])
                 codex_calls: list[dict[str, object]] = []
                 openrouter_calls: list[dict[str, object]] = []
-                spawn_lock = threading.Lock()
-                spawned = False
-                active_lock = threading.Lock()
-                active_workers = 0
-                worker_barrier = threading.Barrier(16)
-                cleanup_calls: list[Path] = []
-                real_cleanup = main_loop.clean_shared_git_repo
-
-                def maybe_spawn(kwargs: dict[str, object]) -> None:
-                    nonlocal spawned
-                    with spawn_lock:
-                        if spawned:
-                            return
-                        spawned = True
-                    workdir = Path(str(kwargs["workdir"]))
-                    seed = workdir / "child-seed"
-                    seed.mkdir()
-                    (seed / "README.md").write_text("# Distinct inherited handoff\n")
-                    if backend == "codex":
-                        context = json.loads(
-                            Path(str(kwargs["continuation_context_path"])).read_text()
-                        )
-                    else:
-                        context = dict(kwargs["continuation_context"])
-                    child = _spawn_child_continuation(
-                        context=context,
-                        args={
-                            "prompt": "INHERITED USER PROMPT",
-                            "workspace_dir": "child-seed",
-                        },
-                    )
-                    self.assertTrue(child["child_spawned"])
 
                 def codex_worker(**kwargs: object) -> WorkerResult:
-                    nonlocal active_workers
-                    with active_lock:
-                        active_workers += 1
                     codex_calls.append(kwargs)
-                    try:
-                        worker_barrier.wait(timeout=10)
-                        maybe_spawn(kwargs)
-                        return WorkerResult("offline", "completed", "final_message")
-                    finally:
-                        with active_lock:
-                            active_workers -= 1
-
-                def openrouter_worker(**kwargs: object) -> WorkerResult:
-                    nonlocal active_workers
-                    with active_lock:
-                        active_workers += 1
-                    openrouter_calls.append(kwargs)
-                    try:
-                        worker_barrier.wait(timeout=10)
-                        maybe_spawn(kwargs)
-                        return WorkerResult("offline", "completed", "final_message")
-                    finally:
-                        with active_lock:
-                            active_workers -= 1
-
-                def checked_cleanup(
-                    repo_path: Path,
-                    *,
-                    shared_workspace_dir: Path,
-                    expected_identity: tuple[tuple[int, int], tuple[int, int]],
-                ) -> dict[str, object]:
-                    with active_lock:
-                        self.assertEqual(active_workers, 0)
-                    cleanup_calls.append(repo_path)
-                    return real_cleanup(
-                        repo_path,
-                        shared_workspace_dir=shared_workspace_dir,
-                        expected_identity=expected_identity,
-                    )
-
-                for _ in range(2):
-                    with patch.dict("os.environ", {"OPENROUTER_API_KEY": "test-only-key"}), patch(
-                        "sys.argv", argv
-                    ), patch("main_loop.run_codex_worker", side_effect=codex_worker), patch(
-                        "main_loop.run_worker", side_effect=openrouter_worker
-                    ), patch(
-                        "main_loop.run_opencode_worker",
-                        side_effect=AssertionError("OpenCode dispatch must remain inactive"),
-                    ), patch(
-                        "main_loop.clean_shared_git_repo",
-                        side_effect=checked_cleanup,
-                    ):
-                        _run_main([])
-                calls = codex_calls if backend == "codex" else openrouter_calls
-                self.assertEqual(len(calls), 32)
-                self.assertEqual(
-                    [call["initial_user_text"] for call in calls].count(
-                        "INHERITED USER PROMPT"
-                    ),
-                    1,
-                )
-                self.assertEqual(
-                    [call["initial_user_text"] for call in calls].count(
-                        DEFAULT_BOOTSTRAP_INITIAL_PROMPT
-                    ),
-                    31,
-                )
-                instruction_key = (
-                    "base_instructions" if backend == "codex" else "instructions"
-                )
-                self.assertTrue(
-                    all(
-                        call[instruction_key] == canonical_instructions
-                        for call in calls
-                    )
-                )
-                shared_repositories = {
-                    Path(str(call["archive_repo_dir"])).resolve() for call in calls
-                }
-                self.assertEqual(len(shared_repositories), 1)
-                shared_repository = next(iter(shared_repositories))
-                self.assertEqual(
-                    shared_repository,
-                    root / "runtime/logs/tmp/rollout_chain/shared_workspace/archive",
-                )
-                self.assertEqual(len({Path(str(call["workdir"])) for call in calls}), 32)
-                self.assertEqual(
-                    {
-                        (Path(str(call["workdir"])) / "archive").stat().st_ino
-                        for call in calls
-                    },
-                    {shared_repository.stat().st_ino},
-                )
-                if backend == "codex":
-                    self.assertTrue(
-                        all(
-                            Path(str(call["archive_git_dir"]))
-                            == shared_repository / ".git"
-                            for call in calls
-                        )
-                    )
-                records = [
-                    json.loads(line)
-                    for line in (root / "runtime/logs/runs.jsonl").read_text().splitlines()
-                ]
-                self.assertEqual(len(records), 32)
-                self.assertTrue(all(record["shared_git_enabled"] for record in records))
-                self.assertEqual(
-                    {record["shared_git_repo_dir"] for record in records},
-                    {str(shared_repository)},
-                )
-                progress = (root / "runtime/logs/progress.jsonl").read_text()
-                self.assertNotIn("archive_worktree", progress)
-                self.assertNotIn("archive_finalized", progress)
-                self.assertEqual(progress.count('"event": "shared_git_cleanup_completed"'), 2)
-                self.assertEqual(cleanup_calls, [shared_repository, shared_repository])
-                self.assertFalse(
-                    any(
-                        key in record
-                        for record in records
-                        for key in ("archive_merged", "archive_committed", "archive_branch")
-                    )
-                )
-                self.assertTrue(all("send_message" not in call[instruction_key] for call in calls))
-                self.assertTrue(
-                    all(
-                        not any(key.startswith("peer_") for key in record)
-                        for record in records
-                    )
-                )
-                self.assertTrue(
-                    all(
-                        record["rollout_system_instructions_sha256"]
-                        == CANONICAL_BOOTSTRAP_README_SHA256
-                        for record in records
-                    )
-                )
-
-    def test_clean_boundary_migrates_legacy_messaging_and_partial_fails_closed(self) -> None:
-        documents = Path.home() / "Documents"
-        documents.mkdir(exist_ok=True)
-        for partial in (False, True):
-            with self.subTest(partial=partial), tempfile.TemporaryDirectory(
-                dir=documents
-            ) as temp:
-                root = Path(temp)
-                runtime = root / "runtime"
-                task = root / "task.md"
-                task.write_text("# Population transition fixture\n")
-
-                def argv(population_size: int) -> list[str]:
-                    return [
-                        "main_loop.py",
-                        "--benchmark",
-                        "open-ended",
-                        "--task-file",
-                        str(task),
-                        "--runtime-root",
-                        str(runtime),
-                        "--worker-backend",
-                        "openrouter",
-                        "--model",
-                        "fixture/model",
-                        "--num-rollouts",
-                        str(population_size),
-                        "--step",
-                    ]
-
-                calls: list[dict[str, object]] = []
-
-                def worker(**kwargs: object) -> WorkerResult:
-                    calls.append(kwargs)
                     return WorkerResult("offline", "completed", "final_message")
 
-                with patch.dict(
-                    "os.environ", {"OPENROUTER_API_KEY": "test-only-key"}
-                ), patch("sys.argv", argv(8)), patch(
-                    "main_loop.run_worker", side_effect=worker
+                def openrouter_worker(**kwargs: object) -> WorkerResult:
+                    openrouter_calls.append(kwargs)
+                    return WorkerResult("offline", "completed", "final_message")
+
+                with patch.dict("os.environ", {"OPENROUTER_API_KEY": "test-only-key"}), patch(
+                    "sys.argv", argv
+                ), patch("main_loop.run_codex_worker", side_effect=codex_worker), patch(
+                    "main_loop.run_worker", side_effect=openrouter_worker
+                ), patch(
+                    "main_loop.run_opencode_worker",
+                    side_effect=AssertionError("OpenCode dispatch must remain inactive"),
                 ):
                     _run_main([])
-                self.assertEqual(len(calls), 8)
-
-                runs_path = runtime / "logs/runs.jsonl"
-                historical_records = [
-                    json.loads(line) for line in runs_path.read_text().splitlines()
-                ]
-                for record in historical_records:
-                    record.update(
-                        {
-                            "peer_communication_enabled": True,
-                            "peer_communication_version": 5,
-                            "peer_communication_fingerprint": "legacy-fixture",
-                            "peer_communication_population_size": 8,
-                            "peer_communication_batch_id": "legacy-batch",
-                            "rollout_coordination": "collaborative_same_batch",
-                            "rollout_independence": False,
-                        }
-                    )
-                runs_path.write_text(
-                    "".join(
-                        json.dumps(record) + "\n"
-                        for record in historical_records
-                    )
-                )
-                identity_path = runtime / "runtime_benchmark.json"
-                identity = json.loads(identity_path.read_text())
-                identity["capabilities"]["peer_communication"] = {
-                    "enabled": True,
-                    "version": 5,
-                    "fingerprint": "legacy-fixture",
-                }
-                identity_path.write_text(json.dumps(identity))
-                if partial:
-                    records = [
-                        json.loads(line) for line in runs_path.read_text().splitlines()
-                    ][:7]
-                    runs_path.write_text(
-                        "".join(json.dumps(record) + "\n" for record in records)
-                    )
-                    identity_before = identity_path.read_bytes()
-                    runs_before = runs_path.read_bytes()
-                    with patch.dict(
-                        "os.environ", {"OPENROUTER_API_KEY": "test-only-key"}
-                    ), patch("sys.argv", argv(16)), patch(
-                        "main_loop.run_worker", side_effect=worker
-                    ), self.assertRaisesRegex(
-                        RuntimeError, "legacy peer-messaging state"
-                    ):
-                        _run_main([])
-                    self.assertEqual(len(calls), 8)
-                    self.assertEqual(identity_path.read_bytes(), identity_before)
-                    self.assertEqual(runs_path.read_bytes(), runs_before)
-                    continue
-
-                pool_path = (
-                    runtime / "logs/tmp/rollout_chain/latest_parent_pool.json"
-                )
-                pool = json.loads(pool_path.read_text())
-                original_entries = json.loads(json.dumps(pool))
-                for slot_index in range(8, 16):
-                    pool.append(
-                        {
-                            "bootstrap_reinitialized": True,
-                            "child_instance_uuid": f"bootstrap-{slot_index}",
-                            "manifest_path": None,
-                            "parent_instance_uuid": None,
-                            "parent_rollout_username": None,
-                            "prompt": DEFAULT_BOOTSTRAP_INITIAL_PROMPT,
-                            "prompt_chars": len(DEFAULT_BOOTSTRAP_INITIAL_PROMPT),
-                            "slot_dir": None,
-                            "slot_index": slot_index,
-                            "workspace_dir": None,
-                        }
-                    )
-                pool_path.write_text(json.dumps(pool, indent=2, sort_keys=True))
-                self.assertEqual(
-                    json.loads(pool_path.read_text())[:8], original_entries
-                )
-
-                with patch.dict(
-                    "os.environ", {"OPENROUTER_API_KEY": "test-only-key"}
-                ), patch("sys.argv", argv(16)), patch(
-                    "main_loop.run_worker", side_effect=worker
-                ):
-                    _run_main([])
-                self.assertEqual(len(calls), 24)
-                transitioned = calls[8:]
-                self.assertEqual(
-                    {call["task_index"] for call in transitioned}, {1}
-                )
-                self.assertEqual(
-                    {call["rollout_index"] for call in transitioned}, set(range(16))
-                )
-                records = [
-                    json.loads(line) for line in runs_path.read_text().splitlines()
-                ]
-                self.assertEqual(
-                    [record["task_index"] for record in records].count(0), 8
-                )
-                self.assertEqual(
-                    [record["task_index"] for record in records].count(1), 16
-                )
-                migrated_identity = json.loads(identity_path.read_text())
-                self.assertNotIn(
-                    "peer_communication", migrated_identity["capabilities"]
-                )
-                self.assertEqual(
-                    migrated_identity["capabilities"][
-                        main_loop.ROLLOUT_SYSTEM_INSTRUCTIONS_CAPABILITY_NAME
-                    ]["version"],
-                    ROLLOUT_SYSTEM_INSTRUCTIONS_VERSION,
-                )
+                self.assertEqual(len(codex_calls), 1 if backend == "codex" else 0)
+                self.assertEqual(len(openrouter_calls), 1 if backend == "openrouter" else 0)
 
     def test_opencode_resume_requires_matching_backend_configuration(self) -> None:
         custom_provider = custom_provider_configuration(
@@ -556,7 +224,7 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
         custom_provider_sha256 = custom_provider_fingerprint(custom_provider)
         args = Namespace(
             worker_backend="opencode",
-            opencode_initial_prompt=DEFAULT_BOOTSTRAP_INITIAL_PROMPT,
+            opencode_base_instructions_mode="read-readme",
             opencode_agent="build",
             opencode_variant=None,
             opencode_server_startup_timeout_seconds=15,
@@ -578,9 +246,12 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
             _opencode_bubblewrap_bin="/usr/bin/bwrap",
             _opencode_bubblewrap_version="bubblewrap 0.11.0",
             _opencode_bubblewrap_sha256="bwrap-sha",
+            _opencode_system_instructions_sha256="system-sha",
+            _opencode_configured_initial_prompt_sha256="prompt-sha",
         )
         record = {
             "worker_backend": "opencode",
+            "opencode_base_instructions_mode": "read-readme",
             "opencode_agent": "build",
             "opencode_variant": None,
             "opencode_runtime_version": "1.18.21",
@@ -601,13 +272,9 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
             "opencode_bubblewrap_bin": "/usr/bin/bwrap",
             "opencode_bubblewrap_version": "bubblewrap 0.11.0",
             "opencode_bubblewrap_sha256": "bwrap-sha",
-            "rollout_system_instructions_version": ROLLOUT_SYSTEM_INSTRUCTIONS_VERSION,
-            "rollout_system_instructions_fingerprint": ROLLOUT_SYSTEM_INSTRUCTIONS_FINGERPRINT,
-            "rollout_system_instructions_mode": ROLLOUT_SYSTEM_INSTRUCTIONS_MODE,
-            "rollout_system_instructions_sha256": CANONICAL_BOOTSTRAP_README_SHA256,
-            "rollout_effective_initial_prompt_sha256": hashlib.sha256(
-                DEFAULT_BOOTSTRAP_INITIAL_PROMPT.encode()
-            ).hexdigest(),
+            "opencode_system_instructions_sha256": "system-sha",
+            "opencode_configured_initial_prompt_sha256": "prompt-sha",
+            "opencode_effective_initial_prompt_sha256": "prompt-sha",
             "bootstrap_seed_used": True,
             "opencode_provider_env_names": ["OPENAI_API_KEY"],
         }
@@ -627,6 +294,8 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
             "opencode_bubblewrap_bin",
             "opencode_bubblewrap_version",
             "opencode_bubblewrap_sha256",
+            "opencode_system_instructions_sha256",
+            "opencode_configured_initial_prompt_sha256",
             "opencode_worker_timeout_seconds",
         ):
             with self.subTest(field=field):
@@ -635,6 +304,15 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                         {**record, field: "changed"}, args
                     )
                 )
+        self.assertFalse(
+            _worker_backend_resume_compatible(
+                {
+                    **record,
+                    "opencode_effective_initial_prompt_sha256": "changed",
+                },
+                args,
+            )
+        )
         self.assertFalse(
             _worker_backend_resume_compatible(
                 {**record, "opencode_server_startup_timeout_seconds": 99}, args
@@ -704,220 +382,35 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
         inherited = {
             **record,
             "bootstrap_seed_used": False,
-            "rollout_effective_initial_prompt_sha256": hashlib.sha256(
+            "opencode_effective_initial_prompt_sha256": hashlib.sha256(
                 b"inherited child prompt"
             ).hexdigest(),
         }
         self.assertTrue(
-            _rollout_prompt_resume_compatible(
+            _worker_backend_resume_compatible(
                 inherited,
                 args,
                 effective_initial_prompt="inherited child prompt",
+                require_effective_prompt=True,
             )
         )
         self.assertFalse(
-            _rollout_prompt_resume_compatible(
+            _worker_backend_resume_compatible(
                 inherited,
                 args,
                 effective_initial_prompt="changed child prompt",
+                require_effective_prompt=True,
             )
         )
         self.assertFalse(
-            _rollout_prompt_resume_compatible(
-                {**inherited, "rollout_system_instructions_sha256": "legacy"},
+            _worker_backend_resume_compatible(
+                inherited,
                 args,
-                effective_initial_prompt="inherited child prompt",
-            )
-        )
-        self.assertFalse(
-            _rollout_prompt_resume_compatible(
-                {
-                    "worker_backend": "opencode",
-                    "bootstrap_seed_used": True,
-                    "rollout_effective_initial_prompt_sha256": hashlib.sha256(
-                        DEFAULT_BOOTSTRAP_INITIAL_PROMPT.encode()
-                    ).hexdigest(),
-                },
-                args,
-                effective_initial_prompt=None,
+                require_effective_prompt=True,
             )
         )
 
-    def test_completed_legacy_system_prompt_history_is_kept_but_partial_is_rejected(self) -> None:
-        documents = Path.home() / "Documents"
-        documents.mkdir(exist_ok=True)
-        for partial in (False, True):
-            with self.subTest(partial=partial), tempfile.TemporaryDirectory(
-                dir=documents
-            ) as temp:
-                root = Path(temp)
-                runtime = root / "runtime"
-                task = root / "task.md"
-                task.write_text("# Resume identity fixture\n")
-                argv = [
-                    "main_loop.py",
-                    "--benchmark",
-                    "open-ended",
-                    "--task-file",
-                    str(task),
-                    "--runtime-root",
-                    str(runtime),
-                    "--worker-backend",
-                    "openrouter",
-                    "--model",
-                    "fixture/model",
-                    "--num-rollouts",
-                    "8",
-                    "--step",
-                ]
-                calls: list[dict[str, object]] = []
-
-                def worker(**kwargs: object) -> WorkerResult:
-                    calls.append(kwargs)
-                    return WorkerResult("offline", "completed", "final_message")
-
-                with patch.dict(
-                    "os.environ", {"OPENROUTER_API_KEY": "test-only-key"}
-                ), patch("sys.argv", argv), patch(
-                    "main_loop.run_worker", side_effect=worker
-                ):
-                    _run_main([])
-
-                runs_path = runtime / "logs/runs.jsonl"
-                records = [
-                    json.loads(line) for line in runs_path.read_text().splitlines()
-                ]
-                if partial:
-                    records = records[:7]
-                for record in records:
-                    for field in (
-                        "rollout_system_instructions_version",
-                        "rollout_system_instructions_fingerprint",
-                        "rollout_system_instructions_mode",
-                        "rollout_system_instructions_chars",
-                        "rollout_system_instructions_sha256",
-                        "rollout_effective_initial_prompt_sha256",
-                        "bootstrap_readme_system_instructions",
-                    ):
-                        record.pop(field, None)
-                runs_path.write_text(
-                    "".join(json.dumps(record) + "\n" for record in records)
-                )
-                identity_path = runtime / "runtime_benchmark.json"
-                identity = json.loads(identity_path.read_text())
-                identity["capabilities"].pop(
-                    "rollout_system_instructions", None
-                )
-                identity_path.write_text(json.dumps(identity))
-
-                if partial:
-                    with patch.dict(
-                        "os.environ", {"OPENROUTER_API_KEY": "test-only-key"}
-                    ), patch("sys.argv", argv), patch(
-                        "main_loop.run_worker", side_effect=worker
-                    ), self.assertRaisesRegex(
-                        RuntimeError, "rollout system instructions or initial prompt"
-                    ):
-                        _run_main([])
-                    self.assertEqual(len(calls), 8)
-                else:
-                    with patch.dict(
-                        "os.environ", {"OPENROUTER_API_KEY": "test-only-key"}
-                    ), patch("sys.argv", argv), patch(
-                        "main_loop.run_worker", side_effect=worker
-                    ):
-                        _run_main([])
-                    self.assertEqual(len(calls), 16)
-                    self.assertEqual(
-                        {call["task_index"] for call in calls[:8]}, {0}
-                    )
-                    self.assertEqual(
-                        {call["task_index"] for call in calls[8:]}, {1}
-                    )
-
-    def test_completed_legacy_git_history_loads_but_partial_resume_fails_closed(self) -> None:
-        documents = Path.home() / "Documents"
-        documents.mkdir(exist_ok=True)
-        for partial in (False, True):
-            with self.subTest(partial=partial), tempfile.TemporaryDirectory(
-                dir=documents
-            ) as temp:
-                root = Path(temp)
-                runtime = root / "runtime"
-                task = root / "task.md"
-                task.write_text("# Shared Git resume fixture\n")
-                argv = [
-                    "main_loop.py",
-                    "--benchmark",
-                    "open-ended",
-                    "--task-file",
-                    str(task),
-                    "--runtime-root",
-                    str(runtime),
-                    "--worker-backend",
-                    "openrouter",
-                    "--model",
-                    "fixture/model",
-                    "--num-rollouts",
-                    "8",
-                    "--step",
-                ]
-                calls: list[dict[str, object]] = []
-
-                def worker(**kwargs: object) -> WorkerResult:
-                    calls.append(kwargs)
-                    return WorkerResult("offline", "completed", "final_message")
-
-                with patch.dict(
-                    "os.environ", {"OPENROUTER_API_KEY": "test-only-key"}
-                ), patch("sys.argv", argv), patch(
-                    "main_loop.run_worker", side_effect=worker
-                ):
-                    _run_main([])
-
-                runs_path = runtime / "logs/runs.jsonl"
-                records = [
-                    json.loads(line) for line in runs_path.read_text().splitlines()
-                ]
-                if partial:
-                    records = records[:7]
-                for record in records:
-                    for field in (
-                        "shared_git_enabled",
-                        "shared_git_version",
-                        "shared_git_fingerprint",
-                        "shared_git_repo_dir",
-                    ):
-                        record.pop(field, None)
-                runs_path.write_text(
-                    "".join(json.dumps(record) + "\n" for record in records)
-                )
-                identity_path = runtime / "runtime_benchmark.json"
-                identity = json.loads(identity_path.read_text())
-                identity["capabilities"].pop("shared_git_repository", None)
-                identity_path.write_text(json.dumps(identity))
-
-                if partial:
-                    with patch.dict(
-                        "os.environ", {"OPENROUTER_API_KEY": "test-only-key"}
-                    ), patch("sys.argv", argv), patch(
-                        "main_loop.run_worker", side_effect=worker
-                    ), self.assertRaisesRegex(RuntimeError, "shared Git capability"):
-                        _run_main([])
-                    self.assertEqual(len(calls), 8)
-                else:
-                    with patch.dict(
-                        "os.environ", {"OPENROUTER_API_KEY": "test-only-key"}
-                    ), patch("sys.argv", argv), patch(
-                        "main_loop.run_worker", side_effect=worker
-                    ):
-                        _run_main([])
-                    self.assertEqual(len(calls), 16)
-                    self.assertEqual(
-                        {call["task_index"] for call in calls[8:]}, {1}
-                    )
-
-    def test_actual_opencode_orchestration_separates_system_and_user_prompts(self) -> None:
+    def test_actual_opencode_orchestration_uses_custom_bootstrap_prompt(self) -> None:
         documents = Path.home() / "Documents"
         documents.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=documents) as temp:
@@ -944,10 +437,12 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                 "--model",
                 "fixture/model",
                 "--num-rollouts",
-                "8",
+                "1",
                 "--step",
                 "--opencode-bin",
                 str(fake_opencode),
+                "--opencode-initial-prompt",
+                "CUSTOM OPENCODE BOOTSTRAP",
             ]
             calls: list[dict[str, object]] = []
 
@@ -976,28 +471,14 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                     "main_loop.run_opencode_worker", side_effect=worker
                 ):
                     _run_main([])
-            self.assertEqual(len(calls), 24)
-            inherited_indices = [
-                index
-                for index, call in enumerate(calls)
-                if call["initial_user_text"] == "INHERITED CHILD PROMPT"
-            ]
-            self.assertEqual(len(inherited_indices), 1)
-            inherited_index = inherited_indices[0]
-            self.assertIn(inherited_index, range(8, 16))
-            self.assertTrue(
-                all(
-                    call["initial_user_text"] == DEFAULT_BOOTSTRAP_INITIAL_PROMPT
-                    for index, call in enumerate(calls)
-                    if index != inherited_index
-                )
-            )
-            canonical_instructions = canonical_rollout_system_instructions()
-            self.assertTrue(
-                all(
-                    call["system_instructions"] == canonical_instructions
-                    for call in calls
-                )
+            self.assertEqual(len(calls), 3)
+            self.assertEqual(
+                [call["initial_user_text"] for call in calls],
+                [
+                    "CUSTOM OPENCODE BOOTSTRAP",
+                    "CUSTOM OPENCODE BOOTSTRAP",
+                    "INHERITED CHILD PROMPT",
+                ],
             )
             self.assertNotIn(
                 str(runtime / "logs/rollout_control"),
@@ -1014,27 +495,6 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
             self.assertFalse(
                 any("benchmark_events" in str(path) or "arc_agi" in str(path) for path in calls[0]["sandbox_writable_roots"])
             )
-            shared_repository = (
-                runtime / "logs/tmp/rollout_chain/shared_workspace/archive"
-            ).resolve()
-            self.assertEqual(
-                len({Path(str(call["workdir"])).resolve() for call in calls}),
-                24,
-            )
-            self.assertTrue(
-                all(
-                    shared_repository
-                    in {Path(str(path)).resolve() for path in call["sandbox_writable_roots"]}
-                    for call in calls
-                )
-            )
-            self.assertEqual(
-                {
-                    (Path(str(call["workdir"])) / "archive").stat().st_ino
-                    for call in calls
-                },
-                {shared_repository.stat().st_ino},
-            )
             handler_context = Path(str(calls[0]["continuation_context_path"]))
             mounted_sources = {
                 str(source)
@@ -1045,24 +505,16 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                 json.loads(line)
                 for line in (runtime / "logs/runs.jsonl").read_text().splitlines()
             ]
-            self.assertEqual(len(records), 24)
-            prompt_hashes = [
-                record["opencode_effective_initial_prompt_sha256"]
-                for record in records
-            ]
-            self.assertEqual(len(set(prompt_hashes)), 2)
-            self.assertEqual(sorted(prompt_hashes.count(value) for value in set(prompt_hashes)), [1, 23])
+            self.assertEqual(len(records), 3)
             self.assertEqual(
-                records[0]["opencode_system_instructions_sha256"],
-                CANONICAL_BOOTSTRAP_README_SHA256,
+                records[0]["opencode_effective_initial_prompt_sha256"],
+                records[1]["opencode_effective_initial_prompt_sha256"],
             )
-            self.assertTrue(
-                all(
-                    record["rollout_system_instructions_sha256"]
-                    == CANONICAL_BOOTSTRAP_README_SHA256
-                    for record in records
-                )
+            self.assertNotEqual(
+                records[1]["opencode_effective_initial_prompt_sha256"],
+                records[2]["opencode_effective_initial_prompt_sha256"],
             )
+            self.assertTrue(records[0]["opencode_system_instructions_sha256"])
             self.assertTrue(records[0]["opencode_python_sha256"])
             self.assertTrue(records[0]["opencode_bubblewrap_sha256"])
 
@@ -1184,42 +636,13 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
             self.assertIn("no evaluator, score, reward, solved status, or ranking", runtime_text)
             self.assertNotIn("problem_pool", runtime_text)
             self.assertNotIn("Benchmark Pool Semantics", runtime_text)
-            self.assertNotIn("Peer Identity", runtime_text)
             bootstrap = (
                 Path(__file__).resolve().parents[1] / "seeds/bootstrap/README.md"
             ).read_text(encoding="utf-8")
             bootstrap_words = " ".join(bootstrap.split())
-            self.assertIn("Nobody has assigned you an objective.", bootstrap_words)
-            self.assertNotIn("send_message", bootstrap)
-            self.assertNotIn("## The others", bootstrap)
-            self.assertNotIn("what they are called", bootstrap_words)
-            self.assertIn("`seed_output/` is local writable empty directory", bootstrap_words)
-            self.assertIn(
-                "`shared_workspace/` is visible to all programs running alongside you. "
-                "Files outside its `archive/` repository are batch-local and may be removed "
-                "at the end of the round.",
-                bootstrap_words,
-            )
-            self.assertIn(
-                "`archive/` is the same ordinary Git checkout for every program in the "
-                "current round.",
-                bootstrap_words,
-            )
-            self.assertIn(
-                "Its working tree, index, current branch, and refs are shared directly.",
-                bootstrap_words,
-            )
-            self.assertIn(
-                "Git commands run concurrently and may encounter normal lock, checkout, "
-                "or content races.",
-                bootstrap_words,
-            )
-            self.assertIn(
-                "Commits, refs, and the current committed HEAD persist across rounds. "
-                "Staged, modified, deleted, untracked, and ignored archive content is "
-                "discarded after the round.",
-                bootstrap_words,
-            )
+            self.assertIn("current human-authored task", bootstrap)
+            self.assertIn("explicitly unevaluated", bootstrap_words)
+            self.assertIn("an unevaluated profile can provide none", bootstrap)
 
             identity_root = root / "identity"
             identity_root.mkdir()

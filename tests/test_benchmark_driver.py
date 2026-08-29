@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 import main_loop
 from main_loop import (
-    DEFAULT_BOOTSTRAP_INITIAL_PROMPT,
     _record_spawned_child,
     _format_runtime_markdown,
     _load_spawned_child_slots,
@@ -17,6 +18,9 @@ from main_loop import (
     _spawn_child_continuation,
     _resolve_spawn_workspace_dir,
     _spawn_item_ref,
+    create_archive_worktree,
+    discard_archive_worktree,
+    ensure_local_world_repo,
 )
 from utils.benchmark_driver import (
     BenchmarkDriver,
@@ -192,9 +196,6 @@ class BenchmarkDriverTests(unittest.TestCase):
                 [0, 1],
             )
             self.assertTrue(parent_pool[2]["bootstrap_reinitialized"])
-            self.assertEqual(
-                parent_pool[2]["prompt"], DEFAULT_BOOTSTRAP_INITIAL_PROMPT
-            )
 
     def test_bootstrap_refill_preserves_sparse_rollout_slot_indices(self) -> None:
         spawned_children = [
@@ -218,38 +219,8 @@ class BenchmarkDriverTests(unittest.TestCase):
             [0, None, 2, 3, 4, 5, 6, 7],
         )
         self.assertTrue(parent_pool[1]["bootstrap_reinitialized"])
-        self.assertEqual(
-            parent_pool[1]["prompt"], DEFAULT_BOOTSTRAP_INITIAL_PROMPT
-        )
         self.assertIs(parent_pool[7], spawned_children[-1])
         self.assertEqual(parent_pool[7]["child_instance_uuid"], "child-7")
-
-        expanded_pool, expanded_bootstrap_count = (
-            _refill_parent_pool_with_bootstrap_slots(
-                spawned_children,
-                target_count=16,
-            )
-        )
-        self.assertEqual(expanded_bootstrap_count, 9)
-        self.assertEqual(
-            [slot["slot_index"] for slot in expanded_pool], list(range(16))
-        )
-        self.assertEqual(
-            [slot.get("source_rollout_index") for slot in expanded_pool[:8]],
-            [0, None, 2, 3, 4, 5, 6, 7],
-        )
-        self.assertTrue(
-            all(
-                slot["bootstrap_reinitialized"]
-                and slot["prompt"] == DEFAULT_BOOTSTRAP_INITIAL_PROMPT
-                and slot["workspace_dir"] is None
-                and slot["manifest_path"] is None
-                for slot in expanded_pool[8:]
-            )
-        )
-        self.assertEqual(
-            len({slot["child_instance_uuid"] for slot in expanded_pool}), 16
-        )
 
     def test_protocol_shape_deterministic_pool_resume_and_backend_instructions(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -320,21 +291,10 @@ class BenchmarkDriverTests(unittest.TestCase):
             stable_readme_words = " ".join(stable_readme.split())
             self.assertNotIn("SuperGPQA", stable_readme)
             self.assertNotIn("submit_solution", stable_readme)
-            self.assertIn("`shared_workspace/BENCHMARK.md`, if present", stable_readme_words)
-            self.assertIn("Its presence does not make it an assignment.", stable_readme_words)
+            self.assertIn("Benchmark-specific tools", stable_readme)
             self.assertIn("spawn_child", stable_readme)
-            self.assertIn("at most one successful successor", stable_readme_words)
-            self.assertIn("A failed attempt can be corrected and tried again.", stable_readme_words)
-            self.assertIn("After one succeeds, later attempts fail.", stable_readme_words)
-            self.assertIn("You continue running either way.", stable_readme_words)
-            self.assertIn(
-                "The successor receives your message and the supplied folder.",
-                stable_readme_words,
-            )
-            self.assertIn(
-                "filled by a fresh program with no inherited connection to you.",
-                stable_readme_words,
-            )
+            self.assertIn("one reserved child opportunity", stable_readme_words)
+            self.assertIn("parent rollout continues normally", stable_readme_words)
             supergpqa_readme = (
                 Path(__file__).resolve().parents[1]
                 / "seeds/benchmarks/supergpqa/README.md"
@@ -479,7 +439,7 @@ class BenchmarkDriverTests(unittest.TestCase):
                 BenchmarkItemRef("arc-instance-42", "arc-task", 7, 9).to_metadata(),
             )
 
-    def test_top_level_closes_driver_after_failure(self) -> None:
+    def test_prepare_failure_discards_archive_worktree_and_top_level_closes_driver(self) -> None:
         class FailingDriver:
             def __init__(self) -> None:
                 self.close_calls = 0
@@ -491,7 +451,45 @@ class BenchmarkDriverTests(unittest.TestCase):
                 self.close_calls += 1
 
         with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            archive = root / "archive"
+            worktrees = root / "worktrees"
+            lock = threading.Lock()
+            ensure_local_world_repo(archive)
+            branch = "rollout/fixture-prepare-failure"
+            worktree = create_archive_worktree(
+                archive_repo_dir=archive,
+                worktree_root=worktrees,
+                branch=branch,
+                git_lock=lock,
+            )
             driver = FailingDriver()
+            try:
+                driver.prepare_rollout()
+            except RuntimeError:
+                discard_archive_worktree(
+                    archive_repo_dir=archive,
+                    worktree_root=worktrees,
+                    branch=branch,
+                    git_lock=lock,
+                )
+            self.assertFalse(worktree.path.exists())
+            branches = subprocess.run(
+                ["git", "branch", "--list", branch],
+                cwd=archive,
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout
+            self.assertEqual(branches.strip(), "")
+            worktree_listing = subprocess.run(
+                ["git", "worktree", "list", "--porcelain"],
+                cwd=archive,
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout
+            self.assertNotIn(str(worktree.path), worktree_listing)
 
             def fail_after_driver_registration(active_drivers):
                 active_drivers.append(driver)
