@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test"
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 
 import {
   EventNormalizer,
@@ -7,8 +10,9 @@ import {
   safeErrorCode,
   translateMcp,
   type McpServerInput,
+  type RunnerRequest,
 } from "./protocol.ts"
-import { finalAssistantText, startSpawnCallback } from "./worker.ts"
+import { finalAssistantText, sandboxedServerCommand, startSpawnCallback } from "./worker.ts"
 import { runHandler, SYSTEM_PLUGIN_SOURCE, TOOL_SOURCE } from "./spawn_bridge.ts"
 
 function mcpServer(): McpServerInput {
@@ -26,6 +30,45 @@ function mcpServer(): McpServerInput {
 }
 
 describe("OpenCode native protocol adapter", () => {
+  test("orders read-only carve-outs after writable parents", async () => {
+    const root = await mkdtemp(join(tmpdir(), "metalanguage-opencode-mounts-"))
+    const cwd = join(root, "work")
+    const state = join(root, "state")
+    const shared = join(root, "shared")
+    const batch = join(root, "archive_worktrees", "batch")
+    const own = join(batch, "rollout_000")
+    for (const path of [cwd, state, shared, own, join(batch, "rollout_001")]) {
+      await mkdir(path, { recursive: true })
+    }
+    const readme = join(cwd, "README.md")
+    const benchmark = join(shared, "BENCHMARK.md")
+    await writeFile(readme, "contract\n")
+    await writeFile(benchmark, "benchmark\n")
+    const request: RunnerRequest = {
+      opencode_bin: "/usr/bin/true",
+      model: "fixture/model",
+      cwd,
+      state_root: state,
+      sandbox: {
+        mode: "bubblewrap",
+        network: "allow",
+        bubblewrap_bin: "/usr/bin/bwrap",
+        read_only_roots: [readme, benchmark, batch],
+        writable_roots: [own, shared],
+      },
+    }
+    const command = await sandboxedServerCommand(request, state)
+    const mountIndex = (flag: string, path: string): number =>
+      command.findIndex(
+        (value, index) => value === flag && command[index + 1] === path && command[index + 2] === path,
+      )
+    expect(mountIndex("--bind", cwd)).toBeGreaterThan(-1)
+    expect(mountIndex("--ro-bind", readme)).toBeGreaterThan(mountIndex("--bind", cwd))
+    expect(mountIndex("--ro-bind", batch)).toBeGreaterThan(-1)
+    expect(mountIndex("--bind", own)).toBeGreaterThan(mountIndex("--ro-bind", batch))
+    expect(mountIndex("--ro-bind", benchmark)).toBeGreaterThan(mountIndex("--bind", shared))
+  })
+
   test("builds exact offline custom provider configs for chat and responses modes", () => {
     const base = {
       provider_id: "fixture",

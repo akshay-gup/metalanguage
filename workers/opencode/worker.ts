@@ -524,7 +524,7 @@ function addParentDirectories(command: string[], path: string): void {
   for (const directory of missing.reverse()) command.push("--dir", directory)
 }
 
-async function sandboxedServerCommand(request: RunnerRequest, root: string): Promise<string[]> {
+export async function sandboxedServerCommand(request: RunnerRequest, root: string): Promise<string[]> {
   const base = [request.opencode_bin, "serve", "--hostname=127.0.0.1", "--port=0", "--log-level=ERROR"]
   const sandbox = request.sandbox ?? { mode: "none" as const, network: "allow" as const }
   if (sandbox.mode === "none") return base
@@ -571,15 +571,22 @@ async function sandboxedServerCommand(request: RunnerRequest, root: string): Pro
     ...(sandbox.read_only_roots ?? []),
   ])
   const writable = new Set([root, request.cwd, ...(sandbox.writable_roots ?? [])])
-  for (const path of [...readOnly].sort()) {
+  const mounts = new Map<string, "read" | "write">()
+  for (const path of writable) {
     const real = await realpath(path)
-    addParentDirectories(command, real)
-    command.push("--ro-bind", real, real)
+    mounts.set(real, "write")
   }
-  for (const path of [...writable].sort()) {
+  for (const path of readOnly) {
     const real = await realpath(path)
+    mounts.set(real, "read")
+  }
+  const orderedMounts = [...mounts.entries()].sort(([left], [right]) => {
+    const depth = left.split("/").filter(Boolean).length - right.split("/").filter(Boolean).length
+    return depth || left.localeCompare(right)
+  })
+  for (const [real, access] of orderedMounts) {
     addParentDirectories(command, real)
-    command.push("--bind", real, real)
+    command.push(access === "read" ? "--ro-bind" : "--bind", real, real)
   }
   for (const mount of sandbox.read_only_mounts ?? []) {
     const source = await realpath(mount.source)
