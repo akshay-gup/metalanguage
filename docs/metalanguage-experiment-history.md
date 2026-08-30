@@ -19,7 +19,8 @@ mathematical evaluator.
 | v3.2 | **Partial/invalid as a two-iteration result** | Moved the workspace contract out of base instructions: a 71-byte pointer directed rollouts to the root README, while fresh user text remained `Begin.`. Isolated Git and fail-closed lifecycle checks remained. | Task 0 completed 8/8 with eight children. Task 1 accepted only six of eight turns because two completed with unresolved commands, so it was not integrated or published. Its preserved branches nevertheless contained strong Li recurrence tests, Fourier/Laguerre–Pólya audits and countermodels. |
 | v3.3 restored-v1 hybrid | Valid; one earlier missing-host attempt invalid | Restored exact v1 placement and behavior: the 71-byte pointer was both base and fresh user text, the 4,011-byte README lived in the workspace, and linked worktrees, child copying and historical completion semantics returned. Modular OpenCode support remained backend-scoped. | The valid rerun completed 16/16 turns with 15 children, eight clean merges and four conflict refs. It recovered executable Li certificates and finite-prefix, symmetry and Euler-product countermodels. One accepted turn briefly outlived a SymPy command, confirming the historical lifecycle risk. |
 | v3.4 | Valid | Changed only the v3.3 workspace README to the exact compact 2,494-byte v3.1 text; v1 prompt placement, linked worktrees, lineage, HIGH effort and no-peer behavior stayed fixed. | Two iterations completed 16/16 turns with 244 tool starts and 13 clean merges. Research activity and integration increased, including Jensen/kernel and positivity reductions, but child continuity fell from seven task-0 successors to only one task-1 successor (eight total). |
-| v3.5 | **Current candidate; partial/invalid run evidence** | Starting from v3.4, restored the v1 continuation contract onto the compact README: child workspace validation, one reserved successor, retry and parent continuation, fresh refill, inherited README obligations and exact tool wording. | Task 0 completed 8/8 with eight children, 71 paired tool calls, five clean merges and two conflict refs. Task 1 reached eight turn-complete events, but only seven rollouts finalized and spawned children; one rollout stopped before archive finalization, leaving 139 tool starts versus 135 completions and no finalized task-1 run-record batch. Partial artifacts include first-Li-coefficient positivity, a finite Li-quartet obstruction, and Jensen/Hutchinson audits. This is suggestive lineage recovery, not a valid two-iteration comparison. |
+| v3.5 | **Partial/invalid run evidence** | Starting from v3.4, restored the v1 continuation contract onto the compact README: child workspace validation, one reserved successor, retry and parent continuation, fresh refill, inherited README obligations and exact tool wording. | Task 0 completed 8/8 with eight children, 71 paired tool calls, five clean merges and two conflict refs. Task 1 reached eight turn-complete events, but only seven rollouts finalized and spawned children; one rollout stopped before archive finalization, leaving 139 tool starts versus 135 completions and no finalized task-1 run-record batch. Partial artifacts include first-Li-coefficient positivity, a finite Li-quartet obstruction, and Jensen/Hutchinson audits. This is suggestive lineage recovery, not a valid two-iteration comparison. |
+| v3.6 | **Valid through tasks 0–10; task 9 has a disclosed checkpointed retry** | Keeps the v3.5 research turn, README, lineage, backend and linked-worktree behavior unchanged. Only when deterministic Codex/open-ended integration conflicts, the supervisor reconstructs the conflict at the same `archive/` path in a remote-free disposable repository and resumes that exact original session once for a merge-only turn. | At the matched tasks 0–9 horizon, 80/80 rollouts produced 59 children, 79 commits, 63 integrations and 16 retained conflicts, versus original v1's 80/80, 59 children, 75 commits, 43 integrations and 32 conflicts. Task 9 was retried once after the task system killed its first attempt; the interrupted evidence was preserved. Task 10 is extra continuation evidence only: through tasks 0–10, v3.6 completed 88/88 with 87 commits and 70 integrations; 31 resolver attempts yielded 14 validated merges and 17 safe fallbacks. |
 
 ## What the sequence indicates
 
@@ -41,13 +42,23 @@ mathematical evaluator.
   branches and v3.3, while several concise variants remained prose-only.
 - Lifecycle correctness is part of experimental validity. The missing Code
   Mode host invalidated the first restored-v1 attempt; unresolved tools made
-  v3.2 task 1 and the current v3.5 two-iteration evidence partial.
+  v3.2 task 1 and the v3.5 two-iteration evidence partial. v3.6's task 9
+  comparison remains qualified by its disclosed timeout-driven retry.
+- Exact-session recovery materially improved retention but was not universal:
+  14 of 31 live conflict-resolution attempts passed the clean exact-parent
+  merge checks, while the other 17 safely preserved their original refs and
+  did not prevent later integrations.
 
 ## Current candidate
 
-The tracked candidate is **v3.5**: compact environment wording with the restored
-v1 child-lineage mechanics, minimal pointer placement, no peer bus and linked
-per-rollout worktrees. Its source configuration is intentional, but the partial
-v3.5 runtime should not be used as a completed comparison. A future clean run
-would need to hold this configuration fixed and complete both batches before
-drawing outcome conclusions.
+The tracked source candidate is **v3.6**. It preserves v3.5's compact environment
+wording, restored v1 child-lineage mechanics, minimal pointer placement, no peer
+bus and normal linked per-rollout worktrees. Its only experimental change is the
+bounded exact-session merge-resolution turn described above. Live evidence now
+extends through task 10, but the fair historical comparison stops at tasks 0–9:
+at that matched horizon v3.6 integrated 63 of 79 committed rollouts, versus 43
+of 75 for original v1, while both produced 59 children. Task 10 demonstrates
+continued completion and safe integration after fallbacks; it is not evidence
+for an unequal-horizon win. The task 9 retry and stochastic trajectory prevent
+a controlled pure-model claim, and neither the larger archive nor the resolver
+results constitute a mathematical correctness or RH-proof claim.
