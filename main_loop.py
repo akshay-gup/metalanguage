@@ -25,7 +25,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from utils.arc_agi_benchmark import ArcAgiBenchmarkDriver, ArcAgiConfig
 from utils.benchmark_events import new_instance_uuid
@@ -83,6 +83,9 @@ class RolloutResult:
     summary: str
     error: str | None = None
     benchmark_outcome: BenchmarkOutcome | None = None
+    archive_worktree: ArchiveWorktree | None = None
+    archive_conflict_resolver: ArchiveConflictResolver | None = None
+    progress_callback: Callable[..., None] | None = None
 
 
 @dataclass
@@ -90,6 +93,15 @@ class ArchiveWorktree:
     path: Path
     branch: str
     base_commit: str
+
+
+@dataclass
+class ArchiveConflictResolver:
+    backend: str
+    rollout_path: Path | None
+    thread_id: str | None
+    session_id: str | None
+    resume_turn: Callable[[], WorkerResult]
 
 
 @dataclass
@@ -120,6 +132,10 @@ READ_README_TASK_INSTRUCTIONS = (
 )
 CODEX_READ_README_BASE_INSTRUCTIONS = READ_README_TASK_INSTRUCTIONS
 BENCHMARK_README_FILENAME = "BENCHMARK.md"
+CONFLICT_RESOLUTION_PROMPT = """The supervisor has materialized the actual current-canonical-versus-your-rollout Git conflict in the existing archive/ worktree from this exact rollout session. This is one final merge-resolution turn only.
+
+Inspect `git -C archive status`, resolve only the already-materialized conflicts, preserve compatible contributions from both parents, stage the resolution, and commit the merge. Do not start new research or alter unrelated workspace files. `spawn_child` is unavailable in this phase and no child slot may be created or changed. If you lack the original rollout context, cannot see the materialized merge, or cannot resolve it confidently, stop without committing and say so. After a successful merge commit, stop.
+"""
 
 
 def _strip_env_quotes(value: str) -> str:
@@ -1707,6 +1723,7 @@ def run_codex_worker(
     benchmark_mcp_servers: dict[str, Any] | None = None,
     sensitive_mcp_tools: tuple[tuple[str, str], ...] = (),
     progress_callback: Any = None,
+    persist_session: bool = False,
 ) -> WorkerResult:
     """Run one rollout through the Metalanguage-owned Codex runner."""
 
@@ -1730,6 +1747,7 @@ def run_codex_worker(
         benchmark_mcp_servers=benchmark_mcp_servers,
         sensitive_mcp_tools=sensitive_mcp_tools,
         progress_callback=progress_callback,
+        persist_session=persist_session,
     )
     metadata = {
         key: result.get(key)
@@ -1739,6 +1757,82 @@ def run_codex_worker(
             "request_path",
             "stderr_path",
             "events_path",
+            "rollout_path",
+            "turn_count",
+            "tool_call_count",
+            "spawn_child_tool_call_count",
+            "turn_completed",
+        ]
+        if result.get(key) is not None
+    }
+    return WorkerResult(
+        final_text=str(result.get("final_text") or ""),
+        status=str(result.get("status") or "error"),
+        stop_reason=result.get("stop_reason"),
+        error_code=result.get("error_code"),
+        error_message=result.get("error_message"),
+        metadata=metadata,
+    )
+
+
+def resume_codex_conflict_resolution(
+    *,
+    runner_bin: Path,
+    model: str,
+    workdir: Path,
+    control_dir: Path,
+    worker_state_dir: Path,
+    codex_home: Path,
+    seed_output_dir: Path,
+    archive_repo_dir: Path,
+    archive_git_dir: Path,
+    shared_workspace_dir: Path,
+    rollout_username: str,
+    timeout_seconds: int,
+    sandbox_mode: str,
+    base_instructions: str | None,
+    rollout_path: Path,
+    thread_id: str,
+    session_id: str,
+    progress_callback: Any = None,
+) -> WorkerResult:
+    """Resume the exact research session for its single fail-closed merge turn."""
+
+    result = run_codex_rollout(
+        runner_bin=runner_bin,
+        model=model,
+        workdir=workdir,
+        control_dir=control_dir,
+        worker_state_dir=worker_state_dir,
+        codex_home=codex_home,
+        seed_output_dir=seed_output_dir,
+        archive_repo_dir=archive_repo_dir,
+        archive_git_dir=archive_git_dir,
+        shared_workspace_dir=shared_workspace_dir,
+        rollout_username=rollout_username,
+        timeout_seconds=timeout_seconds,
+        sandbox_mode=sandbox_mode,
+        initial_user_text=CONFLICT_RESOLUTION_PROMPT,
+        base_instructions=base_instructions,
+        progress_callback=progress_callback,
+        resume_rollout_path=rollout_path,
+        expected_thread_id=thread_id,
+        expected_session_id=session_id,
+        resolution_phase=True,
+    )
+    metadata = {
+        key: result.get(key)
+        for key in [
+            "thread_id",
+            "session_id",
+            "request_path",
+            "stderr_path",
+            "events_path",
+            "rollout_path",
+            "turn_count",
+            "tool_call_count",
+            "spawn_child_tool_call_count",
+            "turn_completed",
         ]
         if result.get(key) is not None
     }
@@ -1972,8 +2066,9 @@ def finalize_archive_worktree(
     archive_repo_dir: Path,
     worktree: ArchiveWorktree,
     git_lock: threading.Lock,
+    conflict_resolver: ArchiveConflictResolver | None = None,
 ) -> dict[str, Any]:
-    """Keep committed archive changes, discard uncommitted edits, and remove the worktree."""
+    """Integrate one rollout, optionally giving its exact Codex session one conflict turn."""
     result: dict[str, Any] = {
         "archive_worktree_dir": str(worktree.path),
         "archive_branch": worktree.branch,
@@ -1981,32 +2076,304 @@ def finalize_archive_worktree(
         "archive_head_commit": worktree.base_commit,
         "archive_committed": False,
         "archive_merged": False,
+        "archive_resolution_attempted": False,
+        "archive_resolution_succeeded": False,
+        "archive_resolution_fell_back": False,
+        "archive_resolution_attempt_count": 0,
+        "archive_resolution_turn_count": 0,
+        "archive_resolution_tool_call_count": 0,
+        "archive_resolution_spawn_child_tool_call_count": 0,
+        "archive_resolution_status": "not_needed",
     }
+    resolution_branch: str | None = None
+    resolution_is_clone = False
+    original_head = worktree.base_commit
+
+    def _ref_commit(branch: str) -> str | None:
+        completed = _run_git(
+            ["show-ref", "--hash", "--verify", f"refs/heads/{branch}"],
+            archive_repo_dir,
+            check=False,
+        )
+        return completed.stdout.strip() if completed.returncode == 0 else None
+
+    def _fallback(code: str) -> None:
+        result["archive_resolution_fell_back"] = True
+        result["archive_resolution_status"] = "fell_back"
+        result["archive_resolution_error"] = code
+
+    def _clean_temporary_resolution_state() -> None:
+        if not worktree.path.exists():
+            return
+        _run_git(["merge", "--abort"], worktree.path, check=False)
+        if resolution_is_clone:
+            _run_git(["reset", "--hard", "HEAD"], worktree.path, check=False)
+        else:
+            if _ref_commit(worktree.branch) != original_head:
+                _run_git(
+                    ["update-ref", f"refs/heads/{worktree.branch}", original_head],
+                    archive_repo_dir,
+                    check=False,
+                )
+            _run_git(["checkout", "-f", worktree.branch], worktree.path, check=False)
+            _run_git(["reset", "--hard", original_head], worktree.path, check=False)
+        _run_git(["clean", "-fd"], worktree.path, check=False)
 
     try:
         if worktree.path.exists():
             _run_git(["reset", "--hard", "HEAD"], worktree.path, check=False)
             _run_git(["clean", "-fd"], worktree.path, check=False)
-            head_commit = _run_git(["rev-parse", "HEAD"], worktree.path).stdout.strip()
-            result["archive_head_commit"] = head_commit
-            result["archive_committed"] = head_commit != worktree.base_commit
+            original_head = _run_git(["rev-parse", "HEAD"], worktree.path).stdout.strip()
+            result["archive_head_commit"] = original_head
+            result["archive_original_ref_commit"] = original_head
+            result["archive_committed"] = original_head != worktree.base_commit
 
             with git_lock:
                 merge_failed = False
                 if result["archive_committed"]:
-                    merge = _run_git(["merge", "--no-ff", "--no-edit", worktree.branch], archive_repo_dir, check=False)
-                    if merge.returncode != 0:
+                    canonical_head = _run_git(["rev-parse", "HEAD"], archive_repo_dir).stdout.strip()
+                    result["archive_canonical_before"] = canonical_head
+                    merge: subprocess.CompletedProcess[str] | None = None
+                    if _ref_commit(worktree.branch) != original_head:
+                        merge_failed = True
+                        _fallback("original_ref_moved_before_integration")
+                    elif _run_git(["status", "--porcelain"], archive_repo_dir).stdout:
+                        merge_failed = True
+                        _fallback("canonical_dirty_before_integration")
+                    else:
+                        merge = _run_git(
+                            ["merge", "--no-ff", "--no-edit", worktree.branch],
+                            archive_repo_dir,
+                            check=False,
+                        )
+                        merge_failed = merge.returncode != 0
+                    if merge is not None and merge.returncode != 0:
+                        had_conflicts = bool(
+                            _run_git(["ls-files", "-u"], archive_repo_dir).stdout
+                        )
                         _run_git(["merge", "--abort"], archive_repo_dir, check=False)
                         result["archive_merge_error"] = (merge.stderr or merge.stdout).strip()
-                        merge_failed = True
-                    else:
+                        if not had_conflicts:
+                            _fallback("archive_merge_failed_without_conflict")
+                        elif conflict_resolver is None:
+                            _fallback("resolver_unsupported")
+                        else:
+                            result["archive_resolution_attempted"] = True
+                            result["archive_resolution_attempt_count"] = 1
+                            result["archive_resolution_status"] = "attempted"
+                            missing_session = (
+                                conflict_resolver.backend != "codex"
+                                or conflict_resolver.rollout_path is None
+                                or not conflict_resolver.rollout_path.is_file()
+                                or not conflict_resolver.thread_id
+                                or not conflict_resolver.session_id
+                            )
+                            if missing_session:
+                                _fallback("resolver_session_missing_or_unsupported")
+                            elif (
+                                _run_git(["rev-parse", "HEAD"], archive_repo_dir).stdout.strip()
+                                != canonical_head
+                                or _run_git(["status", "--porcelain"], archive_repo_dir).stdout
+                            ):
+                                _fallback("canonical_not_restored_after_conflict")
+                            else:
+                                resolution_branch = (
+                                    "resolver/"
+                                    f"{_sanitize_for_path(worktree.branch)}-{original_head[:12]}"
+                                )
+                                # Preserve the session-visible archive path but replace the
+                                # linked worktree with a remote-free disposable repository.
+                                # The resumed model can write its merge objects without any
+                                # writable route to canonical refs or the canonical worktree.
+                                _run_git(
+                                    ["worktree", "remove", "--force", str(worktree.path)],
+                                    archive_repo_dir,
+                                    check=False,
+                                )
+                                shutil.rmtree(worktree.path, ignore_errors=True)
+                                clone = subprocess.run(
+                                    [
+                                        "git",
+                                        "clone",
+                                        "--no-local",
+                                        "--no-checkout",
+                                        str(archive_repo_dir),
+                                        str(worktree.path),
+                                    ],
+                                    capture_output=True,
+                                    text=True,
+                                )
+                                resolution_is_clone = clone.returncode == 0
+                                if resolution_is_clone:
+                                    _run_git(["remote", "remove", "origin"], worktree.path)
+                                    for config_key in ("user.name", "user.email"):
+                                        config_value = _run_git(
+                                            ["config", "--get", config_key],
+                                            archive_repo_dir,
+                                        ).stdout.strip()
+                                        _run_git(
+                                            ["config", config_key, config_value],
+                                            worktree.path,
+                                        )
+                                checkout = _run_git(
+                                    ["checkout", "-b", resolution_branch, canonical_head],
+                                    worktree.path,
+                                    check=False,
+                                ) if resolution_is_clone else clone
+                                materialized = _run_git(
+                                    ["merge", "--no-ff", "--no-commit", original_head],
+                                    worktree.path,
+                                    check=False,
+                                ) if checkout.returncode == 0 else checkout
+                                if (
+                                    checkout.returncode != 0
+                                    or materialized.returncode == 0
+                                    or not _run_git(["ls-files", "-u"], worktree.path).stdout
+                                ):
+                                    _fallback("conflict_materialization_failed")
+                                else:
+                                    try:
+                                        turn = conflict_resolver.resume_turn()
+                                    except BaseException:
+                                        turn = WorkerResult(
+                                            final_text="",
+                                            status="error",
+                                            stop_reason="resolver_exception",
+                                        )
+                                    turn_metadata = turn.metadata or {}
+                                    result["archive_resolution_turn_count"] = int(
+                                        turn_metadata.get("turn_count") or 0
+                                    )
+                                    result["archive_resolution_tool_call_count"] = int(
+                                        turn_metadata.get("tool_call_count") or 0
+                                    )
+                                    result["archive_resolution_spawn_child_tool_call_count"] = int(
+                                        turn_metadata.get("spawn_child_tool_call_count") or 0
+                                    )
+                                    if turn.status != "completed":
+                                        _fallback(
+                                            "resolver_timeout"
+                                            if turn.status == "timeout"
+                                            else "resolver_turn_failed"
+                                        )
+                                    elif not turn_metadata.get("turn_completed"):
+                                        _fallback("resolver_turn_incomplete")
+                                    elif (
+                                        turn_metadata.get("thread_id")
+                                        != conflict_resolver.thread_id
+                                        or turn_metadata.get("session_id")
+                                        != conflict_resolver.session_id
+                                    ):
+                                        _fallback("resolver_session_identity_mismatch")
+                                    elif _run_git(["ls-files", "-u"], worktree.path).stdout:
+                                        _fallback("resolver_left_unmerged_entries")
+                                    elif _run_git(["status", "--porcelain"], worktree.path).stdout:
+                                        _fallback("resolver_left_dirty_worktree")
+                                    else:
+                                        resolved_head = _run_git(
+                                            ["rev-parse", "HEAD"], worktree.path
+                                        ).stdout.strip()
+                                        parent_line = _run_git(
+                                            ["rev-list", "--parents", "-n", "1", resolved_head],
+                                            worktree.path,
+                                        ).stdout.split()
+                                        structurally_valid = (
+                                            len(parent_line) == 3
+                                            and parent_line[0] == resolved_head
+                                            and parent_line[1:] == [canonical_head, original_head]
+                                            and _ref_commit(worktree.branch) == original_head
+                                            and _run_git(
+                                                [
+                                                    "rev-parse",
+                                                    f"refs/heads/{resolution_branch}",
+                                                ],
+                                                worktree.path,
+                                                check=False,
+                                            ).stdout.strip()
+                                            == resolved_head
+                                            and _run_git(
+                                                ["symbolic-ref", "--short", "HEAD"],
+                                                worktree.path,
+                                                check=False,
+                                            ).stdout.strip()
+                                            == resolution_branch
+                                            and _run_git(
+                                                ["rev-parse", "HEAD"], archive_repo_dir
+                                            ).stdout.strip()
+                                            == canonical_head
+                                            and not _run_git(
+                                                ["status", "--porcelain"], archive_repo_dir
+                                            ).stdout
+                                        )
+                                        if not structurally_valid:
+                                            _fallback("resolver_merge_structure_invalid")
+                                        else:
+                                            fetched = _run_git(
+                                                [
+                                                    "fetch",
+                                                    "--no-tags",
+                                                    str(worktree.path),
+                                                    resolved_head,
+                                                ],
+                                                archive_repo_dir,
+                                                check=False,
+                                            )
+                                            integrate = _run_git(
+                                                ["merge", "--ff-only", resolved_head],
+                                                archive_repo_dir,
+                                                check=False,
+                                            ) if fetched.returncode == 0 else fetched
+                                            if (
+                                                integrate.returncode != 0
+                                                or _run_git(
+                                                    ["rev-parse", "HEAD"], archive_repo_dir
+                                                ).stdout.strip()
+                                                != resolved_head
+                                                or _run_git(
+                                                    ["status", "--porcelain"], archive_repo_dir
+                                                ).stdout
+                                            ):
+                                                _fallback("resolved_merge_integration_failed")
+                                            else:
+                                                result["archive_merged"] = True
+                                                result["archive_resolution_succeeded"] = True
+                                                result["archive_resolution_status"] = "succeeded"
+                                                result["archive_resolution_commit"] = resolved_head
+                                                merge_failed = False
+                    elif merge is not None:
                         result["archive_merged"] = True
 
-                _run_git(["worktree", "remove", "--force", str(worktree.path)], archive_repo_dir, check=False)
+                if merge_failed:
+                    _clean_temporary_resolution_state()
+                if not resolution_is_clone:
+                    _run_git(["worktree", "remove", "--force", str(worktree.path)], archive_repo_dir, check=False)
                 if not merge_failed:
                     delete_args = ["branch", "-d" if result["archive_merged"] else "-D", worktree.branch]
                     _run_git(delete_args, archive_repo_dir, check=False)
+                if resolution_branch is not None and not resolution_is_clone:
+                    _run_git(["branch", "-D", resolution_branch], archive_repo_dir, check=False)
+                if merge_failed:
+                    result["archive_original_ref_preserved"] = (
+                        _ref_commit(worktree.branch) == original_head
+                    )
     finally:
+        if worktree.path.exists():
+            _clean_temporary_resolution_state()
+            if not resolution_is_clone:
+                with git_lock:
+                    _run_git(
+                        ["worktree", "remove", "--force", str(worktree.path)],
+                        archive_repo_dir,
+                        check=False,
+                    )
+                    if resolution_branch is not None:
+                        _run_git(["branch", "-D", resolution_branch], archive_repo_dir, check=False)
+            else:
+                _run_git(
+                    ["status", "--porcelain"],
+                    worktree.path,
+                    check=False,
+                )
         shutil.rmtree(worktree.path, ignore_errors=True)
 
     return result
@@ -3236,6 +3603,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                             benchmark_mcp_servers=rollout_benchmark.mcp_servers,
                             sensitive_mcp_tools=rollout_benchmark.sensitive_mcp_tools,
                             progress_callback=_progress,
+                            persist_session=(args.benchmark == "open-ended"),
                         )
                     elif args.worker_backend == "opencode":
                         if (
@@ -3334,17 +3702,10 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                         error_code=None,
                         error_message=str(exc),
                     )
-                finally:
-                    archive_result = finalize_archive_worktree(
-                        archive_repo_dir=archive_repo_dir,
-                        worktree=archive_worktree,
-                        git_lock=archive_git_lock,
-                    )
-                    _progress("archive_finalized", **archive_result)
             except BaseException as exc:
                 archive_result = {
                     **archive_result,
-                    "archive_finalize_error": f"{type(exc).__name__}: {exc}",
+                    "archive_worker_error": f"{type(exc).__name__}: {exc}",
                 }
                 worker_result = WorkerResult(
                     final_text="",
@@ -3509,6 +3870,9 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 "worker_error_message": worker_result.error_message,
                 "worker_backend": args.worker_backend,
                 "worker_metadata": worker_result.metadata,
+                "research_turn_count": int(
+                    (worker_result.metadata or {}).get("turn_count") or 0
+                ),
                 **evaluation_record,
                 "output_path": str(output_dir),
                 "problem_queue_path": (
@@ -3690,6 +4054,66 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 )
             if worker_result.status == "error":
                 summary += f" error={worker_result.stop_reason}"
+            conflict_resolver: ArchiveConflictResolver | None = None
+            if args.worker_backend == "codex" and args.benchmark == "open-ended":
+                worker_metadata = worker_result.metadata or {}
+                rollout_path_value = worker_metadata.get("rollout_path")
+                resolver_rollout_path = (
+                    Path(str(rollout_path_value)).expanduser().resolve()
+                    if rollout_path_value
+                    else None
+                )
+                resolver_thread_id = (
+                    str(worker_metadata.get("thread_id"))
+                    if worker_metadata.get("thread_id")
+                    else None
+                )
+                resolver_session_id = (
+                    str(worker_metadata.get("session_id"))
+                    if worker_metadata.get("session_id")
+                    else None
+                )
+
+                def _resume_resolution_turn() -> WorkerResult:
+                    if (
+                        codex_runner_bin is None
+                        or resolver_rollout_path is None
+                        or resolver_thread_id is None
+                        or resolver_session_id is None
+                    ):
+                        return WorkerResult(
+                            final_text="",
+                            status="error",
+                            stop_reason="resolver_session_missing",
+                        )
+                    return resume_codex_conflict_resolution(
+                        runner_bin=codex_runner_bin,
+                        model=args.model,
+                        workdir=temp_dir,
+                        control_dir=rollout_control_dir / "conflict_resolution",
+                        worker_state_dir=rollout_state_dir,
+                        codex_home=codex_home,
+                        seed_output_dir=seed_output_dir,
+                        archive_repo_dir=archive_worktree.path,
+                        archive_git_dir=archive_worktree.path / ".git",
+                        shared_workspace_dir=shared_workspace_dir,
+                        rollout_username=rollout_username,
+                        timeout_seconds=args.worker_timeout_seconds,
+                        sandbox_mode="workspace-write",
+                        base_instructions=codex_base_instructions,
+                        rollout_path=resolver_rollout_path,
+                        thread_id=resolver_thread_id,
+                        session_id=resolver_session_id,
+                        progress_callback=_progress,
+                    )
+
+                conflict_resolver = ArchiveConflictResolver(
+                    backend="codex",
+                    rollout_path=resolver_rollout_path,
+                    thread_id=resolver_thread_id,
+                    session_id=resolver_session_id,
+                    resume_turn=_resume_resolution_turn,
+                )
             return RolloutResult(
                 rollout_index=rollout_index,
                 record=record,
@@ -3697,6 +4121,9 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 summary=summary,
                 error=worker_result.error_message if worker_result.status == "error" else None,
                 benchmark_outcome=benchmark_outcome,
+                archive_worktree=archive_worktree,
+                archive_conflict_resolver=conflict_resolver,
+                progress_callback=_progress,
             )
 
         missing_rollout_indices: list[int] = []
@@ -3970,6 +4397,62 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                                     error=str(exc),
                                 )
                             )
+        # Integrate only after every research turn and child-source consumption has
+        # finished, then process branches in deterministic rollout order.
+        for result in sorted(results, key=lambda item: item.rollout_index):
+            if result.archive_worktree is None:
+                continue
+            try:
+                archive_result = finalize_archive_worktree(
+                    archive_repo_dir=archive_repo_dir,
+                    worktree=result.archive_worktree,
+                    git_lock=archive_git_lock,
+                    conflict_resolver=result.archive_conflict_resolver,
+                )
+            except BaseException as exc:
+                archive_result = {
+                    "archive_worktree_dir": str(result.archive_worktree.path),
+                    "archive_branch": result.archive_worktree.branch,
+                    "archive_base_commit": result.archive_worktree.base_commit,
+                    "archive_committed": False,
+                    "archive_merged": False,
+                    "archive_resolution_attempted": False,
+                    "archive_resolution_succeeded": False,
+                    "archive_resolution_fell_back": True,
+                    "archive_resolution_status": "fell_back",
+                    "archive_resolution_error": "archive_finalize_exception",
+                    "archive_finalize_error": f"{type(exc).__name__}: {exc}",
+                }
+                if result.error is None:
+                    result.error = str(exc)
+            result.record.update(archive_result)
+            progress = result.progress_callback
+            if progress is not None:
+                if archive_result.get("archive_resolution_attempted"):
+                    progress(
+                        "archive_resolution_attempted",
+                        archive_branch=archive_result.get("archive_branch"),
+                        attempt_count=archive_result.get("archive_resolution_attempt_count"),
+                    )
+                if archive_result.get("archive_resolution_succeeded"):
+                    progress(
+                        "archive_resolution_succeeded",
+                        archive_branch=archive_result.get("archive_branch"),
+                        resolution_turn_count=archive_result.get(
+                            "archive_resolution_turn_count"
+                        ),
+                        resolution_tool_call_count=archive_result.get(
+                            "archive_resolution_tool_call_count"
+                        ),
+                    )
+                if archive_result.get("archive_resolution_fell_back"):
+                    progress(
+                        "archive_resolution_fell_back",
+                        archive_branch=archive_result.get("archive_branch"),
+                        error_code=archive_result.get("archive_resolution_error"),
+                    )
+                progress("archive_finalized", **archive_result)
+
         _cleanup_rollout_shared_writes(shared_workspace_dir, shared_snapshot)
 
         for result in sorted(results, key=lambda item: item.rollout_index):
