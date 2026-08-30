@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 import main_loop
 from main_loop import (
+    ArchiveConflictResolver,
     CODEX_READ_README_BASE_INSTRUCTIONS,
     READ_README_TASK_INSTRUCTIONS,
     WorkerResult,
@@ -374,6 +375,356 @@ class HistoricalV1Tests(unittest.TestCase):
                         branch=worktree.branch,
                         git_lock=lock,
                     )
+
+
+class V36ConflictResolutionTests(unittest.TestCase):
+    def _root(self) -> Path:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        return Path(temporary.name)
+
+    def _conflict(self) -> tuple[Path, threading.Lock, main_loop.ArchiveWorktree, str]:
+        root = self._root()
+        archive = root / "archive"
+        ensure_local_world_repo(archive)
+        (archive / "collision.txt").write_text("base\n", encoding="utf-8")
+        _git(archive, "add", "collision.txt")
+        _git(archive, "commit", "-m", "collision base")
+        lock = threading.Lock()
+        first = create_archive_worktree(
+            archive_repo_dir=archive,
+            worktree_root=root / "worktrees",
+            branch="rollout/first",
+            git_lock=lock,
+        )
+        conflicted = create_archive_worktree(
+            archive_repo_dir=archive,
+            worktree_root=root / "worktrees",
+            branch="rollout/conflicted",
+            git_lock=lock,
+        )
+        for worktree, text in ((first, "first\n"), (conflicted, "second\n")):
+            (worktree.path / "collision.txt").write_text(text, encoding="utf-8")
+            _git(worktree.path, "add", "collision.txt")
+            _git(worktree.path, "commit", "-m", text.strip())
+        self.assertTrue(
+            finalize_archive_worktree(
+                archive_repo_dir=archive,
+                worktree=first,
+                git_lock=lock,
+            )["archive_merged"]
+        )
+        original_head = _git(conflicted.path, "rev-parse", "HEAD").stdout.strip()
+        return archive, lock, conflicted, original_head
+
+    def _resolver(
+        self,
+        worktree: main_loop.ArchiveWorktree,
+        resume: object,
+        *,
+        rollout_path: bool = True,
+    ) -> ArchiveConflictResolver:
+        session_path = worktree.path.parent / "session.jsonl"
+        if rollout_path:
+            session_path.write_text("{}\n", encoding="utf-8")
+        return ArchiveConflictResolver(
+            backend="codex",
+            rollout_path=session_path if rollout_path else None,
+            thread_id="thread-original",
+            session_id="session-original",
+            resume_turn=resume,
+        )
+
+    @staticmethod
+    def _completed() -> WorkerResult:
+        return WorkerResult(
+            final_text="done",
+            status="completed",
+            stop_reason="final_message",
+            metadata={
+                "thread_id": "thread-original",
+                "session_id": "session-original",
+                "turn_count": 1,
+                "tool_call_count": 3,
+                "spawn_child_tool_call_count": 0,
+                "turn_completed": True,
+            },
+        )
+
+    def test_v36_clean_merge_skips_turn_and_exact_session_merge_succeeds(self) -> None:
+        root = self._root()
+        archive = root / "clean-archive"
+        ensure_local_world_repo(archive)
+        lock = threading.Lock()
+        clean = create_archive_worktree(
+            archive_repo_dir=archive,
+            worktree_root=root / "clean-worktrees",
+            branch="rollout/clean",
+            git_lock=lock,
+        )
+        (clean.path / "clean.txt").write_text("clean\n", encoding="utf-8")
+        _git(clean.path, "add", "clean.txt")
+        _git(clean.path, "commit", "-m", "clean")
+        calls = 0
+
+        def unexpected() -> WorkerResult:
+            nonlocal calls
+            calls += 1
+            return self._completed()
+
+        clean_result = finalize_archive_worktree(
+            archive_repo_dir=archive,
+            worktree=clean,
+            git_lock=lock,
+            conflict_resolver=self._resolver(clean, unexpected),
+        )
+        self.assertTrue(clean_result["archive_merged"])
+        self.assertFalse(clean_result["archive_resolution_attempted"])
+        self.assertEqual(calls, 0)
+
+        archive, lock, conflicted, original_head = self._conflict()
+        canonical_before = _git(archive, "rev-parse", "HEAD").stdout.strip()
+
+        def resolve() -> WorkerResult:
+            self.assertTrue(_git(conflicted.path, "ls-files", "-u").stdout)
+            (conflicted.path / "collision.txt").write_text(
+                "first and second\n", encoding="utf-8"
+            )
+            _git(conflicted.path, "add", "collision.txt")
+            _git(conflicted.path, "commit", "--no-edit")
+            return self._completed()
+
+        resolved = finalize_archive_worktree(
+            archive_repo_dir=archive,
+            worktree=conflicted,
+            git_lock=lock,
+            conflict_resolver=self._resolver(conflicted, resolve),
+        )
+        self.assertTrue(resolved["archive_resolution_succeeded"])
+        self.assertEqual(resolved["archive_resolution_attempt_count"], 1)
+        self.assertEqual(resolved["archive_resolution_turn_count"], 1)
+        self.assertEqual(resolved["archive_resolution_tool_call_count"], 3)
+        self.assertEqual(resolved["archive_resolution_spawn_child_tool_call_count"], 0)
+        resolved_head = _git(archive, "rev-parse", "HEAD").stdout.strip()
+        parents = _git(archive, "rev-list", "--parents", "-n", "1", resolved_head).stdout.split()
+        self.assertEqual(parents[1:], [canonical_before, original_head])
+        self.assertEqual(_git(archive, "status", "--porcelain").stdout, "")
+
+    def test_v36_failures_retain_original_ref_and_attempt_at_most_once(self) -> None:
+        cases = {
+            "unsupported": "resolver_unsupported",
+            "missing": "resolver_session_missing_or_unsupported",
+            "resume_error": "resolver_turn_failed",
+            "timeout": "resolver_timeout",
+            "decline_unmerged": "resolver_left_unmerged_entries",
+            "dirty_no_commit": "resolver_left_dirty_worktree",
+            "discarded_parent": "resolver_merge_structure_invalid",
+        }
+        for mode, expected_error in cases.items():
+            with self.subTest(mode=mode):
+                archive, lock, conflicted, original_head = self._conflict()
+                calls = 0
+
+                def resume() -> WorkerResult:
+                    nonlocal calls
+                    calls += 1
+                    if mode == "resume_error":
+                        return WorkerResult("", "error", "fixture", metadata={})
+                    if mode == "timeout":
+                        return WorkerResult("", "timeout", "fixture", metadata={})
+                    if mode == "dirty_no_commit":
+                        (conflicted.path / "collision.txt").write_text(
+                            "staged\n", encoding="utf-8"
+                        )
+                        _git(conflicted.path, "add", "collision.txt")
+                    elif mode == "discarded_parent":
+                        _git(conflicted.path, "merge", "--abort")
+                        _git(
+                            conflicted.path,
+                            "commit",
+                            "--allow-empty",
+                            "-m",
+                            "not a merge",
+                        )
+                    return self._completed()
+
+                if mode == "unsupported":
+                    resolver = None
+                else:
+                    resolver = self._resolver(
+                        conflicted,
+                        resume,
+                        rollout_path=mode != "missing",
+                    )
+                result = finalize_archive_worktree(
+                    archive_repo_dir=archive,
+                    worktree=conflicted,
+                    git_lock=lock,
+                    conflict_resolver=resolver,
+                )
+                self.assertTrue(result["archive_resolution_fell_back"])
+                self.assertEqual(result["archive_resolution_error"], expected_error)
+                self.assertLessEqual(calls, 1)
+                self.assertEqual(calls, 0 if mode in {"unsupported", "missing"} else 1)
+                self.assertEqual(
+                    _git(
+                        archive,
+                        "show-ref",
+                        "--hash",
+                        "--verify",
+                        f"refs/heads/{conflicted.branch}",
+                    ).stdout.strip(),
+                    original_head,
+                )
+                self.assertEqual(_git(archive, "status", "--porcelain").stdout, "")
+
+    def test_v36_later_branch_continues_after_fallback(self) -> None:
+        archive, lock, conflicted, original_head = self._conflict()
+        later = create_archive_worktree(
+            archive_repo_dir=archive,
+            worktree_root=conflicted.path.parent,
+            branch="rollout/later",
+            git_lock=lock,
+        )
+        (later.path / "later.txt").write_text("later\n", encoding="utf-8")
+        _git(later.path, "add", "later.txt")
+        _git(later.path, "commit", "-m", "later")
+        failed = finalize_archive_worktree(
+            archive_repo_dir=archive,
+            worktree=conflicted,
+            git_lock=lock,
+        )
+        succeeded = finalize_archive_worktree(
+            archive_repo_dir=archive,
+            worktree=later,
+            git_lock=lock,
+        )
+        self.assertTrue(failed["archive_original_ref_preserved"])
+        self.assertEqual(failed["archive_original_ref_commit"], original_head)
+        self.assertTrue(succeeded["archive_merged"])
+        self.assertTrue((archive / "later.txt").is_file())
+
+    def test_v36_main_integrates_by_slot_after_all_research_turns(self) -> None:
+        documents = Path.home() / "Documents"
+        documents.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=documents) as temp:
+            root = Path(temp)
+            task = root / "task.md"
+            task.write_text("# Offline integration order\n", encoding="utf-8")
+            codex_home = root / "codex-home"
+            codex_home.mkdir()
+            second_finished = threading.Event()
+            finish_order: list[int] = []
+
+            def worker(**kwargs: object) -> WorkerResult:
+                context = json.loads(
+                    Path(str(kwargs["continuation_context_path"])).read_text()
+                )
+                index = int(context["rollout_index"])
+                archive = Path(str(kwargs["archive_repo_dir"]))
+                (archive / "ordered.txt").write_text(
+                    f"rollout {index}\n", encoding="utf-8"
+                )
+                _git(archive, "add", "ordered.txt")
+                _git(archive, "commit", "-m", f"rollout {index}")
+                self.assertTrue(kwargs["persist_session"])
+                if index == 0:
+                    self.assertTrue(second_finished.wait(timeout=5))
+                else:
+                    second_finished.set()
+                finish_order.append(index)
+                return WorkerResult("offline", "completed", "final_message", metadata={})
+
+            argv = [
+                "main_loop.py",
+                "--benchmark",
+                "open-ended",
+                "--task-file",
+                str(task),
+                "--runtime-root",
+                str(root / "runtime"),
+                "--worker-backend",
+                "codex",
+                "--model",
+                "gpt-5.6-sol",
+                "--num-rollouts",
+                "2",
+                "--step",
+                "--codex-runner-bin",
+                "/bin/true",
+                "--codex-home",
+                str(codex_home),
+            ]
+            with patch("sys.argv", argv), patch(
+                "main_loop.run_codex_worker", side_effect=worker
+            ):
+                _run_main([])
+            self.assertEqual(finish_order, [1, 0])
+            archive = root / "runtime/archive/world_repo"
+            self.assertEqual((archive / "ordered.txt").read_text(), "rollout 0\n")
+            records = [
+                json.loads(line)
+                for line in (root / "runtime/logs/runs.jsonl").read_text().splitlines()
+            ]
+            self.assertTrue(records[0]["archive_merged"])
+            self.assertEqual(
+                records[1]["archive_resolution_error"],
+                "resolver_session_missing_or_unsupported",
+            )
+
+    def test_v36_resolution_request_resumes_exact_identity_without_child_tool(self) -> None:
+        root = self._root()
+        fake_runner = root / "fake-runner"
+        fake_runner.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, sys\n"
+            "request = json.load(sys.stdin)\n"
+            "print(json.dumps({'event':'thread_started','thread_id':request['expected_thread_id'],'session_id':request['expected_session_id'],'resumed':True}), flush=True)\n"
+            "print(json.dumps({'event':'turn_started','turn_id':'resolution-turn'}), flush=True)\n"
+            "print(json.dumps({'event':'tool_begin','tool':'exec_command','call_id':'one'}), flush=True)\n"
+            "print(json.dumps({'event':'tool_end','tool':'exec_command','call_id':'one','exit_code':0}), flush=True)\n"
+            "print(json.dumps({'event':'turn_complete','turn_id':'resolution-turn','final_text':'done'}), flush=True)\n",
+            encoding="utf-8",
+        )
+        fake_runner.chmod(0o755)
+        archive = root / "archive"
+        ensure_local_world_repo(archive)
+        session_path = root / "session.jsonl"
+        session_path.write_text("{}\n", encoding="utf-8")
+        paths = [
+            root / name
+            for name in ("work", "control", "state", "codex", "seed", "shared")
+        ]
+        for path in paths:
+            path.mkdir()
+        result = run_codex_rollout(
+            runner_bin=fake_runner,
+            model="gpt-5.6-sol",
+            workdir=paths[0],
+            control_dir=paths[1],
+            worker_state_dir=paths[2],
+            codex_home=paths[3],
+            seed_output_dir=paths[4],
+            archive_repo_dir=archive,
+            archive_git_dir=archive / ".git",
+            shared_workspace_dir=paths[5],
+            rollout_username="rollout_user_000",
+            timeout_seconds=5,
+            resume_rollout_path=session_path,
+            expected_thread_id="thread-original",
+            expected_session_id="session-original",
+            resolution_phase=True,
+        )
+        request = json.loads((paths[1] / "codex_runner.request.json").read_text())
+        self.assertTrue(request["resolution_phase"])
+        self.assertNotIn("spawn_child_handler_command", request)
+        self.assertNotIn("mcp_servers", request)
+        self.assertEqual(result["thread_id"], "thread-original")
+        self.assertEqual(result["session_id"], "session-original")
+        self.assertEqual(result["turn_count"], 1)
+        self.assertEqual(result["tool_call_count"], 1)
+        self.assertEqual(result["spawn_child_tool_call_count"], 0)
+        self.assertTrue(result["turn_completed"])
 
 
 if __name__ == "__main__":
