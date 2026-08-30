@@ -196,6 +196,11 @@ def run_codex_rollout(
     benchmark_mcp_servers: dict[str, Any] | None = None,
     sensitive_mcp_tools: tuple[tuple[str, str], ...] = (),
     progress_callback: Callable[..., None] | None = None,
+    persist_session: bool = False,
+    resume_rollout_path: Path | None = None,
+    expected_thread_id: str | None = None,
+    expected_session_id: str | None = None,
+    resolution_phase: bool = False,
 ) -> dict[str, Any]:
     runner_bin = runner_bin.expanduser().resolve()
     if not runner_bin.exists():
@@ -245,6 +250,30 @@ def run_codex_rollout(
         ]
     if base_instructions is not None and base_instructions.strip():
         request["base_instructions"] = base_instructions
+    if persist_session:
+        request["persist_session"] = True
+    if resume_rollout_path is not None:
+        request["resume_rollout_path"] = str(resume_rollout_path.expanduser().resolve())
+    if expected_thread_id is not None:
+        request["expected_thread_id"] = expected_thread_id
+    if expected_session_id is not None:
+        request["expected_session_id"] = expected_session_id
+    if resolution_phase:
+        if persist_session:
+            raise ValueError("conflict resolution cannot persist a research session")
+        if spawn_child_handler_context_path is not None:
+            raise ValueError("spawn_child is unavailable during conflict resolution")
+        if benchmark_mcp_servers:
+            raise ValueError("benchmark MCP servers are unavailable during conflict resolution")
+        if sensitive_mcp_tools:
+            raise ValueError("sensitive MCP tools are unavailable during conflict resolution")
+        if resume_rollout_path is None or not expected_thread_id or not expected_session_id:
+            raise ValueError(
+                "conflict resolution requires a rollout path and exact thread/session ids"
+            )
+        request["resolution_phase"] = True
+    elif resume_rollout_path is not None:
+        raise ValueError("Codex resume is restricted to conflict resolution")
     control_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(control_dir, 0o700)
     request_path = control_dir / "codex_runner.request.json"
@@ -258,8 +287,14 @@ def run_codex_rollout(
         "final_text": "",
         "thread_id": "",
         "session_id": "",
+        "rollout_path": "",
         "error_code": "",
         "error_message": "",
+        "turn_count": 0,
+        "tool_call_count": 0,
+        "spawn_child_tool_call_count": 0,
+        "turn_completed": False,
+        "resolution_phase": resolution_phase,
     }
     request_path.write_text(json.dumps(request, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     os.chmod(request_path, 0o600)
@@ -347,9 +382,17 @@ def run_codex_rollout(
                     final_text = str(event.get("final_text") or "")
 
         return_code = proc.wait()
+        proc.stdout.close()
     thread_id = thread_id or state.get("thread_id") or None
     session_id = session_id or state.get("session_id") or None
     final_text = final_text or state.get("final_text", "")
+    protocol_metadata = {
+        "rollout_path": state.get("rollout_path") or None,
+        "turn_count": state["turn_count"],
+        "tool_call_count": state["tool_call_count"],
+        "spawn_child_tool_call_count": state["spawn_child_tool_call_count"],
+        "turn_completed": state["turn_completed"],
+    }
 
     if timed_out:
         return {
@@ -360,6 +403,7 @@ def run_codex_rollout(
             "error_message": f"Codex runner exceeded {timeout_seconds} seconds.",
             "thread_id": thread_id,
             "session_id": session_id,
+            **protocol_metadata,
             "request_path": str(request_path),
             "stderr_path": str(stderr_path),
             "events_path": str(stdout_events_path),
@@ -374,6 +418,7 @@ def run_codex_rollout(
             "error_message": f"{runner_error}; see {stderr_path}",
             "thread_id": thread_id,
             "session_id": session_id,
+            **protocol_metadata,
             "request_path": str(request_path),
             "stderr_path": str(stderr_path),
             "events_path": str(stdout_events_path),
@@ -386,6 +431,7 @@ def run_codex_rollout(
         "error_message": None,
         "thread_id": thread_id,
         "session_id": session_id,
+        **protocol_metadata,
         "request_path": str(request_path),
         "stderr_path": str(stderr_path),
         "events_path": str(stdout_events_path),
@@ -417,38 +463,50 @@ def _handle_runner_line(
     if name == "thread_started":
         state["thread_id"] = str(event.get("thread_id") or "")
         state["session_id"] = str(event.get("session_id") or "")
+    elif name == "rollout_persisted":
+        state["rollout_path"] = str(event.get("rollout_path") or "")
+    elif name == "turn_started":
+        state["turn_count"] += 1
+    elif name == "tool_begin":
+        state["tool_call_count"] += 1
+        if event.get("tool") == "spawn_child":
+            state["spawn_child_tool_call_count"] += 1
     elif name in {"agent_message", "turn_complete"}:
         text = str(event.get("final_text") or event.get("text") or "")
         if text:
             state["final_text"] = text
+        if name == "turn_complete":
+            state["turn_completed"] = True
     elif name == "error":
         state["error_code"] = str(event.get("error_code") or "")
         state["error_message"] = str(event.get("error_message") or "")
 
     if progress_callback is not None:
+        resolution_phase = bool(state.get("resolution_phase"))
+        prefix = "conflict_resolution" if resolution_phase else "worker"
         if name == "thread_started":
             progress_callback(
-                "codex_thread_started",
+                "conflict_resolution_thread_resumed" if resolution_phase else "codex_thread_started",
                 thread_id=event.get("thread_id"),
                 session_id=event.get("session_id"),
                 model=event.get("model"),
             )
         elif name == "turn_started":
             progress_callback(
-                "worker_turn_started",
+                f"{prefix}_turn_started",
                 turn_id=event.get("turn_id"),
                 model_context_window=event.get("model_context_window"),
             )
         elif name == "tool_begin":
             progress_callback(
-                "worker_tool_started",
+                f"{prefix}_tool_started",
                 tool=event.get("tool"),
                 call_id=event.get("call_id"),
                 command=event.get("command"),
             )
         elif name == "tool_end":
             progress_callback(
-                "worker_tool_completed",
+                f"{prefix}_tool_completed",
                 tool=event.get("tool"),
                 call_id=event.get("call_id"),
                 exit_code=event.get("exit_code"),
@@ -456,14 +514,14 @@ def _handle_runner_line(
             )
         elif name == "turn_complete":
             progress_callback(
-                "worker_turn_completed",
+                f"{prefix}_turn_completed",
                 turn_id=event.get("turn_id"),
                 tool_call_count=None,
                 response_status="completed",
             )
         elif name == "error":
             progress_callback(
-                "worker_error",
+                f"{prefix}_error",
                 error_code=event.get("error_code"),
                 error_message=event.get("error_message"),
             )

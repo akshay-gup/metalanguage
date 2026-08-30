@@ -50,6 +50,7 @@ use codex_protocol::dynamic_tools::DynamicToolResponse;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::TurnItem;
+use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::ExecOutputStream;
@@ -73,6 +74,11 @@ struct RunnerRequest {
     spawn_child_handler_command: Option<Vec<String>>,
     mcp_servers: Option<HashMap<String, Value>>,
     sensitive_mcp_tools: Option<Vec<McpToolSelector>>,
+    persist_session: Option<bool>,
+    resume_rollout_path: Option<PathBuf>,
+    expected_thread_id: Option<String>,
+    expected_session_id: Option<String>,
+    resolution_phase: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq)]
@@ -106,6 +112,29 @@ async fn run_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
 }
 
 async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
+    let resolution_phase = request.resolution_phase.unwrap_or(false);
+    let persist_session = request.persist_session.unwrap_or(false);
+    if resolution_phase && request.resume_rollout_path.is_none() {
+        bail!("conflict resolution requires resume_rollout_path");
+    }
+    if resolution_phase
+        && (request.expected_thread_id.as_deref().is_none_or(str::is_empty)
+            || request.expected_session_id.as_deref().is_none_or(str::is_empty))
+    {
+        bail!("conflict resolution requires exact thread and session ids");
+    }
+    if request.resume_rollout_path.is_some() && !resolution_phase {
+        bail!("Codex resume is restricted to conflict resolution");
+    }
+    if resolution_phase && persist_session {
+        bail!("conflict resolution cannot request research-session persistence");
+    }
+    if resolution_phase && request.spawn_child_handler_command.is_some() {
+        bail!("spawn_child handler is forbidden during conflict resolution");
+    }
+    if resolution_phase && request.mcp_servers.as_ref().is_some_and(|value| !value.is_empty()) {
+        bail!("MCP servers are forbidden during conflict resolution");
+    }
     let cwd = normalize_existing_path(&request.cwd).context("resolve cwd")?;
     let codex_home = match request.codex_home {
         Some(path) => normalize_existing_path(&path).context("resolve codex_home")?,
@@ -143,8 +172,8 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
         approval_policy: Some(AskForApproval::Never),
         sandbox_mode: sandbox_mode_override,
         permission_profile: permission_profile_override,
-        tools_web_search_request: Some(true),
-        ephemeral: Some(true),
+        tools_web_search_request: Some(!resolution_phase),
+        ephemeral: Some(!(persist_session || request.resume_rollout_path.is_some())),
         workspace_roots: Some(workspace_root_overrides),
         additional_writable_roots,
         codex_self_exe: arg0_paths.codex_self_exe.clone(),
@@ -242,7 +271,7 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
     let thread_manager = ThreadManager::new(
         &config,
         Arc::clone(&auth_manager),
-        build_models_manager(&config, auth_manager),
+        build_models_manager(&config, Arc::clone(&auth_manager)),
         CodexAppsToolsCache::default(),
         SessionSource::Exec,
         environment_manager,
@@ -256,19 +285,48 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
         /*external_time_provider*/ None,
     );
 
-    let mut start_options = StartThreadOptions::new(config);
-    start_options.dynamic_tools = metalanguage_dynamic_tools();
+    let resumed = request.resume_rollout_path.is_some();
     let NewThread {
         thread_id,
         thread,
         session_configured,
-    } = thread_manager
-        .start_thread(start_options)
-        .await
-        .context("start Codex thread")?;
+    } = if let Some(rollout_path) = request.resume_rollout_path.as_ref() {
+        let rollout_path = normalize_existing_path(rollout_path)
+            .context("resolve resume_rollout_path")?;
+        thread_manager
+            .resume_thread_from_rollout(
+                config,
+                rollout_path,
+                Arc::clone(&auth_manager),
+                None,
+                ClientMcpExtensions::default(),
+            )
+            .await
+            .context("resume Codex thread from rollout")?
+    } else {
+        let mut start_options = StartThreadOptions::new(config);
+        start_options.dynamic_tools = metalanguage_dynamic_tools();
+        thread_manager
+            .start_thread(start_options)
+            .await
+            .context("start Codex thread")?
+    };
+
+    if let Some(expected) = request.expected_thread_id.as_deref()
+        && thread_id.to_string() != expected
+    {
+        bail!("resumed Codex thread id does not match expected thread id");
+    }
+    if let Some(expected) = request.expected_session_id.as_deref()
+        && session_configured.session_id.to_string() != expected
+    {
+        bail!("resumed Codex session id does not match expected session id");
+    }
 
     emit(json!({
         "event": "thread_started",
+        "runner_phase": if resolution_phase { "conflict_resolution" } else { "research" },
+        "resumed": resumed,
         "thread_id": thread_id.to_string(),
         "session_id": session_configured.session_id.to_string(),
         "model": session_configured.model,
@@ -290,12 +348,31 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
         prompt,
         spawn_child_handler_command,
         sensitive_tools,
+        resolution_phase,
     )
     .await;
+    let persistence_result = if turn_result.is_ok() && persist_session {
+        thread.ensure_rollout_materialized().await;
+        match thread.flush_rollout().await {
+            Ok(()) => match thread.rollout_path() {
+                Some(rollout_path) => emit(json!({
+                    "event": "rollout_persisted",
+                    "thread_id": thread_id.to_string(),
+                    "session_id": session_configured.session_id.to_string(),
+                    "rollout_path": rollout_path.to_string_lossy(),
+                })),
+                None => Err(anyhow!("Codex rollout path was not materialized")),
+            },
+            Err(error) => Err(error).context("flush Codex rollout"),
+        }
+    } else {
+        Ok(())
+    };
     let shutdown_result = thread.shutdown_and_wait().await;
     let _ = thread_manager.remove_thread(&thread_id).await;
 
     turn_result?;
+    persistence_result?;
     shutdown_result.context("shut down Codex thread")?;
     Ok(())
 }
@@ -318,6 +395,7 @@ async fn run_turn(
     prompt: String,
     spawn_child_handler_command: Option<Vec<String>>,
     sensitive_tools: Vec<McpToolSelector>,
+    resolution_phase: bool,
 ) -> anyhow::Result<()> {
     let submission = thread
         .start_turn_if_idle(TurnInputRequest::user_input(vec![UserInput::Text {
@@ -372,46 +450,57 @@ async fn run_turn(
                 }))?;
             }
             EventMsg::ExecCommandBegin(event) => {
-                emit(json!({
+                let mut payload = json!({
                     "event": "tool_begin",
                     "tool": "exec_command",
                     "call_id": event.call_id,
                     "turn_id": event.turn_id,
-                    "command": event.command,
                     "cwd": event.cwd.to_string(),
-                }))?;
+                });
+                if !resolution_phase {
+                    payload["command"] = json!(event.command);
+                }
+                emit(payload)?;
             }
             EventMsg::ExecCommandOutputDelta(event) => {
-                let text = String::from_utf8_lossy(&event.chunk).to_string();
-                emit(json!({
-                    "event": "tool_output_delta",
-                    "tool": "exec_command",
-                    "call_id": event.call_id,
-                    "stream": exec_output_stream_name(&event.stream),
-                    "text": text,
-                }))?;
+                if !resolution_phase {
+                    let text = String::from_utf8_lossy(&event.chunk).to_string();
+                    emit(json!({
+                        "event": "tool_output_delta",
+                        "tool": "exec_command",
+                        "call_id": event.call_id,
+                        "stream": exec_output_stream_name(&event.stream),
+                        "text": text,
+                    }))?;
+                }
             }
             EventMsg::TerminalInteraction(event) => {
-                emit(json!({
+                let mut payload = json!({
                     "event": "terminal_interaction",
                     "tool": "exec_command",
                     "call_id": event.call_id,
                     "process_id": event.process_id,
-                    "stdin": event.stdin,
-                }))?;
+                });
+                if !resolution_phase {
+                    payload["stdin"] = json!(event.stdin);
+                }
+                emit(payload)?;
             }
             EventMsg::ExecCommandEnd(event) => {
-                emit(json!({
+                let mut payload = json!({
                     "event": "tool_end",
                     "tool": "exec_command",
                     "call_id": event.call_id,
                     "turn_id": event.turn_id,
-                    "command": event.command,
                     "cwd": event.cwd.to_string(),
                     "exit_code": event.exit_code,
                     "status": format!("{:?}", event.status),
                     "duration_ms": event.duration.as_millis(),
-                }))?;
+                });
+                if !resolution_phase {
+                    payload["command"] = json!(event.command);
+                }
+                emit(payload)?;
             }
             EventMsg::PatchApplyBegin(event) => {
                 emit(json!({
@@ -443,7 +532,17 @@ async fn run_turn(
                 }))?;
             }
             EventMsg::McpToolCallBegin(event) => {
-                emit(logged_mcp_tool_begin_event(event, &sensitive_tools))?;
+                if resolution_phase {
+                    emit(json!({
+                        "event": "tool_begin",
+                        "tool": event.invocation.tool,
+                        "namespace": format!("mcp__{}", event.invocation.server),
+                        "call_id": event.call_id,
+                        "arguments": {"redacted": true},
+                    }))?;
+                } else {
+                    emit(logged_mcp_tool_begin_event(event, &sensitive_tools))?;
+                }
             }
             EventMsg::McpToolCallEnd(event) => {
                 emit(logged_mcp_tool_end_event(event))?;
@@ -458,7 +557,7 @@ async fn run_turn(
                         "item_id": message.id,
                         "text": text,
                     }))?;
-                } else if let Some(notification) = mapped_item_notification(
+                } else if !resolution_phase && let Some(notification) = mapped_item_notification(
                     &EventMsg::ItemCompleted(event.clone()),
                     thread_id,
                     current_turn_id.as_deref(),
@@ -528,17 +627,21 @@ async fn run_turn(
             EventMsg::RequestPermissions(_) => bail_with_event("permissions_requested")?,
             EventMsg::RequestUserInput(_) => bail_with_event("user_input_requested")?,
             EventMsg::DynamicToolCallRequest(request) => {
-                emit(json!({
+                let mut payload = json!({
                     "event": "tool_begin",
                     "tool": request.tool,
                     "namespace": request.namespace,
                     "call_id": request.call_id,
                     "turn_id": request.turn_id,
-                    "arguments": request.arguments,
-                }))?;
-                let response = handle_metalanguage_dynamic_tool(
+                });
+                if !resolution_phase {
+                    payload["arguments"] = request.arguments.clone();
+                }
+                emit(payload)?;
+                let response = handle_dynamic_tool_for_phase(
                     request,
                     spawn_child_handler_command.as_deref(),
+                    resolution_phase,
                 );
                 emit(json!({
                     "event": "tool_end",
@@ -693,6 +796,24 @@ fn handle_metalanguage_dynamic_tool(
             json!({"error": "unsupported dynamic tool", "tool": other}),
         ),
     }
+}
+
+fn handle_dynamic_tool_for_phase(
+    request: &DynamicToolCallRequest,
+    spawn_child_handler_command: Option<&[String]>,
+    resolution_phase: bool,
+) -> DynamicToolResponse {
+    if resolution_phase {
+        return dynamic_tool_json_response(
+            false,
+            spawn_child_failure(
+                "dynamic_tools_disabled_during_conflict_resolution",
+                "dynamic tools are disabled during conflict resolution",
+                false,
+            ),
+        );
+    }
+    handle_metalanguage_dynamic_tool(request, spawn_child_handler_command)
 }
 
 fn handle_spawn_child_tool(
@@ -955,6 +1076,36 @@ mod tests {
             json!(["prompt", "workspace_dir"])
         );
         assert!(function.description.contains("parent rollout continues"));
+    }
+
+    #[test]
+    fn conflict_resolution_fails_spawn_child_closed() {
+        let request = DynamicToolCallRequest {
+            call_id: "spawn-attempt".to_string(),
+            turn_id: "resolution-turn".to_string(),
+            started_at_ms: 0,
+            namespace: None,
+            tool: "spawn_child".to_string(),
+            arguments: json!({"prompt": "blocked", "workspace_dir": "child"}),
+        };
+        let unavailable_handler = vec!["/handler/must/not/run".to_string()];
+        let response = handle_dynamic_tool_for_phase(
+            &request,
+            Some(&unavailable_handler),
+            /*resolution_phase*/ true,
+        );
+        assert!(!response.success);
+        let DynamicToolCallOutputContentItem::InputText { text } = &response.content_items[0]
+        else {
+            panic!("conflict-resolution tool failure must be text JSON");
+        };
+        let payload: Value = serde_json::from_str(text).expect("parse tool failure payload");
+        assert_eq!(
+            payload["error_code"],
+            "dynamic_tools_disabled_during_conflict_resolution"
+        );
+        assert_eq!(payload["child_spawned"], false);
+        assert_eq!(payload["retryable"], false);
     }
 
     #[test]
