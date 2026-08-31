@@ -20,6 +20,8 @@ Nobody has told you what to do. Nobody has assigned you an objective. No one is 
 `shared_workspace/` is visible to all programs running alongside you.
 Files there are batch-local and may be removed at the end of the round.
 
+`messages/` is this program's private, batch-local inbox. Other named programs can place files there through `send_message`, but cannot inspect the inbox. `runtime.md` lists the names. Messages disappear at the end of the round.
+
 `archive/` is a private Git worktree for this rollout. Every
 program starts from the same committed base, but has its separate working tree,
 index, HEAD and rollout branch. Normal Git commands and commits operate on
@@ -70,9 +72,9 @@ prompt or workspace of a rollout that did not spawn a child.
 
 For a spawned child, the inherited `README.md` should thematically replicate
 this environment description: finite lifetime, no assigned objective, optional
-human tasks, shared and durable state, and child-slot mechanics. Exact wording
-is not required; the description can be rewritten, extended, or evolved while
-preserving those themes.
+human tasks, shared and durable state, the private inbox, and child-slot
+mechanics. Exact wording is not required; the description can be rewritten,
+extended, or evolved while preserving those themes.
 
 ## Available Tools
 
