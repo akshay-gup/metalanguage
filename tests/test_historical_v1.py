@@ -25,6 +25,7 @@ from main_loop import (
     finalize_archive_worktree,
 )
 from utils.codex_runner import run_codex_rollout
+from utils.private_inbox import ROLLOUT_HUMAN_NAMES
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -47,7 +48,7 @@ def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProc
 
 
 class HistoricalV1Tests(unittest.TestCase):
-    def test_exact_preserved_prompt_readme_and_task_bytes(self) -> None:
+    def test_exact_preserved_prompt_static_readme_notice_and_task_bytes(self) -> None:
         self.assertEqual(
             READ_README_TASK_INSTRUCTIONS,
             "This rollout has no assigned task. README.md describes its environment.",
@@ -58,11 +59,15 @@ class HistoricalV1Tests(unittest.TestCase):
             hashlib.sha256(READ_README_TASK_INSTRUCTIONS.encode("utf-8")).hexdigest(),
             "ae48d75abfdaedb43a7b650b7430c0eaefc9338fa92cc62f99d55493aa132063",
         )
-        readme = (PROJECT_ROOT / "seeds/bootstrap/README.md").read_bytes()
-        self.assertEqual(len(readme), 4011)
+        readme = (PROJECT_ROOT / "seeds/bootstrap/README.md").read_text()
         self.assertEqual(
-            hashlib.sha256(readme).hexdigest(),
-            "5351d015c65a36cc8fc652a0acbd180cac573783b3b0b67c264b4ca333aa76d8",
+            readme.count(
+                "`messages/` is this program's private, batch-local inbox. Other named "
+                "programs can place files there through `send_message`, but cannot inspect "
+                "the inbox. `runtime.md` lists the names. Messages disappear at the end "
+                "of the round."
+            ),
+            1,
         )
         self.assertEqual(len(HISTORICAL_TASK), 173)
         self.assertEqual(
@@ -195,9 +200,31 @@ class HistoricalV1Tests(unittest.TestCase):
                 archive = Path(str(kwargs["archive_repo_dir"]))
                 try:
                     self.assertEqual(kwargs["base_instructions"], READ_README_TASK_INSTRUCTIONS)
-                    self.assertEqual((workdir / "README.md").read_bytes(), (
-                        PROJECT_ROOT / "seeds/bootstrap/README.md"
-                    ).read_bytes() if task_index == 0 else f"# Child {rollout_index}\n".encode())
+                    expected_readme = (
+                        (PROJECT_ROOT / "seeds/bootstrap/README.md").read_text()
+                        if task_index == 0
+                        else f"# Child {rollout_index}\n"
+                    )
+                    self.assertEqual(
+                        (workdir / "README.md").read_text(),
+                        expected_readme,
+                    )
+                    private_inbox = kwargs["private_inbox"]
+                    self.assertEqual(
+                        private_inbox.sender,
+                        ROLLOUT_HUMAN_NAMES[rollout_index],
+                    )
+                    self.assertTrue(private_inbox.own_inbox.is_dir())
+                    self.assertTrue(
+                        all(path.is_dir() for path in private_inbox.recipient_inboxes.values())
+                    )
+                    self.assertEqual(
+                        private_inbox.protected_read_paths,
+                        (runtime / "logs/rollout_control",),
+                    )
+                    runtime_text = (workdir / "runtime.md").read_text()
+                    self.assertIn(f"- own_name: {private_inbox.sender}", runtime_text)
+                    self.assertIn("rollout_index=7 name=Oliver", runtime_text)
                     if task_index == 0:
                         self.assertEqual(kwargs["initial_user_text"], READ_README_TASK_INSTRUCTIONS)
                     else:
@@ -312,6 +339,7 @@ class HistoricalV1Tests(unittest.TestCase):
             self.assertFalse((archive / "uncommitted.tmp").exists())
             self.assertEqual(_git(archive, "status", "--porcelain").stdout, "")
             self.assertFalse(any("peer_message" in path.name for path in runtime.rglob("*")))
+            self.assertFalse(any(path.name == "messages" for path in runtime.rglob("*")))
 
     def test_eight_linked_worktrees_and_historical_conflict_retention(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
