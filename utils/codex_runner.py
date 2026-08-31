@@ -13,56 +13,11 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from utils.private_inbox import PRIVATE_INBOX_CAPABILITY_IDENTITY, PrivateInboxConfig
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUNNER_CRATE_DIR = PROJECT_ROOT / "crates" / "metalanguage-codex-runner"
 RUNNER_MANIFEST = RUNNER_CRATE_DIR / "Cargo.toml"
 ProgressCallback = Callable[[str, Any], None]
-
-
-def _require_runner_capability(runner_bin: Path, capability_identity: str) -> None:
-    try:
-        completed = subprocess.run(
-            [str(runner_bin), "--metalanguage-capabilities"],
-            cwd=PROJECT_ROOT,
-            text=True,
-            encoding="utf-8",
-            capture_output=True,
-            timeout=10,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise RuntimeError("Codex runner capability probe failed") from exc
-    try:
-        payload = json.loads(completed.stdout.strip())
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("Codex runner does not report private-inbox capability") from exc
-    protocol = payload.get("protocol") if isinstance(payload, dict) else None
-    capabilities = payload.get("capabilities") if isinstance(payload, dict) else None
-    if (
-        completed.returncode != 0
-        or protocol != "metalanguage-codex-runner"
-        or not isinstance(capabilities, list)
-        or capability_identity not in capabilities
-    ):
-        raise RuntimeError("Codex runner does not support the required private-inbox capability")
-
-
-def _codex_private_state_read_denials(codex_home: Path) -> list[Path]:
-    sessions = codex_home / "sessions"
-    sessions.mkdir(parents=True, exist_ok=True)
-    if sessions.is_symlink() or not sessions.is_dir():
-        raise RuntimeError("Codex sessions path is not a private-evidence directory")
-    candidates = [
-        sessions,
-        codex_home / "archived_sessions",
-        codex_home / "state_5.sqlite",
-        codex_home / "state_5.sqlite-shm",
-        codex_home / "state_5.sqlite-wal",
-    ]
-    return candidates
 
 
 def runner_binary_path(*, release: bool = False) -> Path:
@@ -246,24 +201,10 @@ def run_codex_rollout(
     expected_thread_id: str | None = None,
     expected_session_id: str | None = None,
     resolution_phase: bool = False,
-    private_inbox: PrivateInboxConfig | None = None,
-    protect_private_evidence: bool = False,
-    private_evidence_read_denials: tuple[Path, ...] = (),
 ) -> dict[str, Any]:
     runner_bin = runner_bin.expanduser().resolve()
     if not runner_bin.exists():
         raise FileNotFoundError(f"Codex runner binary does not exist: {runner_bin}")
-    protect_private_evidence = protect_private_evidence or private_inbox is not None
-    if protect_private_evidence:
-        if resolution_phase:
-            if private_inbox is not None:
-                raise ValueError("private inbox is unavailable during conflict resolution")
-        if sandbox_mode == "danger-full-access":
-            raise ValueError("private evidence requires a managed Codex sandbox")
-        _require_runner_capability(
-            runner_bin,
-            PRIVATE_INBOX_CAPABILITY_IDENTITY,
-        )
 
     workspace_roots = [
         str(workdir),
@@ -300,31 +241,6 @@ def run_codex_rollout(
             "--child-tool-handler",
             str(spawn_child_handler_context_path),
         ]
-    if private_inbox is not None:
-        if spawn_child_handler_context_path is None:
-            raise ValueError("private inbox requires the central dynamic-tool callback")
-        request["private_inbox"] = {
-            "capability_identity": private_inbox.capability_identity,
-            "sender": private_inbox.sender,
-            "own_inbox": str(private_inbox.own_inbox),
-            "recipient_inboxes": {
-                recipient: str(path)
-                for recipient, path in private_inbox.recipient_inboxes.items()
-            },
-        }
-    if protect_private_evidence:
-        read_denials = _codex_private_state_read_denials(codex_home)
-        for path in (
-            private_inbox.protected_read_paths
-            if private_inbox is not None
-            else private_evidence_read_denials
-        ):
-            if path not in read_denials:
-                read_denials.append(path)
-        request["private_evidence_protection"] = {
-            "capability_identity": PRIVATE_INBOX_CAPABILITY_IDENTITY,
-            "read_denied_paths": [str(path) for path in read_denials],
-        }
     if benchmark_mcp_servers:
         request["mcp_servers"] = benchmark_mcp_servers
     if sensitive_mcp_tools:
@@ -377,7 +293,6 @@ def run_codex_rollout(
         "turn_count": 0,
         "tool_call_count": 0,
         "spawn_child_tool_call_count": 0,
-        "send_message_tool_call_count": 0,
         "turn_completed": False,
         "resolution_phase": resolution_phase,
     }
@@ -476,7 +391,6 @@ def run_codex_rollout(
         "turn_count": state["turn_count"],
         "tool_call_count": state["tool_call_count"],
         "spawn_child_tool_call_count": state["spawn_child_tool_call_count"],
-        "send_message_tool_call_count": state["send_message_tool_call_count"],
         "turn_completed": state["turn_completed"],
     }
 
@@ -557,8 +471,6 @@ def _handle_runner_line(
         state["tool_call_count"] += 1
         if event.get("tool") == "spawn_child":
             state["spawn_child_tool_call_count"] += 1
-        elif event.get("tool") == "send_message":
-            state["send_message_tool_call_count"] += 1
     elif name in {"agent_message", "turn_complete"}:
         text = str(event.get("final_text") or event.get("text") or "")
         if text:
@@ -585,14 +497,14 @@ def _handle_runner_line(
                 turn_id=event.get("turn_id"),
                 model_context_window=event.get("model_context_window"),
             )
-        elif name == "tool_begin" and event.get("tool") != "send_message":
+        elif name == "tool_begin":
             progress_callback(
                 f"{prefix}_tool_started",
                 tool=event.get("tool"),
                 call_id=event.get("call_id"),
                 command=event.get("command"),
             )
-        elif name == "tool_end" and event.get("tool") != "send_message":
+        elif name == "tool_end":
             progress_callback(
                 f"{prefix}_tool_completed",
                 tool=event.get("tool"),
