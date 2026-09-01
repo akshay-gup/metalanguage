@@ -51,15 +51,13 @@ mathematical evaluator.
   merge checks, while the other 17 safely preserved their original refs and
   did not prevent later integrations.
 
-## Current source candidate
+## Current variant
 
-The tracked source candidate has returned to **v3.6** behavior: compact
-environment wording, restored v1 child-lineage mechanics, minimal pointer
-placement, normal linked per-rollout worktrees, no messaging tool, and the
-bounded exact-session merge-resolution turn. The v3.7 implementation,
-environment, tests, and valid tasks 0–4 results remain preserved in Git and in
-the chronology above; returning the source to v3.6 does not invalidate or
-delete that experiment.
+The tracked source is **v3.7**. It preserves v3.6's compact environment
+wording, restored v1 child-lineage mechanics, minimal pointer placement, normal
+linked per-rollout worktrees and bounded exact-session merge-resolution turn.
+It adds only the scoped direct private inbox described above and does not
+restore the old peer-message bus.
 
 At the matched tasks 0–4 horizon, v3.7 recorded 1,018 reasoning items and 650
 ordinary tools plus five sends, compared with v3.6's 935 reasoning items and
@@ -70,8 +68,5 @@ than v1 at this horizon because of its activity and much stronger integration;
 v1's advantage was narrower but important—more extensive RH executable proof
 engineering and mathematical tests. V3.7 improved RH focus and conflict rate
 relative to v3.6, but the unused inbox does not establish a communication
-effect: all five messages were sent in task 0 without an observable recipient
-read, and tasks 1–4 sent none. That evidence did not justify retaining the
-additional inbox privacy and lifecycle surface, so v3.6 is again the current
-source candidate. These event and artifact counts are not token measures,
-mathematical scores, correctness evidence, or an RH-proof claim.
+effect. These event and artifact counts are not token measures, mathematical
+scores, correctness evidence, or an RH-proof claim.
