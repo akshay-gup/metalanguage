@@ -6,11 +6,13 @@ Open ended RSI
 
 The Codex/open-ended compatibility path is restored from outer source commit
 `43ec789` (the last material v1 source used through historical task index 9).
-It uses the exact 4,011-byte bootstrap `seeds/bootstrap/README.md`, the
+It uses the bootstrap `seeds/bootstrap/README.md`, the
 71-byte `read-readme` base instruction, independent linked Git worktrees and
 `rollout/...` branches, copied child workspaces, and serial supervisor merges.
 Uncommitted archive edits are discarded; conflicting branches are retained but
-not merged. There is no peer-messaging tool or supervisor message bus.
+not merged. There is no peer-message bus, automatic delivery turn, polling
+protocol, broadcast, store, or cursor. Metalanguage v3.7 adds only the direct,
+pull-based private inbox described below to Codex/open-ended research turns.
 
 OpenCode remains an explicitly selected, separate backend. Its adapter,
 protocol metadata, and containment do not alter the Codex request, workspace,
@@ -63,11 +65,12 @@ take precedence over values in `.env`.
   3. reserve one deterministic next-iteration child opportunity for each source rollout, keyed by `source_rollout_index` and the same `slot_index`,
   3.5. expose a shared cross-rollout workspace at `--rollout-temp-root/shared_workspace` where rollouts can leave readable files for other rollouts (files written during the task batch are cleaned up after the batch; durable state can persist through a child workspace, committed archive artifact, solution, or later behavior); this filesystem visibility is the historical v1 behavior and is not a peer-messaging API,
   3.6. assign every rollout instance a UUID for provenance and isolated runtime state,
+  3.7. for Codex/open-ended research only, create each live rollout's private batch-local `messages/` inbox before workers launch; other named rollouts can place direct messages there only through `send_message(recipient, message)`, and recipients read files with ordinary filesystem tools if desired,
   4. expose `archive/world_repo` by default as the durable cross-lineage Git archive available to every rollout (override with `--archive-repo-dir`),
      using a per-rollout temporary worktree so only committed archive changes are merged back and uncommitted archive edits are discarded,
   5. inject the selected parent slot's stored prompt as the rollout's initial user text, copy that slot's inherited workspace directory into the rollout root and consume the slot workspace, and write `shared_workspace/BENCHMARK.md`; evaluated benchmark profiles also write their pool/catalog files, while the open-ended profile writes only the exact human-authored task; bootstrap rollouts receive root `README.md` as a neutral environment description and a short initial message stating that no task is assigned,
   6. register main-loop tools through the worker backend (OpenRouter tool payloads or Codex `DynamicToolSpec` entries), then run the worker with the inherited prompt and generated runtime context; operating doctrine is expected to come from the inherited prompt,
-     while `runtime.md` contains only generated paths, runtime IDs, the rollout's reserved child-slot index, and peer lists,
+     while `runtime.md` contains only generated paths, runtime IDs, the rollout's reserved child-slot index, peer lists, and, for the private-inbox profile, its own fixed human name and roster,
   7. for SuperGPQA, score answers submitted through `submit_solution(uuid, answer)`, grounding correctness against the private stored row selected by uuid; other profiles retain their own explicitly documented evaluation semantics,
   8. let each rollout spawn at most one child with `spawn_child(prompt, workspace_dir)`; failed validation or copying can be corrected and retried, and spawning returns feedback without stopping the parent rollout or batch,
   9. append run metadata to a growing JSONL log and print one-line summary per rollout.
@@ -86,7 +89,7 @@ take precedence over values in `.env`.
   - every rollout receives an internal `instance_uuid` recorded in progress logs, run logs, and benchmark events;
   - `submit_solution(uuid, answer)` scores immediately, returns `correct` and `reward`, and records `solution_scored` events;
   - there is no answer-file scoring fallback; a rollout that does not call `submit_solution` receives no solution score;
-  - rollouts can call `submit_solution(uuid, answer)` and `spawn_child(prompt, workspace_dir)` as applicable main-loop tools;
+  - rollouts can call `submit_solution(uuid, answer)` and `spawn_child(prompt, workspace_dir)` as applicable main-loop tools; Codex/open-ended research rollouts can also call `send_message(recipient, message)`;
   - `spawn_child` stores the required non-empty `prompt` in supervisor-side slot metadata as the child rollout's next initial user text;
   - `workspace_dir` is required and must be a workspace-local directory whose root contains a regular, non-symlinked, readable, non-blank UTF-8 `README.md`; `spawn_child` copies its contents into the reserved slot's inherited workspace, while additional files remain optional;
   - `workspace_dir` must be inside the rollout workspace and must not be the rollout root; after a successful spawn, the source directory is deleted when that parent rollout finishes, while failed attempts do not consume it;
@@ -146,6 +149,15 @@ uv run python -B main_loop.py \
   solved-item state, evaluator, score, reward, solved/failed/no-attempt label,
   or ranking. Generic rollout tools, child spawning, shared workspace,
   artifacts, and archive behavior are unchanged.
+- On the Codex backend only, each research rollout has one fixed human name by
+  rollout index: Daniel, Noah, Elizabeth, George, Eva, Eleanor, Zoe, and
+  Oliver. `send_message` accepts one other live name and a non-empty UTF-8
+  message. It atomically creates a unique sequence-and-sender file in that
+  recipient's private `messages/` inbox. Messages are never injected into
+  context, and there is no read, broadcast, polling, or delivery-turn API. The
+  supervisor imposes no message-size, per-sender, or per-batch message quota;
+  model turns and the filesystem provide the natural bounds. Stable Codex call
+  IDs are idempotent; without one, a retry may create another file.
 - Run records and one-line summaries say `evaluation=unconfigured`. Worker
   status, artifacts, archive activity, and child spawns remain lifecycle
   diagnostics and are not treated as proxy scores.
@@ -205,7 +217,8 @@ Useful flags:
 - `--codex-runner-bin PATH`: use an explicit prebuilt runner binary.
 - `--codex-home PATH`: choose the Codex auth/config directory.
 - `--codex-sandbox-mode read-only|workspace-write|danger-full-access`: choose the
-  rollout sandbox mode.
+  rollout sandbox mode. `danger-full-access` is rejected for Codex/open-ended
+  private-inbox turns because it cannot enforce inbox privacy.
 - `--codex-base-instructions-mode read-readme|codex`: choose whether Codex uses
   the fixed inherited-packet scaffold instruction (`read-readme`, the default)
   or its model-catalog base instructions (`codex`).
@@ -222,6 +235,15 @@ uv run python -B main_loop.py \
   --step \
   --num-rollouts 8
 ```
+
+For Codex/open-ended research, the runner applies an exact read deny to every
+sibling `messages/` directory while leaving ordinary sibling filesystem
+visibility unchanged. A rollout can read its own inbox but cannot write,
+overwrite, delete, enumerate, or read another rollout's inbox. Inbox contents
+are excluded from child workspaces and episode outputs and are removed with the
+batch workspaces. Resolver turns expose neither `spawn_child` nor
+`send_message`. ARC, SuperGPQA, controls, OpenCode, OpenRouter, and other
+unsupported paths expose no messaging tool.
 
 ### OpenCode rollout backend
 
