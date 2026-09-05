@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 use std::collections::HashMap;
 use std::fs;
 use std::fs::OpenOptions;
@@ -54,7 +56,6 @@ use codex_protocol::dynamic_tools::DynamicToolResponse;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::TurnItem;
-use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::FileSystemAccessMode;
 use codex_protocol::permissions::FileSystemPath;
@@ -91,6 +92,7 @@ struct RunnerRequest {
     sandbox_mode: Option<String>,
     workspace_roots: Option<Vec<PathBuf>>,
     additional_writable_roots: Option<Vec<PathBuf>>,
+    shared_archives_root: PathBuf,
     spawn_child_handler_command: Option<Vec<String>>,
     mcp_servers: Option<HashMap<String, Value>>,
     sensitive_mcp_tools: Option<Vec<McpToolSelector>>,
@@ -164,42 +166,13 @@ async fn run_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
 }
 
 async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
-    let resolution_phase = request.resolution_phase.unwrap_or(false);
     let persist_session = request.persist_session.unwrap_or(false);
-    if resolution_phase && request.resume_rollout_path.is_none() {
-        bail!("conflict resolution requires resume_rollout_path");
-    }
-    if resolution_phase
-        && (request
-            .expected_thread_id
-            .as_deref()
-            .is_none_or(str::is_empty)
-            || request
-                .expected_session_id
-                .as_deref()
-                .is_none_or(str::is_empty))
+    if request.resume_rollout_path.is_some()
+        || request.expected_thread_id.is_some()
+        || request.expected_session_id.is_some()
+        || request.resolution_phase.is_some()
     {
-        bail!("conflict resolution requires exact thread and session ids");
-    }
-    if request.resume_rollout_path.is_some() && !resolution_phase {
-        bail!("Codex resume is restricted to conflict resolution");
-    }
-    if resolution_phase && persist_session {
-        bail!("conflict resolution cannot request research-session persistence");
-    }
-    if resolution_phase && request.spawn_child_handler_command.is_some() {
-        bail!("spawn_child handler is forbidden during conflict resolution");
-    }
-    if resolution_phase && request.private_inbox.is_some() {
-        bail!("private inbox is forbidden during conflict resolution");
-    }
-    if resolution_phase
-        && request
-            .mcp_servers
-            .as_ref()
-            .is_some_and(|value| !value.is_empty())
-    {
-        bail!("MCP servers are forbidden during conflict resolution");
+        bail!("legacy conflict-resolution requests are incompatible with Metalanguage v3.9");
     }
     let cwd = normalize_existing_path(&request.cwd).context("resolve cwd")?;
     let codex_home = match request.codex_home {
@@ -214,6 +187,11 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
     let additional_writable_roots =
         normalize_paths(request.additional_writable_roots.unwrap_or_default())?;
     let additional_writable_root_overrides = absolute_paths(&additional_writable_roots)?;
+    let shared_archives_root = AbsolutePathBuf::from_absolute_path(
+        normalize_existing_path(&request.shared_archives_root)
+            .context("resolve shared_archives_root")?,
+    )
+    .context("convert shared_archives_root")?;
     let private_inbox = normalize_private_inbox(request.private_inbox.as_ref())?;
     let private_read_denials = normalize_private_evidence_protection(
         request.private_evidence_protection.as_ref(),
@@ -222,6 +200,9 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
     if private_inbox.is_some() && private_read_denials.is_empty() {
         bail!("private inbox requires private evidence protection");
     }
+    if private_inbox.is_none() && !private_read_denials.is_empty() {
+        bail!("private evidence protection requires a private inbox in Metalanguage v3.9");
+    }
     if private_inbox.is_some() && request.spawn_child_handler_command.is_none() {
         bail!("private inbox requires the central dynamic-tool handler");
     }
@@ -229,6 +210,7 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
     let (sandbox_mode_override, permission_profile_override) = sandbox_configuration(
         sandbox_mode,
         &additional_writable_root_overrides,
+        &shared_archives_root,
         private_inbox.as_ref(),
         &private_read_denials,
     )?;
@@ -243,8 +225,8 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
         approval_policy: Some(AskForApproval::Never),
         sandbox_mode: sandbox_mode_override,
         permission_profile: permission_profile_override,
-        tools_web_search_request: Some(!resolution_phase),
-        ephemeral: Some(!(persist_session || request.resume_rollout_path.is_some())),
+        tools_web_search_request: Some(true),
+        ephemeral: Some(!persist_session),
         workspace_roots: Some(workspace_root_overrides),
         additional_writable_roots,
         codex_self_exe: arg0_paths.codex_self_exe.clone(),
@@ -310,6 +292,7 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
         .features
         .disable(Feature::MultiAgentV2)
         .context("disable Codex multi-agent feature")?;
+    config.agents_enabled = false;
 
     let state_db = init_state_db(&config).await;
     let auth_manager =
@@ -356,27 +339,11 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
         /*external_time_provider*/ None,
     );
 
-    let resumed = request.resume_rollout_path.is_some();
     let NewThread {
         thread_id,
         thread,
         session_configured,
-    } = if let Some(rollout_path) = request.resume_rollout_path.as_ref() {
-        let rollout_path =
-            normalize_existing_path(rollout_path).context("resolve resume_rollout_path")?;
-        let sanitized_rollout = rollout_without_dynamic_tools(&rollout_path)
-            .context("prepare conflict-resolution rollout")?;
-        thread_manager
-            .resume_thread_from_rollout(
-                config,
-                sanitized_rollout.path.clone(),
-                Arc::clone(&auth_manager),
-                None,
-                ClientMcpExtensions::default(),
-            )
-            .await
-            .context("resume Codex thread from rollout")?
-    } else {
+    } = {
         let mut start_options = StartThreadOptions::new(config);
         start_options.dynamic_tools = metalanguage_dynamic_tools(private_inbox.as_ref());
         thread_manager
@@ -385,21 +352,10 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
             .context("start Codex thread")?
     };
 
-    if let Some(expected) = request.expected_thread_id.as_deref()
-        && thread_id.to_string() != expected
-    {
-        bail!("resumed Codex thread id does not match expected thread id");
-    }
-    if let Some(expected) = request.expected_session_id.as_deref()
-        && session_configured.session_id.to_string() != expected
-    {
-        bail!("resumed Codex session id does not match expected session id");
-    }
-
     emit(json!({
         "event": "thread_started",
-        "runner_phase": if resolution_phase { "conflict_resolution" } else { "research" },
-        "resumed": resumed,
+        "runner_phase": "research",
+        "resumed": false,
         "thread_id": thread_id.to_string(),
         "session_id": session_configured.session_id.to_string(),
         "model": session_configured.model,
@@ -421,7 +377,6 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
         prompt,
         spawn_child_handler_command,
         sensitive_tools,
-        resolution_phase,
         private_inbox.is_some(),
     )
     .await;
@@ -474,7 +429,6 @@ async fn run_turn(
     prompt: String,
     spawn_child_handler_command: Option<Vec<String>>,
     sensitive_tools: Vec<McpToolSelector>,
-    resolution_phase: bool,
     private_inbox_enabled: bool,
 ) -> anyhow::Result<()> {
     let submission = thread
@@ -530,44 +484,36 @@ async fn run_turn(
                 }))?;
             }
             EventMsg::ExecCommandBegin(event) => {
-                let mut payload = json!({
+                emit(json!({
                     "event": "tool_begin",
                     "tool": "exec_command",
                     "call_id": event.call_id,
                     "turn_id": event.turn_id,
                     "cwd": event.cwd.to_string(),
-                });
-                if !resolution_phase {
-                    payload["command"] = json!(event.command);
-                }
-                emit(payload)?;
+                    "command": event.command,
+                }))?;
             }
             EventMsg::ExecCommandOutputDelta(event) => {
-                if !resolution_phase {
-                    let text = String::from_utf8_lossy(&event.chunk).to_string();
-                    emit(json!({
-                        "event": "tool_output_delta",
-                        "tool": "exec_command",
-                        "call_id": event.call_id,
-                        "stream": exec_output_stream_name(&event.stream),
-                        "text": text,
-                    }))?;
-                }
+                let text = String::from_utf8_lossy(&event.chunk).to_string();
+                emit(json!({
+                    "event": "tool_output_delta",
+                    "tool": "exec_command",
+                    "call_id": event.call_id,
+                    "stream": exec_output_stream_name(&event.stream),
+                    "text": text,
+                }))?;
             }
             EventMsg::TerminalInteraction(event) => {
-                let mut payload = json!({
+                emit(json!({
                     "event": "terminal_interaction",
                     "tool": "exec_command",
                     "call_id": event.call_id,
                     "process_id": event.process_id,
-                });
-                if !resolution_phase {
-                    payload["stdin"] = json!(event.stdin);
-                }
-                emit(payload)?;
+                    "stdin": event.stdin,
+                }))?;
             }
             EventMsg::ExecCommandEnd(event) => {
-                let mut payload = json!({
+                emit(json!({
                     "event": "tool_end",
                     "tool": "exec_command",
                     "call_id": event.call_id,
@@ -576,11 +522,8 @@ async fn run_turn(
                     "exit_code": event.exit_code,
                     "status": format!("{:?}", event.status),
                     "duration_ms": event.duration.as_millis(),
-                });
-                if !resolution_phase {
-                    payload["command"] = json!(event.command);
-                }
-                emit(payload)?;
+                    "command": event.command,
+                }))?;
             }
             EventMsg::PatchApplyBegin(event) => {
                 emit(json!({
@@ -612,17 +555,7 @@ async fn run_turn(
                 }))?;
             }
             EventMsg::McpToolCallBegin(event) => {
-                if resolution_phase {
-                    emit(json!({
-                        "event": "tool_begin",
-                        "tool": event.invocation.tool,
-                        "namespace": format!("mcp__{}", event.invocation.server),
-                        "call_id": event.call_id,
-                        "arguments": {"redacted": true},
-                    }))?;
-                } else {
-                    emit(logged_mcp_tool_begin_event(event, &sensitive_tools))?;
-                }
+                emit(logged_mcp_tool_begin_event(event, &sensitive_tools))?;
             }
             EventMsg::McpToolCallEnd(event) => {
                 emit(logged_mcp_tool_end_event(event))?;
@@ -637,8 +570,7 @@ async fn run_turn(
                         "item_id": message.id,
                         "text": text,
                     }))?;
-                } else if !resolution_phase
-                    && let Some(notification) = mapped_item_notification(
+                } else if let Some(notification) = mapped_item_notification(
                         &EventMsg::ItemCompleted(event.clone()),
                         thread_id,
                         current_turn_id.as_deref(),
@@ -716,16 +648,15 @@ async fn run_turn(
                     "call_id": request.call_id,
                     "turn_id": request.turn_id,
                 });
-                if !resolution_phase && request.tool != "send_message" {
+                if request.tool != "send_message" {
                     payload["arguments"] = request.arguments.clone();
-                } else if request.tool == "send_message" {
+                } else {
                     payload["arguments"] = json!({"redacted": true});
                 }
                 emit(payload)?;
-                let response = handle_dynamic_tool_for_phase(
+                let response = handle_metalanguage_dynamic_tool(
                     request,
                     spawn_child_handler_command.as_deref(),
-                    resolution_phase,
                     private_inbox_enabled,
                 );
                 emit(json!({
@@ -922,25 +853,6 @@ fn handle_metalanguage_dynamic_tool(
             json!({"error": "unsupported dynamic tool", "tool": other}),
         ),
     }
-}
-
-fn handle_dynamic_tool_for_phase(
-    request: &DynamicToolCallRequest,
-    spawn_child_handler_command: Option<&[String]>,
-    resolution_phase: bool,
-    private_inbox_enabled: bool,
-) -> DynamicToolResponse {
-    if resolution_phase {
-        return dynamic_tool_json_response(
-            false,
-            spawn_child_failure(
-                "dynamic_tools_disabled_during_conflict_resolution",
-                "dynamic tools are disabled during conflict resolution",
-                false,
-            ),
-        );
-    }
-    handle_metalanguage_dynamic_tool(request, spawn_child_handler_command, private_inbox_enabled)
 }
 
 fn handle_spawn_child_tool(
@@ -1191,16 +1103,6 @@ fn agent_message_text(content: &[AgentMessageContent]) -> String {
         .collect::<String>()
 }
 
-struct TemporaryRolloutCopy {
-    path: PathBuf,
-}
-
-impl Drop for TemporaryRolloutCopy {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
 fn unique_private_temp_path(parent: &Path, prefix: &str) -> anyhow::Result<PathBuf> {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1224,28 +1126,6 @@ fn write_private_file_new(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
         .context("write private temporary file")?;
     file.sync_all().context("sync private temporary file")?;
     Ok(())
-}
-
-fn rollout_without_dynamic_tools(source: &Path) -> anyhow::Result<TemporaryRolloutCopy> {
-    let contents = fs::read_to_string(source).context("read rollout for conflict resolution")?;
-    let (first_line, remainder) = contents.split_once('\n').unwrap_or((contents.as_str(), ""));
-    let mut metadata: Value =
-        serde_json::from_str(first_line).context("parse rollout session metadata")?;
-    if metadata.get("type") != Some(&json!("session_meta"))
-        || !metadata.get("payload").is_some_and(Value::is_object)
-    {
-        bail!("rollout does not begin with session metadata");
-    }
-    metadata["payload"]["dynamic_tools"] = json!([]);
-    let mut sanitized = serde_json::to_string(&metadata)?;
-    sanitized.push('\n');
-    sanitized.push_str(remainder);
-    if !remainder.is_empty() && !sanitized.ends_with('\n') {
-        sanitized.push('\n');
-    }
-    let path = unique_private_temp_path(&std::env::temp_dir(), "resolver-rollout")?;
-    write_private_file_new(&path, sanitized.as_bytes())?;
-    Ok(TemporaryRolloutCopy { path })
 }
 
 fn redact_private_message_payload(value: &mut Value) -> usize {
@@ -1480,59 +1360,6 @@ mod tests {
     }
 
     #[test]
-    fn conflict_resolution_fails_spawn_child_closed() {
-        let request = DynamicToolCallRequest {
-            call_id: "spawn-attempt".to_string(),
-            turn_id: "resolution-turn".to_string(),
-            started_at_ms: 0,
-            namespace: None,
-            tool: "spawn_child".to_string(),
-            arguments: json!({"prompt": "blocked", "workspace_dir": "child"}),
-        };
-        let unavailable_handler = vec!["/handler/must/not/run".to_string()];
-        let response = handle_dynamic_tool_for_phase(
-            &request,
-            Some(&unavailable_handler),
-            /*resolution_phase*/ true,
-            /*private_inbox_enabled*/ false,
-        );
-        assert!(!response.success);
-        let DynamicToolCallOutputContentItem::InputText { text } = &response.content_items[0]
-        else {
-            panic!("conflict-resolution tool failure must be text JSON");
-        };
-        let payload: Value = serde_json::from_str(text).expect("parse tool failure payload");
-        assert_eq!(
-            payload["error_code"],
-            "dynamic_tools_disabled_during_conflict_resolution"
-        );
-        assert_eq!(payload["child_spawned"], false);
-        assert_eq!(payload["retryable"], false);
-    }
-
-    #[test]
-    fn conflict_resolution_fails_send_message_closed_without_body_echo() {
-        let request = DynamicToolCallRequest {
-            call_id: "message-attempt".to_string(),
-            turn_id: "resolution-turn".to_string(),
-            started_at_ms: 0,
-            namespace: None,
-            tool: "send_message".to_string(),
-            arguments: json!({
-                "recipient": "Noah",
-                "message": PRIVATE_MESSAGE_SENTINEL,
-            }),
-        };
-        let response = handle_dynamic_tool_for_phase(
-            &request, None, /*resolution_phase*/ true, /*private_inbox_enabled*/ false,
-        );
-        assert!(!response.success);
-        let serialized = serde_json::to_string(&response).expect("serialize response");
-        assert!(!serialized.contains(PRIVATE_MESSAGE_SENTINEL));
-        assert!(serialized.contains("dynamic_tools_disabled_during_conflict_resolution"));
-    }
-
-    #[test]
     fn private_message_items_are_omitted_from_runner_notifications() {
         let item = item_completed(TurnItem::DynamicToolCall(DynamicToolCallItem {
             id: "message-call".to_string(),
@@ -1554,7 +1381,7 @@ mod tests {
     }
 
     #[test]
-    fn persisted_private_calls_are_redacted_and_resolver_copy_has_no_tools() {
+    fn persisted_private_calls_are_redacted() {
         let directory = TestDirectory::new("private-rollout");
         let rollout = directory.path().join("rollout.jsonl");
         let original = [
@@ -1602,11 +1429,6 @@ mod tests {
         let redacted = fs::read_to_string(&rollout).expect("read redacted rollout");
         assert!(!redacted.contains(PRIVATE_MESSAGE_SENTINEL));
 
-        let resolver_copy = rollout_without_dynamic_tools(&rollout).expect("create resolver copy");
-        let copied = fs::read_to_string(&resolver_copy.path).expect("read resolver copy");
-        let first_line = copied.lines().next().expect("resolver metadata");
-        let metadata: Value = serde_json::from_str(first_line).expect("parse resolver metadata");
-        assert_eq!(metadata["payload"]["dynamic_tools"], json!([]));
         assert!(redacted.contains("send_message"));
         assert_eq!(
             fs::read_to_string(&rollout).expect("research rollout remains present"),
@@ -1638,7 +1460,8 @@ mod tests {
         };
         let (_, daniel_profile) = sandbox_configuration(
             SandboxMode::WorkspaceWrite,
-            &[daniel_write_root],
+            std::slice::from_ref(&daniel_write_root),
+            &daniel_write_root,
             Some(&daniel_private),
             &[],
         )
@@ -1660,7 +1483,8 @@ mod tests {
         };
         let (_, noah_profile) = sandbox_configuration(
             SandboxMode::WorkspaceWrite,
-            &[noah_write_root],
+            std::slice::from_ref(&noah_write_root),
+            &noah_write_root,
             Some(&noah_private),
             &[],
         )
@@ -1671,47 +1495,6 @@ mod tests {
         assert!(noah_policy.can_read_path_with_cwd(&noah_message, &noah));
         assert!(!noah_policy.can_read_path_with_cwd(&daniel_message, &noah));
         assert!(noah_policy.can_read_path_with_cwd(&noah_public, &noah));
-    }
-
-    #[test]
-    fn resolver_evidence_policy_denies_sessions_without_enabling_message_tools() {
-        let directory = TestDirectory::new("private-resolver-policy");
-        let workdir = directory.path().join("workdir");
-        let codex_home = directory.path().join("codex-home");
-        let sessions = codex_home.join("sessions");
-        let ordinary = directory.path().join("ordinary.txt");
-        fs::create_dir_all(&workdir).expect("create resolver workdir");
-        fs::create_dir_all(&sessions).expect("create sessions root");
-        fs::write(
-            sessions.join("other-rollout.jsonl"),
-            PRIVATE_MESSAGE_SENTINEL,
-        )
-        .expect("write private session");
-        fs::write(&ordinary, "ordinary data").expect("write ordinary file");
-
-        let request = PrivateEvidenceProtectionRequest {
-            capability_identity: PRIVATE_INBOX_CAPABILITY_IDENTITY.to_string(),
-            read_denied_paths: vec![sessions.clone()],
-        };
-        let denials = normalize_private_evidence_protection(Some(&request), &codex_home)
-            .expect("normalize resolver evidence protection");
-        let write_root =
-            AbsolutePathBuf::from_absolute_path(&workdir).expect("convert resolver write root");
-        let (_, profile) =
-            sandbox_configuration(SandboxMode::WorkspaceWrite, &[write_root], None, &denials)
-                .expect("build resolver evidence profile");
-        let policy = profile
-            .expect("resolver evidence profile")
-            .file_system_sandbox_policy();
-        assert!(!policy.can_read_path_with_cwd(&sessions.join("other-rollout.jsonl"), &workdir));
-        assert!(policy.can_read_path_with_cwd(&ordinary, &workdir));
-        assert_eq!(
-            metalanguage_dynamic_tools(None)
-                .iter()
-                .map(dynamic_tool_name)
-                .collect::<Vec<_>>(),
-            vec!["spawn_child"]
-        );
     }
 
     #[test]
@@ -1956,6 +1739,7 @@ fn normalize_private_read_denial(path: &Path) -> anyhow::Result<PathBuf> {
 fn sandbox_configuration(
     sandbox_mode: SandboxMode,
     additional_writable_roots: &[AbsolutePathBuf],
+    shared_archives_root: &AbsolutePathBuf,
     private_inbox: Option<&NormalizedPrivateInbox>,
     protected_read_paths: &[PathBuf],
 ) -> anyhow::Result<(Option<SandboxMode>, Option<PermissionProfile>)> {
@@ -1970,7 +1754,23 @@ fn sandbox_configuration(
                     /*exclude_slash_tmp*/ false,
                 )),
             ),
-            SandboxMode::ReadOnly | SandboxMode::DangerFullAccess => (Some(sandbox_mode), None),
+            SandboxMode::ReadOnly => {
+                let base_profile = PermissionProfile::read_only();
+                let network = base_profile.network_sandbox_policy();
+                let mut file_system = base_profile.file_system_sandbox_policy();
+                file_system.entries.push(FileSystemSandboxEntry::new(
+                    FileSystemPath::from(shared_archives_root.clone()),
+                    FileSystemAccessMode::Write,
+                ));
+                (
+                    None,
+                    Some(PermissionProfile::from_runtime_permissions(
+                        &file_system,
+                        network,
+                    )),
+                )
+            }
+            SandboxMode::DangerFullAccess => (Some(sandbox_mode), None),
         });
     }
     if matches!(sandbox_mode, SandboxMode::DangerFullAccess) {
@@ -1989,6 +1789,12 @@ fn sandbox_configuration(
     };
     let network = base_profile.network_sandbox_policy();
     let mut file_system = base_profile.file_system_sandbox_policy();
+    if matches!(sandbox_mode, SandboxMode::ReadOnly) {
+        file_system.entries.push(FileSystemSandboxEntry::new(
+            FileSystemPath::from(shared_archives_root.clone()),
+            FileSystemAccessMode::Write,
+        ));
+    }
     if let Some(private_inbox) = private_inbox {
         file_system.entries.push(FileSystemSandboxEntry::new(
             FileSystemPath::from(
