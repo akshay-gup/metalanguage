@@ -22,12 +22,12 @@ Files there are batch-local and may be removed at the end of the round.
 
 `messages/` is this program's private, batch-local inbox. Other named programs can place files there through `send_message`, but cannot inspect the inbox. `runtime.md` lists the names. Messages disappear at the end of the round.
 
-`archive/` is a private Git worktree for this rollout. Every
-program starts from the same committed base, but has its separate working tree,
-index, HEAD and rollout branch. Normal Git commands and commits operate on
-that branch. After the round, the supervisor considers committed branches in
-fixed rollout order. Conflicts leave branches available as refs. Staged,
-modified, deleted, untracked, and ignored archive content is discarded.
+`archives/` is a shared writable directory visible to all programs. It can
+contain any number of Git repositories. Each repository is a directory
+directly inside `archives/`. Changes are visible to everyone as they happen.
+
+After the round, anything outside a Git repository, repositories without
+commits, and uncommitted changes are discarded.
 
 Programs arriving later are separate from you. They cannot ask you what
 you meant or access reasoning that was never written down.
@@ -36,7 +36,7 @@ you meant or access reasoning that was never written down.
 
 `runtime.md` contains facts about the current run, including relevant paths.
 
-`archive/` contains committed state earlier programs left there. It may be
+`archives/` contains committed state earlier programs left there. It may be
 useful, wrong, unfinished, redundant, or based on an earlier state of the
 environment.
 
@@ -72,9 +72,9 @@ prompt or workspace of a rollout that did not spawn a child.
 
 For a spawned child, the inherited `README.md` should thematically replicate
 this environment description: finite lifetime, no assigned objective, optional
-human tasks, shared and durable state, the private inbox, and child-slot
-mechanics. Exact wording is not required; the description can be rewritten,
-extended, or evolved while preserving those themes.
+human tasks, batch-local shared state, shared durable archives, the private
+inbox, and child-slot mechanics. Exact wording is not required; the description
+can be rewritten, extended, or evolved while preserving those themes.
 
 ## Available Tools
 
