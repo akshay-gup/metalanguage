@@ -17,6 +17,7 @@ import fcntl
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -25,7 +26,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from utils.arc_agi_benchmark import ArcAgiBenchmarkDriver, ArcAgiConfig
 from utils.benchmark_events import new_instance_uuid
@@ -92,25 +93,6 @@ class RolloutResult:
     summary: str
     error: str | None = None
     benchmark_outcome: BenchmarkOutcome | None = None
-    archive_worktree: ArchiveWorktree | None = None
-    archive_conflict_resolver: ArchiveConflictResolver | None = None
-    progress_callback: Callable[..., None] | None = None
-
-
-@dataclass
-class ArchiveWorktree:
-    path: Path
-    branch: str
-    base_commit: str
-
-
-@dataclass
-class ArchiveConflictResolver:
-    backend: str
-    rollout_path: Path | None
-    thread_id: str | None
-    session_id: str | None
-    resume_turn: Callable[[], WorkerResult]
 
 
 @dataclass
@@ -121,6 +103,13 @@ class WorkerResult:
     error_code: str | int | None = None
     error_message: str | None = None
     metadata: dict[str, Any] | None = None
+
+
+class ArchiveCleanupError(RuntimeError):
+    def __init__(self, code: str, archive_name: str | None, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.archive_name = archive_name
 
 
 CONTINUATION_CONTEXT_FILENAME = "continuation_context.json"
@@ -135,16 +124,19 @@ DEFAULT_RUNTIME_ROOT = Path.home() / "Documents" / "metalanguage_runs"
 DEFAULT_CODEX_HOME = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
 BUNDLED_BOOTSTRAP_SEED_DIR = PROJECT_ROOT / "seeds" / "bootstrap"
 RUNTIME_BENCHMARK_IDENTITY_FILENAME = "runtime_benchmark.json"
+RUNTIME_ARCHIVE_IDENTITY_FILENAME = "runtime_archive.json"
+METALANGUAGE_VERSION = "3.9"
+SHARED_ARCHIVES_MODE = "shared-concurrent"
+SHARED_ARCHIVES_ROOT_NAME = "archives"
+SHARED_ARCHIVES_WORKSPACE_PATH = "archives"
+SHARED_ARCHIVES_CLEANUP_POLICY = "direct-child-git-head-v1"
+ARCHIVE_CLEANUP_STATE_FILENAME = "archive_cleanup_state.json"
 STABLE_SEED_FILENAMES = ("README.md",)
 READ_README_TASK_INSTRUCTIONS = (
     "This rollout has no assigned task. README.md describes its environment."
 )
 CODEX_READ_README_BASE_INSTRUCTIONS = READ_README_TASK_INSTRUCTIONS
 BENCHMARK_README_FILENAME = "BENCHMARK.md"
-CONFLICT_RESOLUTION_PROMPT = """The supervisor has materialized the actual current-canonical-versus-your-rollout Git conflict in the existing archive/ worktree from this exact rollout session. This is one final merge-resolution turn only.
-
-Inspect `git -C archive status`, resolve only the already-materialized conflicts, preserve compatible contributions from both parents, stage the resolution, and commit the merge. Do not start new research or alter unrelated workspace files. `spawn_child` is unavailable in this phase and no child slot may be created or changed. If you lack the original rollout context, cannot see the materialized merge, or cannot resolve it confidently, stop without committing and say so. After a successful merge commit, stop.
-"""
 
 
 def _strip_env_quotes(value: str) -> str:
@@ -261,16 +253,6 @@ def _run_bash_tool(
         }
 
 
-def _run_git(args: list[str], cwd: Path, *, check: bool = True) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", *args],
-        cwd=cwd,
-        text=True,
-        capture_output=True,
-        check=check,
-    )
-
-
 def _sanitize_for_path(value: str) -> str:
     safe = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in value.strip())
     return safe or "unknown_task"
@@ -304,7 +286,7 @@ def _format_runtime_markdown(
         "## Paths",
         "",
         "- seed_output: seed_output/",
-        "- archive: archive/",
+        "- archives: archives/",
         "- shared_workspace: shared_workspace/",
     ]
     if human_name is not None:
@@ -442,7 +424,7 @@ def _make_continuation_context(
     model: str,
     workdir: Path,
     seed_output_dir: Path,
-    archive_repo_dir: Path,
+    shared_archives_root: Path,
     shared_workspace_dir: Path,
     shared_workspace_write_log: Path,
     spawn_slots_path: Path,
@@ -473,7 +455,7 @@ def _make_continuation_context(
         "model": model,
         "workdir": str(workdir),
         "seed_output_dir": str(seed_output_dir),
-        "archive_repo_dir": str(archive_repo_dir),
+        **_shared_archives_metadata(shared_archives_root),
         "shared_workspace_dir": str(shared_workspace_dir),
         "shared_workspace_write_log": str(shared_workspace_write_log),
         "spawn_slots_path": str(spawn_slots_path),
@@ -864,7 +846,16 @@ def _resolve_runtime_root(value: str, *, create: bool = True) -> Path:
 def _runtime_benchmark(runtime_root: Path) -> str | None:
     identity_path = runtime_root / RUNTIME_BENCHMARK_IDENTITY_FILENAME
     if not identity_path.exists():
-        if not runtime_root.exists() or not any(runtime_root.iterdir()):
+        runtime_entries = (
+            [
+                path
+                for path in runtime_root.iterdir()
+                if path.name != RUNTIME_ARCHIVE_IDENTITY_FILENAME
+            ]
+            if runtime_root.exists()
+            else []
+        )
+        if not runtime_entries:
             return None
         # The only runtime format predating this marker is SuperGPQA.
         return "supergpqa"
@@ -903,12 +894,466 @@ def _claim_runtime_benchmark(runtime_root: Path, requested: str) -> None:
     )
 
 
+def _expected_runtime_archive_identity() -> dict[str, Any]:
+    return {
+        "format": "metalanguage-runtime-archive",
+        "version": 2,
+        "metalanguage_version": METALANGUAGE_VERSION,
+        "mode": SHARED_ARCHIVES_MODE,
+        "root": SHARED_ARCHIVES_ROOT_NAME,
+        "workspace_path": SHARED_ARCHIVES_WORKSPACE_PATH,
+        "cleanup_policy": SHARED_ARCHIVES_CLEANUP_POLICY,
+    }
+
+
+def _claim_runtime_archive_identity(runtime_root: Path) -> None:
+    identity_path = runtime_root / RUNTIME_ARCHIVE_IDENTITY_FILENAME
+    expected = _expected_runtime_archive_identity()
+    if identity_path.exists():
+        try:
+            recorded = json.loads(identity_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            raise SystemExit(
+                "error: runtime archive identity is unreadable; refusing to continue"
+            ) from None
+        if recorded != expected:
+            raise SystemExit(
+                "error: runtime archive identity is incompatible with Metalanguage v3.9"
+            )
+        return
+
+    if any(runtime_root.iterdir()):
+        raise SystemExit(
+            "error: existing runtime predates the Metalanguage v3.9 shared-archive "
+            "identity; use a fresh --runtime-root"
+        )
+    _write_json_file_atomic(identity_path, expected)
+
+
 def _resolve_runtime_path(value: str, runtime_root: Path, label: str) -> Path:
     raw_path = Path(value).expanduser()
     path = raw_path.resolve() if raw_path.is_absolute() else (runtime_root / raw_path).resolve()
     if not _is_within(path, runtime_root):
         raise ValueError(f"{label} must stay inside --runtime-root {runtime_root}: {path}")
     return path
+
+
+def _shared_archives_metadata(shared_archives_root: Path) -> dict[str, str]:
+    return {
+        "metalanguage_version": METALANGUAGE_VERSION,
+        "archive_mode": SHARED_ARCHIVES_MODE,
+        "shared_archives_root": str(shared_archives_root),
+        "shared_archives_root_name": SHARED_ARCHIVES_ROOT_NAME,
+        "shared_archives_workspace_path": SHARED_ARCHIVES_WORKSPACE_PATH,
+        "archive_cleanup_policy": SHARED_ARCHIVES_CLEANUP_POLICY,
+    }
+
+
+def _archive_record_resume_compatible(
+    record: dict[str, Any], archive_metadata: dict[str, str]
+) -> bool:
+    return all(record.get(key) == value for key, value in archive_metadata.items())
+
+
+def _remove_archive_entry(entry: Path, shared_archives_root: Path) -> None:
+    if entry.parent != shared_archives_root:
+        raise ArchiveCleanupError(
+            "archive_entry_outside_root",
+            entry.name,
+            "archive cleanup target is not a direct child of the shared root",
+        )
+    try:
+        mode = entry.lstat().st_mode
+    except FileNotFoundError:
+        return
+    try:
+        if stat.S_ISDIR(mode):
+            _assert_archive_tree_has_no_mounts(entry)
+            shutil.rmtree(entry)
+        else:
+            entry.unlink()
+    except OSError as exc:
+        raise ArchiveCleanupError(
+            "archive_entry_remove_failed",
+            entry.name,
+            f"could not remove archive entry {entry.name!r}",
+        ) from exc
+
+
+def _assert_archive_tree_has_no_mounts(root: Path) -> None:
+    pending = [root]
+    try:
+        while pending:
+            directory = pending.pop()
+            if directory.is_mount():
+                raise ArchiveCleanupError(
+                    "archive_mount_path_rejected",
+                    root.name,
+                    f"archive entry {root.name!r} contains a mount path",
+                )
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    if entry.is_symlink():
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        pending.append(Path(entry.path))
+    except ArchiveCleanupError:
+        raise
+    except OSError as exc:
+        raise ArchiveCleanupError(
+            "archive_tree_scan_failed",
+            root.name,
+            f"could not safely scan archive entry {root.name!r}",
+        ) from exc
+
+
+def _git_metadata_is_self_contained(git_dir: Path) -> bool:
+    if git_dir.is_symlink() or not git_dir.is_dir():
+        return False
+    pending = [git_dir]
+    try:
+        while pending:
+            directory = pending.pop()
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    if entry.is_symlink():
+                        return False
+                    if entry.is_dir(follow_symlinks=False):
+                        pending.append(Path(entry.path))
+    except OSError:
+        return False
+
+    if (git_dir / "commondir").is_symlink() or (git_dir / "commondir").exists():
+        return False
+    alternates = git_dir / "objects" / "info" / "alternates"
+    if alternates.is_symlink() or alternates.exists():
+        return False
+    config_path = git_dir / "config"
+    if config_path.is_symlink() or not config_path.is_file():
+        return False
+    try:
+        config_lines = config_path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return False
+    section = ""
+    for raw_line in config_lines:
+        line = raw_line.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip().lower()
+            if section.startswith(("include", "filter ")):
+                return False
+            continue
+        key = line.split("=", 1)[0].strip().lower()
+        if section == "core" and key in {
+            "attributesfile",
+            "fsmonitor",
+            "hookspath",
+            "worktree",
+        }:
+            return False
+        if section == "extensions" and key == "worktreeconfig":
+            return False
+
+    return True
+
+
+def _archive_git_environment() -> dict[str, str]:
+    environment = os.environ.copy()
+    for name in tuple(environment):
+        if name in {
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_COMMON_DIR",
+            "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_CONFIG_COUNT",
+        } or name.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")):
+            environment.pop(name, None)
+    environment.update(
+        {
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_LITERAL_PATHSPECS": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+            "LC_ALL": "C",
+        }
+    )
+    return environment
+
+
+def _run_archive_git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            [
+                "git",
+                f"--git-dir={repo / '.git'}",
+                f"--work-tree={repo}",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "core.fsmonitor=false",
+                *args,
+            ],
+            cwd=repo,
+            env=_archive_git_environment(),
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            check=False,
+        )
+    except OSError as exc:
+        raise ArchiveCleanupError(
+            "archive_git_command_failed",
+            repo.name,
+            f"could not inspect or normalize archive {repo.name!r}",
+        ) from exc
+
+
+def _git_reported_path(repo: Path, value: str) -> Path | None:
+    raw = value.strip()
+    if not raw:
+        return None
+    path = Path(raw)
+    return Path(os.path.abspath(path if path.is_absolute() else repo / path))
+
+
+def _is_self_contained_archive_repo(
+    repo: Path, shared_archives_root: Path
+) -> bool:
+    _assert_archive_tree_has_no_mounts(repo)
+    git_dir = repo / ".git"
+    if not _git_metadata_is_self_contained(git_dir):
+        return False
+    probes = {
+        "work_tree": _run_archive_git(repo, "rev-parse", "--show-toplevel"),
+        "git_dir": _run_archive_git(repo, "rev-parse", "--absolute-git-dir"),
+        "common_dir": _run_archive_git(
+            repo,
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-common-dir",
+        ),
+        "inside": _run_archive_git(repo, "rev-parse", "--is-inside-work-tree"),
+        "bare": _run_archive_git(repo, "rev-parse", "--is-bare-repository"),
+    }
+    if any(probe.returncode != 0 for probe in probes.values()):
+        return False
+    if repo.parent != shared_archives_root:
+        return False
+    return (
+        _git_reported_path(repo, probes["work_tree"].stdout) == repo
+        and _git_reported_path(repo, probes["git_dir"].stdout) == git_dir
+        and _git_reported_path(repo, probes["common_dir"].stdout)
+        == git_dir
+        and probes["inside"].stdout.strip() == "true"
+        and probes["bare"].stdout.strip() == "false"
+    )
+
+
+def cleanup_shared_archives(shared_archives_root: Path) -> dict[str, Any]:
+    if shared_archives_root.is_symlink() or not shared_archives_root.is_dir():
+        raise ArchiveCleanupError(
+            "shared_archives_root_invalid",
+            None,
+            "shared archives root changed identity before cleanup",
+        )
+    try:
+        root = shared_archives_root.resolve(strict=True)
+    except OSError as exc:
+        raise ArchiveCleanupError(
+            "shared_archives_root_invalid",
+            None,
+            "shared archives root changed identity before cleanup",
+        ) from exc
+    if root != shared_archives_root:
+        raise ArchiveCleanupError(
+            "shared_archives_root_invalid",
+            None,
+            "shared archives root changed identity before cleanup",
+        )
+
+    summary: dict[str, Any] = {
+        "entries_seen": 0,
+        "repositories_retained": 0,
+        "unborn_repositories_removed": 0,
+        "invalid_entries_removed": 0,
+    }
+    try:
+        entries = sorted(root.iterdir(), key=lambda entry: entry.name)
+    except OSError as exc:
+        raise ArchiveCleanupError(
+            "shared_archives_scan_failed",
+            None,
+            "could not scan the shared archives root",
+        ) from exc
+
+    for entry in entries:
+        summary["entries_seen"] += 1
+        try:
+            entry_mode = entry.lstat().st_mode
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise ArchiveCleanupError(
+                "archive_entry_inspect_failed",
+                entry.name,
+                f"could not inspect archive entry {entry.name!r}",
+            ) from exc
+
+        if not stat.S_ISDIR(entry_mode) or not _is_self_contained_archive_repo(
+            entry, root
+        ):
+            _remove_archive_entry(entry, root)
+            summary["invalid_entries_removed"] += 1
+            continue
+
+        head = _run_archive_git(entry, "rev-parse", "--verify", "HEAD^{commit}")
+        if head.returncode != 0 or not head.stdout.strip():
+            _remove_archive_entry(entry, root)
+            summary["unborn_repositories_removed"] += 1
+            continue
+
+        reset = _run_archive_git(entry, "reset", "--hard", "HEAD")
+        if reset.returncode != 0:
+            raise ArchiveCleanupError(
+                "archive_reset_failed",
+                entry.name,
+                f"could not reset committed archive {entry.name!r} to HEAD",
+            )
+        clean = _run_archive_git(entry, "clean", "-ffdx")
+        if clean.returncode != 0:
+            raise ArchiveCleanupError(
+                "archive_clean_failed",
+                entry.name,
+                f"could not remove uncommitted content from archive {entry.name!r}",
+            )
+        status = _run_archive_git(
+            entry,
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--ignored=matching",
+        )
+        if status.returncode != 0 or status.stdout:
+            raise ArchiveCleanupError(
+                "archive_not_clean",
+                entry.name,
+                f"archive {entry.name!r} remained dirty after cleanup",
+            )
+        head_after = _run_archive_git(entry, "rev-parse", "--verify", "HEAD^{commit}")
+        if (
+            head_after.returncode != 0
+            or head_after.stdout.strip() != head.stdout.strip()
+            or not _is_self_contained_archive_repo(entry, root)
+        ):
+            raise ArchiveCleanupError(
+                "archive_identity_changed",
+                entry.name,
+                f"archive {entry.name!r} changed identity during cleanup",
+            )
+        summary["repositories_retained"] += 1
+
+    return summary
+
+
+def _read_archive_cleanup_state(state_path: Path) -> dict[str, Any] | None:
+    if state_path.is_symlink():
+        raise SystemExit(
+            "error: archive cleanup state must not be a symbolic link"
+        )
+    if not state_path.exists():
+        return None
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        raise SystemExit(
+            "error: archive cleanup state is unreadable; refusing to launch rollouts"
+        ) from None
+    if not isinstance(state, dict) or state.get("status") not in {
+        "in_progress",
+        "completed",
+        "failed",
+    }:
+        raise SystemExit(
+            "error: archive cleanup state is invalid; refusing to launch rollouts"
+        )
+    if state.get("cleanup_policy") != SHARED_ARCHIVES_CLEANUP_POLICY:
+        raise SystemExit(
+            "error: archive cleanup state is incompatible with Metalanguage v3.9"
+        )
+    return state
+
+
+def _run_shared_archives_cleanup_boundary(
+    *,
+    shared_archives_root: Path,
+    state_path: Path,
+    progress_log_path: Path,
+    progress_log_lock: threading.Lock,
+    archive_metadata: dict[str, str],
+    round_metadata: dict[str, Any],
+    recovery: bool = False,
+) -> dict[str, Any]:
+    started = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "status": "in_progress",
+        "cleanup_policy": SHARED_ARCHIVES_CLEANUP_POLICY,
+        "recovery": recovery,
+        **round_metadata,
+    }
+    _write_json_file_atomic(state_path, started)
+    append_progress_log(
+        progress_log_path,
+        progress_log_lock,
+        {
+            **started,
+            "event": "archive_cleanup_started",
+            **archive_metadata,
+        },
+    )
+    try:
+        summary = cleanup_shared_archives(shared_archives_root)
+    except ArchiveCleanupError as exc:
+        failed = {
+            **started,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "status": "failed",
+            "error_code": exc.code,
+            "archive_name": exc.archive_name,
+        }
+        _write_json_file_atomic(state_path, failed)
+        append_progress_log(
+            progress_log_path,
+            progress_log_lock,
+            {
+                **failed,
+                "event": "archive_cleanup_failed",
+                **archive_metadata,
+            },
+        )
+        raise
+
+    completed = {
+        **started,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "status": "completed",
+        "summary": summary,
+    }
+    _write_json_file_atomic(state_path, completed)
+    append_progress_log(
+        progress_log_path,
+        progress_log_lock,
+        {
+            **completed,
+            "event": "archive_cleanup_completed",
+            **archive_metadata,
+        },
+    )
+    return summary
 
 
 def _configure_runtime_environment(
@@ -1484,6 +1929,9 @@ def _spawn_child_continuation(
                 "rollout_username": str(context["rollout_username"]),
                 "task_id": source_id,
                 "problem_uid": item_id,
+                **_shared_archives_metadata(
+                    Path(str(context["shared_archives_root"]))
+                ),
                 **payload,
             },
         )
@@ -1517,11 +1965,10 @@ def run_worker(
     model: str,
     workdir: Path,
     seed_output_dir: Path,
-    archive_repo_dir: Path,
+    shared_archives_root: Path,
     shared_workspace_dir: Path,
     worker_state_dir: Path,
     shared_workspace_write_log: Path,
-    shared_workspace_lock: threading.Lock,
     task_index: int,
     task_id: str,
     rollout_index: int,
@@ -1709,7 +2156,7 @@ def run_worker(
                     allowed_roots = [
                         workdir.resolve(),
                         seed_output_dir.resolve(),
-                        archive_repo_dir.resolve(),
+                        shared_archives_root.resolve(),
                         shared_workspace_dir.resolve(),
                     ]
                     safe_wd = str(workdir)
@@ -1719,42 +2166,39 @@ def run_worker(
                             break
                 except Exception:
                     safe_wd = str(workdir)
-                # A bash command can touch the shared workspace through absolute paths,
-                # so serialize command execution while diffing for reliable attribution.
-                with shared_workspace_lock:
-                    before_shared = _snapshot_workspace_files(shared_workspace_dir)
-                    tool_result = _run_bash_tool(
-                        command=command,
-                        working_directory=safe_wd,
-                        worker_state_dir=worker_state_dir,
-                        timeout_seconds=bash_timeout_seconds,
-                        rollout_username=rollout_username,
-                    )
-                    after_shared = _snapshot_workspace_files(shared_workspace_dir)
-                    shared_events = _shared_workspace_events(
-                        before=before_shared,
-                        after=after_shared,
-                        task_index=task_index,
-                        task_id=task_id,
-                        rollout_index=rollout_index,
-                        rollout_username=rollout_username,
-                        command_index=command_index,
-                        command=command,
-                        working_directory=safe_wd,
-                    )
-                    _append_shared_attribution(
-                        durable_log_path=shared_workspace_write_log,
-                        events=shared_events,
-                    )
-                    if shared_events:
-                        tool_result["shared_workspace_writes"] = [
-                            {
-                                "event": event["event"],
-                                "path": event["path"],
-                                "rollout_username": rollout_username,
-                            }
-                            for event in shared_events
-                        ]
+                before_shared = _snapshot_workspace_files(shared_workspace_dir)
+                tool_result = _run_bash_tool(
+                    command=command,
+                    working_directory=safe_wd,
+                    worker_state_dir=worker_state_dir,
+                    timeout_seconds=bash_timeout_seconds,
+                    rollout_username=rollout_username,
+                )
+                after_shared = _snapshot_workspace_files(shared_workspace_dir)
+                shared_events = _shared_workspace_events(
+                    before=before_shared,
+                    after=after_shared,
+                    task_index=task_index,
+                    task_id=task_id,
+                    rollout_index=rollout_index,
+                    rollout_username=rollout_username,
+                    command_index=command_index,
+                    command=command,
+                    working_directory=safe_wd,
+                )
+                _append_shared_attribution(
+                    durable_log_path=shared_workspace_write_log,
+                    events=shared_events,
+                )
+                if shared_events:
+                    tool_result["shared_workspace_writes"] = [
+                        {
+                            "event": event["event"],
+                            "path": event["path"],
+                            "rollout_username": rollout_username,
+                        }
+                        for event in shared_events
+                    ]
                 if progress_callback is not None:
                     progress_callback(
                         "worker_tool_completed",
@@ -1790,8 +2234,7 @@ def run_codex_worker(
     worker_state_dir: Path,
     codex_home: Path,
     seed_output_dir: Path,
-    archive_repo_dir: Path,
-    archive_git_dir: Path | None,
+    shared_archives_root: Path,
     shared_workspace_dir: Path,
     rollout_username: str,
     timeout_seconds: int,
@@ -1815,8 +2258,7 @@ def run_codex_worker(
         worker_state_dir=worker_state_dir,
         codex_home=codex_home,
         seed_output_dir=seed_output_dir,
-        archive_repo_dir=archive_repo_dir,
-        archive_git_dir=archive_git_dir,
+        shared_archives_root=shared_archives_root,
         shared_workspace_dir=shared_workspace_dir,
         rollout_username=rollout_username,
         timeout_seconds=timeout_seconds,
@@ -1855,82 +2297,6 @@ def run_codex_worker(
         error_message=result.get("error_message"),
         metadata=metadata,
     )
-
-
-def resume_codex_conflict_resolution(
-    *,
-    runner_bin: Path,
-    model: str,
-    workdir: Path,
-    control_dir: Path,
-    worker_state_dir: Path,
-    codex_home: Path,
-    seed_output_dir: Path,
-    archive_repo_dir: Path,
-    archive_git_dir: Path,
-    shared_workspace_dir: Path,
-    rollout_username: str,
-    timeout_seconds: int,
-    sandbox_mode: str,
-    base_instructions: str | None,
-    rollout_path: Path,
-    thread_id: str,
-    session_id: str,
-    progress_callback: Any = None,
-    protect_private_evidence: bool = False,
-    private_evidence_read_denials: tuple[Path, ...] = (),
-) -> WorkerResult:
-    """Resume the exact research session for its single fail-closed merge turn."""
-
-    result = run_codex_rollout(
-        runner_bin=runner_bin,
-        model=model,
-        workdir=workdir,
-        control_dir=control_dir,
-        worker_state_dir=worker_state_dir,
-        codex_home=codex_home,
-        seed_output_dir=seed_output_dir,
-        archive_repo_dir=archive_repo_dir,
-        archive_git_dir=archive_git_dir,
-        shared_workspace_dir=shared_workspace_dir,
-        rollout_username=rollout_username,
-        timeout_seconds=timeout_seconds,
-        sandbox_mode=sandbox_mode,
-        initial_user_text=CONFLICT_RESOLUTION_PROMPT,
-        base_instructions=base_instructions,
-        progress_callback=progress_callback,
-        resume_rollout_path=rollout_path,
-        expected_thread_id=thread_id,
-        expected_session_id=session_id,
-        resolution_phase=True,
-        protect_private_evidence=protect_private_evidence,
-        private_evidence_read_denials=private_evidence_read_denials,
-    )
-    metadata = {
-        key: result.get(key)
-        for key in [
-            "thread_id",
-            "session_id",
-            "request_path",
-            "stderr_path",
-            "events_path",
-            "rollout_path",
-            "turn_count",
-            "tool_call_count",
-            "spawn_child_tool_call_count",
-            "turn_completed",
-        ]
-        if result.get(key) is not None
-    }
-    return WorkerResult(
-        final_text=str(result.get("final_text") or ""),
-        status=str(result.get("status") or "error"),
-        stop_reason=result.get("stop_reason"),
-        error_code=result.get("error_code"),
-        error_message=result.get("error_message"),
-        metadata=metadata,
-    )
-
 
 def run_opencode_worker(
     *,
@@ -2138,436 +2504,6 @@ def save_parent_pool(parent_pool_path: Path, parent_pool: list[dict[str, Any]]) 
     )
 
 
-def create_archive_worktree(
-    *,
-    archive_repo_dir: Path,
-    worktree_root: Path,
-    branch: str,
-    git_lock: threading.Lock,
-) -> ArchiveWorktree:
-    """Create an isolated archive worktree for one parallel rollout."""
-    worktree_root.mkdir(parents=True, exist_ok=True)
-    worktree_path = (worktree_root / _sanitize_for_path(branch)).resolve()
-    shutil.rmtree(worktree_path, ignore_errors=True)
-
-    with git_lock:
-        base_commit = _run_git(["rev-parse", "HEAD"], archive_repo_dir).stdout.strip()
-        _run_git(["worktree", "prune"], archive_repo_dir, check=False)
-        _run_git(["branch", "-D", branch], archive_repo_dir, check=False)
-        _run_git(["worktree", "add", "-B", branch, str(worktree_path), "HEAD"], archive_repo_dir)
-
-    return ArchiveWorktree(path=worktree_path, branch=branch, base_commit=base_commit)
-
-
-def finalize_archive_worktree(
-    *,
-    archive_repo_dir: Path,
-    worktree: ArchiveWorktree,
-    git_lock: threading.Lock,
-    conflict_resolver: ArchiveConflictResolver | None = None,
-) -> dict[str, Any]:
-    """Integrate one rollout, optionally giving its exact Codex session one conflict turn."""
-    result: dict[str, Any] = {
-        "archive_worktree_dir": str(worktree.path),
-        "archive_branch": worktree.branch,
-        "archive_base_commit": worktree.base_commit,
-        "archive_head_commit": worktree.base_commit,
-        "archive_committed": False,
-        "archive_merged": False,
-        "archive_resolution_attempted": False,
-        "archive_resolution_succeeded": False,
-        "archive_resolution_fell_back": False,
-        "archive_resolution_attempt_count": 0,
-        "archive_resolution_turn_count": 0,
-        "archive_resolution_tool_call_count": 0,
-        "archive_resolution_spawn_child_tool_call_count": 0,
-        "archive_resolution_status": "not_needed",
-    }
-    resolution_branch: str | None = None
-    resolution_is_clone = False
-    original_head = worktree.base_commit
-
-    def _ref_commit(branch: str) -> str | None:
-        completed = _run_git(
-            ["show-ref", "--hash", "--verify", f"refs/heads/{branch}"],
-            archive_repo_dir,
-            check=False,
-        )
-        return completed.stdout.strip() if completed.returncode == 0 else None
-
-    def _fallback(code: str) -> None:
-        result["archive_resolution_fell_back"] = True
-        result["archive_resolution_status"] = "fell_back"
-        result["archive_resolution_error"] = code
-
-    def _clean_temporary_resolution_state() -> None:
-        if not worktree.path.exists():
-            return
-        _run_git(["merge", "--abort"], worktree.path, check=False)
-        if resolution_is_clone:
-            _run_git(["reset", "--hard", "HEAD"], worktree.path, check=False)
-        else:
-            if _ref_commit(worktree.branch) != original_head:
-                _run_git(
-                    ["update-ref", f"refs/heads/{worktree.branch}", original_head],
-                    archive_repo_dir,
-                    check=False,
-                )
-            _run_git(["checkout", "-f", worktree.branch], worktree.path, check=False)
-            _run_git(["reset", "--hard", original_head], worktree.path, check=False)
-        _run_git(["clean", "-fd"], worktree.path, check=False)
-
-    try:
-        if worktree.path.exists():
-            _run_git(["reset", "--hard", "HEAD"], worktree.path, check=False)
-            _run_git(["clean", "-fd"], worktree.path, check=False)
-            original_head = _run_git(["rev-parse", "HEAD"], worktree.path).stdout.strip()
-            result["archive_head_commit"] = original_head
-            result["archive_original_ref_commit"] = original_head
-            result["archive_committed"] = original_head != worktree.base_commit
-
-            with git_lock:
-                merge_failed = False
-                if result["archive_committed"]:
-                    canonical_head = _run_git(["rev-parse", "HEAD"], archive_repo_dir).stdout.strip()
-                    result["archive_canonical_before"] = canonical_head
-                    merge: subprocess.CompletedProcess[str] | None = None
-                    if _ref_commit(worktree.branch) != original_head:
-                        merge_failed = True
-                        _fallback("original_ref_moved_before_integration")
-                    elif _run_git(["status", "--porcelain"], archive_repo_dir).stdout:
-                        merge_failed = True
-                        _fallback("canonical_dirty_before_integration")
-                    else:
-                        merge = _run_git(
-                            ["merge", "--no-ff", "--no-edit", worktree.branch],
-                            archive_repo_dir,
-                            check=False,
-                        )
-                        merge_failed = merge.returncode != 0
-                    if merge is not None and merge.returncode != 0:
-                        had_conflicts = bool(
-                            _run_git(["ls-files", "-u"], archive_repo_dir).stdout
-                        )
-                        _run_git(["merge", "--abort"], archive_repo_dir, check=False)
-                        result["archive_merge_error"] = (merge.stderr or merge.stdout).strip()
-                        if not had_conflicts:
-                            _fallback("archive_merge_failed_without_conflict")
-                        elif conflict_resolver is None:
-                            _fallback("resolver_unsupported")
-                        else:
-                            result["archive_resolution_attempted"] = True
-                            result["archive_resolution_attempt_count"] = 1
-                            result["archive_resolution_status"] = "attempted"
-                            missing_session = (
-                                conflict_resolver.backend != "codex"
-                                or conflict_resolver.rollout_path is None
-                                or not conflict_resolver.rollout_path.is_file()
-                                or not conflict_resolver.thread_id
-                                or not conflict_resolver.session_id
-                            )
-                            if missing_session:
-                                _fallback("resolver_session_missing_or_unsupported")
-                            elif (
-                                _run_git(["rev-parse", "HEAD"], archive_repo_dir).stdout.strip()
-                                != canonical_head
-                                or _run_git(["status", "--porcelain"], archive_repo_dir).stdout
-                            ):
-                                _fallback("canonical_not_restored_after_conflict")
-                            else:
-                                resolution_branch = (
-                                    "resolver/"
-                                    f"{_sanitize_for_path(worktree.branch)}-{original_head[:12]}"
-                                )
-                                # Preserve the session-visible archive path but replace the
-                                # linked worktree with a remote-free disposable repository.
-                                # The resumed model can write its merge objects without any
-                                # writable route to canonical refs or the canonical worktree.
-                                _run_git(
-                                    ["worktree", "remove", "--force", str(worktree.path)],
-                                    archive_repo_dir,
-                                    check=False,
-                                )
-                                shutil.rmtree(worktree.path, ignore_errors=True)
-                                clone = subprocess.run(
-                                    [
-                                        "git",
-                                        "clone",
-                                        "--no-local",
-                                        "--no-checkout",
-                                        str(archive_repo_dir),
-                                        str(worktree.path),
-                                    ],
-                                    capture_output=True,
-                                    text=True,
-                                )
-                                resolution_is_clone = clone.returncode == 0
-                                if resolution_is_clone:
-                                    _run_git(["remote", "remove", "origin"], worktree.path)
-                                    for config_key in ("user.name", "user.email"):
-                                        config_value = _run_git(
-                                            ["config", "--get", config_key],
-                                            archive_repo_dir,
-                                        ).stdout.strip()
-                                        _run_git(
-                                            ["config", config_key, config_value],
-                                            worktree.path,
-                                        )
-                                checkout = _run_git(
-                                    ["checkout", "-b", resolution_branch, canonical_head],
-                                    worktree.path,
-                                    check=False,
-                                ) if resolution_is_clone else clone
-                                materialized = _run_git(
-                                    ["merge", "--no-ff", "--no-commit", original_head],
-                                    worktree.path,
-                                    check=False,
-                                ) if checkout.returncode == 0 else checkout
-                                if (
-                                    checkout.returncode != 0
-                                    or materialized.returncode == 0
-                                    or not _run_git(["ls-files", "-u"], worktree.path).stdout
-                                ):
-                                    _fallback("conflict_materialization_failed")
-                                else:
-                                    try:
-                                        turn = conflict_resolver.resume_turn()
-                                    except BaseException:
-                                        turn = WorkerResult(
-                                            final_text="",
-                                            status="error",
-                                            stop_reason="resolver_exception",
-                                        )
-                                    turn_metadata = turn.metadata or {}
-                                    result["archive_resolution_turn_count"] = int(
-                                        turn_metadata.get("turn_count") or 0
-                                    )
-                                    result["archive_resolution_tool_call_count"] = int(
-                                        turn_metadata.get("tool_call_count") or 0
-                                    )
-                                    result["archive_resolution_spawn_child_tool_call_count"] = int(
-                                        turn_metadata.get("spawn_child_tool_call_count") or 0
-                                    )
-                                    if turn.status != "completed":
-                                        _fallback(
-                                            "resolver_timeout"
-                                            if turn.status == "timeout"
-                                            else "resolver_turn_failed"
-                                        )
-                                    elif not turn_metadata.get("turn_completed"):
-                                        _fallback("resolver_turn_incomplete")
-                                    elif (
-                                        turn_metadata.get("thread_id")
-                                        != conflict_resolver.thread_id
-                                        or turn_metadata.get("session_id")
-                                        != conflict_resolver.session_id
-                                    ):
-                                        _fallback("resolver_session_identity_mismatch")
-                                    elif _run_git(["ls-files", "-u"], worktree.path).stdout:
-                                        _fallback("resolver_left_unmerged_entries")
-                                    elif _run_git(["status", "--porcelain"], worktree.path).stdout:
-                                        _fallback("resolver_left_dirty_worktree")
-                                    else:
-                                        resolved_head = _run_git(
-                                            ["rev-parse", "HEAD"], worktree.path
-                                        ).stdout.strip()
-                                        parent_line = _run_git(
-                                            ["rev-list", "--parents", "-n", "1", resolved_head],
-                                            worktree.path,
-                                        ).stdout.split()
-                                        structurally_valid = (
-                                            len(parent_line) == 3
-                                            and parent_line[0] == resolved_head
-                                            and parent_line[1:] == [canonical_head, original_head]
-                                            and _ref_commit(worktree.branch) == original_head
-                                            and _run_git(
-                                                [
-                                                    "rev-parse",
-                                                    f"refs/heads/{resolution_branch}",
-                                                ],
-                                                worktree.path,
-                                                check=False,
-                                            ).stdout.strip()
-                                            == resolved_head
-                                            and _run_git(
-                                                ["symbolic-ref", "--short", "HEAD"],
-                                                worktree.path,
-                                                check=False,
-                                            ).stdout.strip()
-                                            == resolution_branch
-                                            and _run_git(
-                                                ["rev-parse", "HEAD"], archive_repo_dir
-                                            ).stdout.strip()
-                                            == canonical_head
-                                            and not _run_git(
-                                                ["status", "--porcelain"], archive_repo_dir
-                                            ).stdout
-                                        )
-                                        if not structurally_valid:
-                                            _fallback("resolver_merge_structure_invalid")
-                                        else:
-                                            fetched = _run_git(
-                                                [
-                                                    "fetch",
-                                                    "--no-tags",
-                                                    str(worktree.path),
-                                                    resolved_head,
-                                                ],
-                                                archive_repo_dir,
-                                                check=False,
-                                            )
-                                            integrate = _run_git(
-                                                ["merge", "--ff-only", resolved_head],
-                                                archive_repo_dir,
-                                                check=False,
-                                            ) if fetched.returncode == 0 else fetched
-                                            if (
-                                                integrate.returncode != 0
-                                                or _run_git(
-                                                    ["rev-parse", "HEAD"], archive_repo_dir
-                                                ).stdout.strip()
-                                                != resolved_head
-                                                or _run_git(
-                                                    ["status", "--porcelain"], archive_repo_dir
-                                                ).stdout
-                                            ):
-                                                _fallback("resolved_merge_integration_failed")
-                                            else:
-                                                result["archive_merged"] = True
-                                                result["archive_resolution_succeeded"] = True
-                                                result["archive_resolution_status"] = "succeeded"
-                                                result["archive_resolution_commit"] = resolved_head
-                                                merge_failed = False
-                    elif merge is not None:
-                        result["archive_merged"] = True
-
-                if merge_failed:
-                    _clean_temporary_resolution_state()
-                if not resolution_is_clone:
-                    _run_git(["worktree", "remove", "--force", str(worktree.path)], archive_repo_dir, check=False)
-                if not merge_failed:
-                    delete_args = ["branch", "-d" if result["archive_merged"] else "-D", worktree.branch]
-                    _run_git(delete_args, archive_repo_dir, check=False)
-                if resolution_branch is not None and not resolution_is_clone:
-                    _run_git(["branch", "-D", resolution_branch], archive_repo_dir, check=False)
-                if merge_failed:
-                    result["archive_original_ref_preserved"] = (
-                        _ref_commit(worktree.branch) == original_head
-                    )
-    finally:
-        if worktree.path.exists():
-            _clean_temporary_resolution_state()
-            if not resolution_is_clone:
-                with git_lock:
-                    _run_git(
-                        ["worktree", "remove", "--force", str(worktree.path)],
-                        archive_repo_dir,
-                        check=False,
-                    )
-                    if resolution_branch is not None:
-                        _run_git(["branch", "-D", resolution_branch], archive_repo_dir, check=False)
-            else:
-                _run_git(
-                    ["status", "--porcelain"],
-                    worktree.path,
-                    check=False,
-                )
-        shutil.rmtree(worktree.path, ignore_errors=True)
-
-    return result
-
-
-def discard_archive_worktree(
-    *,
-    archive_repo_dir: Path,
-    worktree_root: Path,
-    branch: str,
-    git_lock: threading.Lock,
-) -> None:
-    """Remove an unfinalized rollout worktree and branch after setup failure."""
-
-    worktree_path = (worktree_root / _sanitize_for_path(branch)).resolve()
-    try:
-        with git_lock:
-            _run_git(
-                ["worktree", "remove", "--force", str(worktree_path)],
-                archive_repo_dir,
-                check=False,
-            )
-            _run_git(["worktree", "prune"], archive_repo_dir, check=False)
-            _run_git(["branch", "-D", branch], archive_repo_dir, check=False)
-    finally:
-        shutil.rmtree(worktree_path, ignore_errors=True)
-        try:
-            worktree_root.rmdir()
-        except OSError:
-            pass
-
-
-def ensure_local_world_repo(repo_path: Path) -> None:
-    """Ensure a local persistent git repo exists with an initial commit."""
-    repo_path.mkdir(parents=True, exist_ok=True)
-    git_dir = repo_path / ".git"
-
-    if not git_dir.exists():
-        subprocess.run(
-            ["git", "init", "-b", "main"],
-            cwd=repo_path,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-
-    subprocess.run(
-        ["git", "config", "user.name", "metalanguage-bot"],
-        cwd=repo_path,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    subprocess.run(
-        ["git", "config", "user.email", "bot@local"],
-        cwd=repo_path,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
-    has_commits = subprocess.run(
-        ["git", "rev-parse", "--verify", "HEAD"],
-        cwd=repo_path,
-        capture_output=True,
-        text=True,
-    ).returncode == 0
-
-    if not has_commits:
-        genesis_file = repo_path / "WORLD.md"
-        genesis_file.write_text(
-            (
-                "# Local world repo\n\n"
-                "Persistent local git substrate for rollout lineage.\n\n"
-                "Archive edits persist only when they are committed to git. Each rollout "
-                "gets a temporary archive worktree; at finalization, committed changes are "
-                "merged back and uncommitted edits are discarded.\n"
-            ),
-            encoding="utf-8",
-        )
-        subprocess.run(
-            ["git", "add", "WORLD.md"],
-            cwd=repo_path,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        subprocess.run(
-            ["git", "commit", "-m", "world: genesis"],
-            cwd=repo_path,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-
-
 def _positive_int_argument(value: str) -> int:
     parsed = int(value)
     if parsed <= 0:
@@ -2728,11 +2664,6 @@ def parse_args() -> argparse.Namespace:
             "samples currently unsolved problems; ARC samples its reusable public "
             "environment catalog. Defaults to uncapped."
         ),
-    )
-    parser.add_argument(
-        "--archive-repo-dir",
-        default="archive/world_repo",
-        help="Durable cross-lineage Git archive exposed to every rollout.",
     )
     parser.add_argument(
         "--codex-home",
@@ -2963,10 +2894,11 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 "error: Codex open-ended private inbox requires read-only or workspace-write sandboxing"
             )
 
-    unresolved_runtime_root = _resolve_runtime_root(args.runtime_root, create=False)
-    _check_runtime_benchmark(unresolved_runtime_root, args.benchmark)
     _validate_benchmark_backend(args.benchmark, args.worker_backend)
-    open_ended_state_dir = unresolved_runtime_root / "logs" / "open_ended_task"
+    runtime_root = _resolve_runtime_root(args.runtime_root)
+    _claim_runtime_archive_identity(runtime_root)
+    _check_runtime_benchmark(runtime_root, args.benchmark)
+    open_ended_state_dir = runtime_root / "logs" / "open_ended_task"
     open_ended_task: OpenEndedTask | None = None
     if args.benchmark == "open-ended":
         try:
@@ -3143,7 +3075,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             opencode_configured_initial_prompt_sha256
         )
 
-    runtime_root = _resolve_runtime_root(args.runtime_root)
     _claim_runtime_benchmark(runtime_root, args.benchmark)
     runs_log_path = _resolve_runtime_path(args.runs_log, runtime_root, "--runs-log")
     progress_log_path = _resolve_runtime_path(args.progress_log, runtime_root, "--progress-log")
@@ -3153,7 +3084,12 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
     task_store_dir = _resolve_runtime_path(args.task_store_dir, runtime_root, "--task-store-dir")
     problem_queue_path = _resolve_runtime_path(args.problem_queue, runtime_root, "--problem-queue")
     arc_benchmark_state_path = runtime_root / "logs" / "arc_agi" / "benchmark_state.json"
-    archive_repo_dir = _resolve_runtime_path(args.archive_repo_dir, runtime_root, "--archive-repo-dir")
+    shared_archives_path = runtime_root / SHARED_ARCHIVES_ROOT_NAME
+    if shared_archives_path.is_symlink():
+        raise RuntimeError("fixed shared archives root must not be a symbolic link")
+    shared_archives_path.mkdir(parents=True, exist_ok=True)
+    shared_archives_root = shared_archives_path.resolve()
+    archive_mode_metadata = _shared_archives_metadata(shared_archives_root)
     bootstrap_seed_dir = _resolve_runtime_path(args.bootstrap_seed_dir, runtime_root, "--bootstrap-seed-dir")
     benchmark_events_path = (
         runtime_root / "logs" / "benchmark_events.jsonl"
@@ -3170,18 +3106,44 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
     )
     _ensure_runtime_bootstrap_seed(bootstrap_seed_dir)
 
-    ensure_local_world_repo(archive_repo_dir)
-    archive_git_lock = threading.Lock()
-
     rollout_root.mkdir(parents=True, exist_ok=True)
-    archive_worktree_root = rollout_root / "archive_worktrees"
-
     parent_pool_path = rollout_root / "latest_parent_pool.json"
     shared_workspace_dir = rollout_root / "shared_workspace"
     shared_workspace_dir.mkdir(parents=True, exist_ok=True)
     shared_workspace_write_log = rollout_root / "shared_workspace_writes.jsonl"
-    shared_workspace_lock = threading.Lock()
     progress_log_lock = threading.Lock()
+    archive_cleanup_state_path = (
+        runtime_root / "logs" / ARCHIVE_CLEANUP_STATE_FILENAME
+    )
+    archive_cleanup_state = _read_archive_cleanup_state(archive_cleanup_state_path)
+    if archive_cleanup_state is not None and archive_cleanup_state["status"] != "completed":
+        recovery_round_metadata = {
+            key: archive_cleanup_state[key]
+            for key in (
+                "benchmark",
+                "generation",
+                "seed",
+                "task_index",
+                "task_id",
+                "problem_uid",
+            )
+            if key in archive_cleanup_state
+        }
+        try:
+            _run_shared_archives_cleanup_boundary(
+                shared_archives_root=shared_archives_root,
+                state_path=archive_cleanup_state_path,
+                progress_log_path=progress_log_path,
+                progress_log_lock=progress_log_lock,
+                archive_metadata=archive_mode_metadata,
+                round_metadata=recovery_round_metadata,
+                recovery=True,
+            )
+        except ArchiveCleanupError as exc:
+            raise RuntimeError(
+                "Pending archive cleanup could not be completed safely: "
+                f"{exc.code}"
+            ) from exc
 
     parent_pool: list[dict[str, Any]] = []
 
@@ -3197,6 +3159,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 and rec.get("bootstrap_rollout_count", rec.get("num_rollouts"))
                 == args.num_rollouts
                 and _worker_backend_resume_compatible(rec, args)
+                and _archive_record_resume_compatible(rec, archive_mode_metadata)
             ):
                 return False
             if args.benchmark != "supergpqa":
@@ -3467,6 +3430,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                     "task_id": task_id,
                     **({"problem_uid": problem_uid} if has_problem_pool else {}),
                     **batch_reporting,
+                    **archive_mode_metadata,
                     "elapsed_seconds": round(time.monotonic() - started_at, 3),
                     **fields,
                 }
@@ -3497,19 +3461,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 ),
                 bootstrap_reinitialized=bootstrap_reinitialized,
             )
-            archive_worktree = create_archive_worktree(
-                archive_repo_dir=archive_repo_dir,
-                worktree_root=archive_worktree_root,
-                branch=f"rollout/{task_index:06d}-{rollout_index:03d}-{_sanitize_for_path(task_id)}",
-                git_lock=archive_git_lock,
-            )
-            archive_result: dict[str, Any] = {}
-            _progress(
-                "archive_worktree_created",
-                archive_worktree_dir=str(archive_worktree.path),
-                archive_branch=archive_worktree.branch,
-            )
-
             temp_dir = fixed_temp_dir / f"{task_index:06d}" / f"rollout_{rollout_index:03d}"
             if private_inbox is None:
                 shutil.rmtree(temp_dir, ignore_errors=True)
@@ -3563,9 +3514,9 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
 
             seed_output_dir = temp_dir / "seed_output"
             seed_output_dir.mkdir(parents=True, exist_ok=True)
-            archive_link = temp_dir / "archive"
+            archive_link = temp_dir / SHARED_ARCHIVES_WORKSPACE_PATH
             shared_workspace_link = temp_dir / "shared_workspace"
-            _replace_with_symlink(archive_link, archive_worktree.path)
+            _replace_with_symlink(archive_link, shared_archives_root)
             _replace_with_symlink(shared_workspace_link, shared_workspace_dir)
 
             runtime_file = temp_dir / "runtime.md"
@@ -3586,7 +3537,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 model=args.model,
                 workdir=temp_dir,
                 seed_output_dir=seed_output_dir,
-                archive_repo_dir=archive_worktree.path,
                 shared_workspace_dir=shared_workspace_dir,
                 shared_workspace_write_log=shared_workspace_write_log,
                 spawn_slots_path=spawn_slots_path,
@@ -3609,6 +3559,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 codex_sandbox_mode=args.codex_sandbox_mode,
                 codex_initial_prompt=args.codex_initial_prompt,
                 codex_base_instructions=codex_base_instructions,
+                shared_archives_root=shared_archives_root,
                 private_inbox=private_inbox,
             )
             planned_context_path = (
@@ -3745,8 +3696,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                             worker_state_dir=rollout_state_dir,
                             codex_home=codex_home,
                             seed_output_dir=seed_output_dir,
-                            archive_repo_dir=archive_worktree.path,
-                            archive_git_dir=archive_repo_dir / ".git",
+                            shared_archives_root=shared_archives_root,
                             shared_workspace_dir=shared_workspace_dir,
                             rollout_username=rollout_username,
                             timeout_seconds=args.worker_timeout_seconds,
@@ -3812,8 +3762,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                             sandbox_writable_roots=tuple(
                                 path
                                 for path in (
-                                    archive_worktree.path,
-                                    archive_repo_dir / ".git",
+                                    shared_archives_root,
                                     shared_workspace_dir,
                                 )
                                 if path is not None and path.exists()
@@ -3831,11 +3780,10 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                             model=args.model,
                             workdir=temp_dir,
                             seed_output_dir=seed_output_dir,
-                            archive_repo_dir=archive_worktree.path,
+                            shared_archives_root=shared_archives_root,
                             shared_workspace_dir=shared_workspace_dir,
                             worker_state_dir=rollout_state_dir,
                             shared_workspace_write_log=shared_workspace_write_log,
-                            shared_workspace_lock=shared_workspace_lock,
                             task_index=task_index,
                             task_id=task_id,
                             rollout_index=rollout_index,
@@ -3858,10 +3806,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                         error_message=str(exc),
                     )
             except BaseException as exc:
-                archive_result = {
-                    **archive_result,
-                    "archive_worker_error": f"{type(exc).__name__}: {exc}",
-                }
                 worker_result = WorkerResult(
                     final_text="",
                     status="error",
@@ -4199,7 +4143,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 "dataset_cache_dir": (
                     str(dataset_cache_dir) if args.benchmark == "supergpqa" else None
                 ),
-                **archive_result,
+                **archive_mode_metadata,
             }, args.worker_backend)
             if benchmark_outcome is not None:
                 record.update(benchmark_outcome.run_record)
@@ -4217,72 +4161,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 )
             if worker_result.status == "error":
                 summary += f" error={worker_result.stop_reason}"
-            conflict_resolver: ArchiveConflictResolver | None = None
-            if args.worker_backend == "codex" and args.benchmark == "open-ended":
-                worker_metadata = worker_result.metadata or {}
-                rollout_path_value = worker_metadata.get("rollout_path")
-                resolver_rollout_path = (
-                    Path(str(rollout_path_value)).expanduser().resolve()
-                    if rollout_path_value
-                    else None
-                )
-                resolver_thread_id = (
-                    str(worker_metadata.get("thread_id"))
-                    if worker_metadata.get("thread_id")
-                    else None
-                )
-                resolver_session_id = (
-                    str(worker_metadata.get("session_id"))
-                    if worker_metadata.get("session_id")
-                    else None
-                )
-
-                def _resume_resolution_turn() -> WorkerResult:
-                    if (
-                        codex_runner_bin is None
-                        or resolver_rollout_path is None
-                        or resolver_thread_id is None
-                        or resolver_session_id is None
-                    ):
-                        return WorkerResult(
-                            final_text="",
-                            status="error",
-                            stop_reason="resolver_session_missing",
-                        )
-                    return resume_codex_conflict_resolution(
-                        runner_bin=codex_runner_bin,
-                        model=args.model,
-                        workdir=temp_dir,
-                        control_dir=rollout_control_dir / "conflict_resolution",
-                        worker_state_dir=rollout_state_dir,
-                        codex_home=codex_home,
-                        seed_output_dir=seed_output_dir,
-                        archive_repo_dir=archive_worktree.path,
-                        archive_git_dir=archive_worktree.path / ".git",
-                        shared_workspace_dir=shared_workspace_dir,
-                        rollout_username=rollout_username,
-                        timeout_seconds=args.worker_timeout_seconds,
-                        sandbox_mode="workspace-write",
-                        base_instructions=codex_base_instructions,
-                        rollout_path=resolver_rollout_path,
-                        thread_id=resolver_thread_id,
-                        session_id=resolver_session_id,
-                        progress_callback=_progress,
-                        protect_private_evidence=private_inbox is not None,
-                        private_evidence_read_denials=(
-                            private_inbox.protected_read_paths
-                            if private_inbox is not None
-                            else ()
-                        ),
-                    )
-
-                conflict_resolver = ArchiveConflictResolver(
-                    backend="codex",
-                    rollout_path=resolver_rollout_path,
-                    thread_id=resolver_thread_id,
-                    session_id=resolver_session_id,
-                    resume_turn=_resume_resolution_turn,
-                )
             return RolloutResult(
                 rollout_index=rollout_index,
                 record=record,
@@ -4290,9 +4168,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 summary=summary,
                 error=worker_result.error_message if worker_result.status == "error" else None,
                 benchmark_outcome=benchmark_outcome,
-                archive_worktree=archive_worktree,
-                archive_conflict_resolver=conflict_resolver,
-                progress_callback=_progress,
             )
 
         shared_snapshot = _snapshot_workspace_files(shared_workspace_dir)
@@ -4313,15 +4188,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                         try:
                             results.append(future.result())
                         except BaseException as exc:
-                            discard_archive_worktree(
-                                archive_repo_dir=archive_repo_dir,
-                                worktree_root=archive_worktree_root,
-                                branch=(
-                                    f"rollout/{task_index:06d}-{rollout_index:03d}-"
-                                    f"{_sanitize_for_path(task_id)}"
-                                ),
-                                git_lock=archive_git_lock,
-                            )
                             append_progress_log(
                                 progress_log_path,
                                 progress_log_lock,
@@ -4339,6 +4205,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                                     "worker_status": "error",
                                     "worker_stop_reason": type(exc).__name__,
                                     "worker_error_message": str(exc),
+                                    **archive_mode_metadata,
                                 },
                             )
                             results.append(
@@ -4540,6 +4407,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                                             if args.benchmark == "supergpqa"
                                             else None
                                         ),
+                                        **archive_mode_metadata,
                                         **(
                                             {}
                                             if args.benchmark == "open-ended"
@@ -4572,61 +4440,30 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
         if private_inbox_configs:
             cleanup_private_inboxes(private_inbox_configs)
 
-        # Integrate only after every research turn and child-source consumption has
-        # finished, then process branches in deterministic rollout order.
-        for result in sorted(results, key=lambda item: item.rollout_index):
-            if result.archive_worktree is None:
-                continue
-            try:
-                archive_result = finalize_archive_worktree(
-                    archive_repo_dir=archive_repo_dir,
-                    worktree=result.archive_worktree,
-                    git_lock=archive_git_lock,
-                    conflict_resolver=result.archive_conflict_resolver,
-                )
-            except BaseException as exc:
-                archive_result = {
-                    "archive_worktree_dir": str(result.archive_worktree.path),
-                    "archive_branch": result.archive_worktree.branch,
-                    "archive_base_commit": result.archive_worktree.base_commit,
-                    "archive_committed": False,
-                    "archive_merged": False,
-                    "archive_resolution_attempted": False,
-                    "archive_resolution_succeeded": False,
-                    "archive_resolution_fell_back": True,
-                    "archive_resolution_status": "fell_back",
-                    "archive_resolution_error": "archive_finalize_exception",
-                    "archive_finalize_error": f"{type(exc).__name__}: {exc}",
-                }
-                if result.error is None:
-                    result.error = str(exc)
-            result.record.update(archive_result)
-            progress = result.progress_callback
-            if progress is not None:
-                if archive_result.get("archive_resolution_attempted"):
-                    progress(
-                        "archive_resolution_attempted",
-                        archive_branch=archive_result.get("archive_branch"),
-                        attempt_count=archive_result.get("archive_resolution_attempt_count"),
-                    )
-                if archive_result.get("archive_resolution_succeeded"):
-                    progress(
-                        "archive_resolution_succeeded",
-                        archive_branch=archive_result.get("archive_branch"),
-                        resolution_turn_count=archive_result.get(
-                            "archive_resolution_turn_count"
-                        ),
-                        resolution_tool_call_count=archive_result.get(
-                            "archive_resolution_tool_call_count"
-                        ),
-                    )
-                if archive_result.get("archive_resolution_fell_back"):
-                    progress(
-                        "archive_resolution_fell_back",
-                        archive_branch=archive_result.get("archive_branch"),
-                        error_code=archive_result.get("archive_resolution_error"),
-                    )
-                progress("archive_finalized", **archive_result)
+        cleanup_round_metadata = {
+            "benchmark": args.benchmark,
+            "generation": args.generation,
+            "seed": args.seed,
+            "task_index": task_index,
+            "task_id": task_id,
+            **({"problem_uid": problem_uid} if problem_uid is not None else {}),
+        }
+        try:
+            archive_cleanup_summary = _run_shared_archives_cleanup_boundary(
+                shared_archives_root=shared_archives_root,
+                state_path=archive_cleanup_state_path,
+                progress_log_path=progress_log_path,
+                progress_log_lock=progress_log_lock,
+                archive_metadata=archive_mode_metadata,
+                round_metadata=cleanup_round_metadata,
+            )
+        except ArchiveCleanupError as exc:
+            raise RuntimeError(
+                "Archive round-boundary cleanup failed closed: "
+                f"{exc.code}"
+            ) from exc
+        for result in results:
+            result.record["archive_cleanup"] = archive_cleanup_summary
 
         _cleanup_rollout_shared_writes(shared_workspace_dir, shared_snapshot)
 
@@ -4662,6 +4499,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                     "configured_problem_pool_size": args.problem_pool_size,
                     "problem_pool_count": problem_pool_count,
                     "benchmark_finalization": benchmark_finalization,
+                    **archive_mode_metadata,
                 },
             )
 
@@ -4687,6 +4525,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 "reinitialized_bootstrap_slot_count": reinitialized_bootstrap_count,
                 "parent_pool_count": len(parent_pool),
                 "parent_pool_path": str(parent_pool_path),
+                **archive_mode_metadata,
             },
         )
 
@@ -4715,6 +4554,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                     ],
                     "details": details,
                     "parent_pool_path": str(parent_pool_path),
+                    **archive_mode_metadata,
                 },
             )
             if args.fail_on_rollout_error:

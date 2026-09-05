@@ -57,14 +57,8 @@ class PrivateInboxConfig:
 def private_inbox_enabled(
     benchmark: str,
     worker_backend: str,
-    *,
-    resolution_phase: bool = False,
 ) -> bool:
-    return (
-        benchmark == "open-ended"
-        and worker_backend == "codex"
-        and not resolution_phase
-    )
+    return benchmark == "open-ended" and worker_backend == "codex"
 
 
 def initialize_private_inboxes(

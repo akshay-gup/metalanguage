@@ -191,35 +191,6 @@ def _terminate_runner_process(proc: subprocess.Popen[str], *, kill: bool) -> Non
             proc.terminate()
 
 
-def _resolve_git_dir(worktree: Path) -> Path | None:
-    dot_git = worktree / ".git"
-    if dot_git.is_dir():
-        return dot_git.resolve()
-    if not dot_git.is_file():
-        return None
-
-    try:
-        contents = dot_git.read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
-    prefix = "gitdir:"
-    if not contents.startswith(prefix):
-        return None
-
-    git_dir = Path(contents[len(prefix) :].strip())
-    if not git_dir.is_absolute():
-        git_dir = dot_git.parent / git_dir
-    return git_dir.resolve()
-
-
-def _append_unique_path(paths: list[str], path: Path | None) -> None:
-    if path is None:
-        return
-    resolved = str(path)
-    if resolved not in paths:
-        paths.append(resolved)
-
-
 def run_codex_rollout(
     *,
     runner_bin: Path,
@@ -229,8 +200,7 @@ def run_codex_rollout(
     worker_state_dir: Path,
     codex_home: Path,
     seed_output_dir: Path,
-    archive_repo_dir: Path,
-    archive_git_dir: Path | None,
+    shared_archives_root: Path,
     shared_workspace_dir: Path,
     rollout_username: str | None,
     timeout_seconds: int,
@@ -242,22 +212,12 @@ def run_codex_rollout(
     sensitive_mcp_tools: tuple[tuple[str, str], ...] = (),
     progress_callback: Callable[..., None] | None = None,
     persist_session: bool = False,
-    resume_rollout_path: Path | None = None,
-    expected_thread_id: str | None = None,
-    expected_session_id: str | None = None,
-    resolution_phase: bool = False,
     private_inbox: PrivateInboxConfig | None = None,
-    protect_private_evidence: bool = False,
-    private_evidence_read_denials: tuple[Path, ...] = (),
 ) -> dict[str, Any]:
     runner_bin = runner_bin.expanduser().resolve()
     if not runner_bin.exists():
         raise FileNotFoundError(f"Codex runner binary does not exist: {runner_bin}")
-    protect_private_evidence = protect_private_evidence or private_inbox is not None
-    if protect_private_evidence:
-        if resolution_phase:
-            if private_inbox is not None:
-                raise ValueError("private inbox is unavailable during conflict resolution")
+    if private_inbox is not None:
         if sandbox_mode == "danger-full-access":
             raise ValueError("private evidence requires a managed Codex sandbox")
         _require_runner_capability(
@@ -268,25 +228,21 @@ def run_codex_rollout(
     workspace_roots = [
         str(workdir),
         str(seed_output_dir),
-        str(archive_repo_dir),
+        str(shared_archives_root),
         str(shared_workspace_dir),
         str(worker_state_dir),
     ]
     additional_writable_roots = [
         str(seed_output_dir),
-        str(archive_repo_dir),
+        str(shared_archives_root),
         str(shared_workspace_dir),
         str(worker_state_dir),
     ]
-    # Linked archive worktrees write their index through the per-worktree
-    # gitdir and objects/refs through the persistent repository's common .git.
-    _append_unique_path(additional_writable_roots, _resolve_git_dir(archive_repo_dir))
-    _append_unique_path(additional_writable_roots, archive_git_dir)
-
     request = {
         "model": model,
         "cwd": str(workdir),
         "codex_home": str(codex_home),
+        "shared_archives_root": str(shared_archives_root),
         "initial_user_text": initial_user_text,
         "timeout_seconds": timeout_seconds,
         "sandbox_mode": sandbox_mode,
@@ -312,13 +268,9 @@ def run_codex_rollout(
                 for recipient, path in private_inbox.recipient_inboxes.items()
             },
         }
-    if protect_private_evidence:
+    if private_inbox is not None:
         read_denials = _codex_private_state_read_denials(codex_home)
-        for path in (
-            private_inbox.protected_read_paths
-            if private_inbox is not None
-            else private_evidence_read_denials
-        ):
+        for path in private_inbox.protected_read_paths:
             if path not in read_denials:
                 read_denials.append(path)
         request["private_evidence_protection"] = {
@@ -336,28 +288,6 @@ def run_codex_rollout(
         request["base_instructions"] = base_instructions
     if persist_session:
         request["persist_session"] = True
-    if resume_rollout_path is not None:
-        request["resume_rollout_path"] = str(resume_rollout_path.expanduser().resolve())
-    if expected_thread_id is not None:
-        request["expected_thread_id"] = expected_thread_id
-    if expected_session_id is not None:
-        request["expected_session_id"] = expected_session_id
-    if resolution_phase:
-        if persist_session:
-            raise ValueError("conflict resolution cannot persist a research session")
-        if spawn_child_handler_context_path is not None:
-            raise ValueError("spawn_child is unavailable during conflict resolution")
-        if benchmark_mcp_servers:
-            raise ValueError("benchmark MCP servers are unavailable during conflict resolution")
-        if sensitive_mcp_tools:
-            raise ValueError("sensitive MCP tools are unavailable during conflict resolution")
-        if resume_rollout_path is None or not expected_thread_id or not expected_session_id:
-            raise ValueError(
-                "conflict resolution requires a rollout path and exact thread/session ids"
-            )
-        request["resolution_phase"] = True
-    elif resume_rollout_path is not None:
-        raise ValueError("Codex resume is restricted to conflict resolution")
     control_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(control_dir, 0o700)
     request_path = control_dir / "codex_runner.request.json"
@@ -379,7 +309,6 @@ def run_codex_rollout(
         "spawn_child_tool_call_count": 0,
         "send_message_tool_call_count": 0,
         "turn_completed": False,
-        "resolution_phase": resolution_phase,
     }
     request_path.write_text(json.dumps(request, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     os.chmod(request_path, 0o600)
@@ -570,31 +499,29 @@ def _handle_runner_line(
         state["error_message"] = str(event.get("error_message") or "")
 
     if progress_callback is not None:
-        resolution_phase = bool(state.get("resolution_phase"))
-        prefix = "conflict_resolution" if resolution_phase else "worker"
         if name == "thread_started":
             progress_callback(
-                "conflict_resolution_thread_resumed" if resolution_phase else "codex_thread_started",
+                "codex_thread_started",
                 thread_id=event.get("thread_id"),
                 session_id=event.get("session_id"),
                 model=event.get("model"),
             )
         elif name == "turn_started":
             progress_callback(
-                f"{prefix}_turn_started",
+                "worker_turn_started",
                 turn_id=event.get("turn_id"),
                 model_context_window=event.get("model_context_window"),
             )
         elif name == "tool_begin" and event.get("tool") != "send_message":
             progress_callback(
-                f"{prefix}_tool_started",
+                "worker_tool_started",
                 tool=event.get("tool"),
                 call_id=event.get("call_id"),
                 command=event.get("command"),
             )
         elif name == "tool_end" and event.get("tool") != "send_message":
             progress_callback(
-                f"{prefix}_tool_completed",
+                "worker_tool_completed",
                 tool=event.get("tool"),
                 call_id=event.get("call_id"),
                 exit_code=event.get("exit_code"),
@@ -602,14 +529,14 @@ def _handle_runner_line(
             )
         elif name == "turn_complete":
             progress_callback(
-                f"{prefix}_turn_completed",
+                "worker_turn_completed",
                 turn_id=event.get("turn_id"),
                 tool_call_count=None,
                 response_status="completed",
             )
         elif name == "error":
             progress_callback(
-                f"{prefix}_error",
+                "worker_error",
                 error_code=event.get("error_code"),
                 error_message=event.get("error_message"),
             )
