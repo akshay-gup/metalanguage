@@ -24,6 +24,7 @@ from utils.opencode_runner import (
     MAX_CREDENTIAL_DEPTH,
     MAX_CREDENTIAL_FILES,
     MAX_CUSTOM_PROVIDER_LIMIT,
+    MAX_ERROR_MESSAGE_CHARACTERS,
     _handle_runner_line,
     _rollout_environment,
     _terminate_process_group,
@@ -628,6 +629,11 @@ class OpenCodeRunnerTests(unittest.TestCase):
                 self.assertTrue(result["isolated_state_cleaned"])
                 durable = Path(str(result["events_path"])).read_text()
                 self.assertNotIn("PRIVATE", durable)
+                if prompt == "__PROVIDER_ERROR__":
+                    self.assertEqual(
+                        result["error_message"],
+                        "fixture provider failure [REDACTED]",
+                    )
                 if prompt == "__TIMEOUT__":
                     self.assertTrue((Path(temp) / "workdir/fake_abort").is_file())
                     self.assertTrue((Path(temp) / "workdir/fake_delete").is_file())
@@ -1112,6 +1118,153 @@ class OpenCodeRunnerTests(unittest.TestCase):
         self.assertEqual(adversarial["error_code"], "unknown")
         self.assertEqual(normalize_error_code("ProviderAuthError"), "ProviderAuthError")
         self.assertNotIn("PRIVATE", stream.value)
+
+    def test_provider_error_diagnostics_are_allowlisted_and_preserved(self) -> None:
+        stream = Buffer()
+        progress: list[tuple[str, dict[str, object]]] = []
+        state = {
+            "final_text": "",
+            "thread_id": "",
+            "session_id": "",
+            "error_code": "",
+            "error_message": "",
+            "error_http_status": None,
+            "error_retryable": None,
+            "runtime_version": "",
+            "malformed_output": False,
+        }
+
+        event = _handle_runner_line(
+            json.dumps(
+                {
+                    "event": "error",
+                    "error_code": "APIError",
+                    "error_message": (
+                        "fetch failed\ngetaddrinfo EAI_AGAIN api.openrouter.ai\x00 "
+                        "Authorization: Bearer bearer-private-value "
+                        "OPENROUTER_API_KEY=sk-PRIVATE-KEY "
+                        'Authorization: Basic PRIVATE_BASIC "token":"PRIVATE_JSON_TOKEN" '
+                        "https://example.test/provider?api_key=PRIVATE_QUERY"
+                    ),
+                    "error_http_status": 503,
+                    "error_retryable": True,
+                    "headers": {"authorization": "Bearer PRIVATE_HEADER"},
+                    "response_body": "PRIVATE_RESPONSE_BODY",
+                    "stack": "PRIVATE_STACK",
+                    "request": {"payload": "PRIVATE_REQUEST_PAYLOAD"},
+                }
+            ),
+            events_stream=stream,
+            progress_callback=lambda name, **details: progress.append((name, details)),
+            state=state,
+        )
+
+        self.assertEqual(
+            set(event or {}),
+            {
+                "event",
+                "error_code",
+                "error_message",
+                "error_http_status",
+                "error_retryable",
+            },
+        )
+        self.assertEqual(event["error_http_status"], 503)
+        self.assertIs(event["error_retryable"], True)
+        self.assertIn("getaddrinfo EAI_AGAIN api.openrouter.ai", event["error_message"])
+        self.assertIn("https://example.test/provider", event["error_message"])
+        self.assertNotIn("api_key=", event["error_message"])
+        self.assertIn("[REDACTED]", event["error_message"])
+        self.assertNotRegex(event["error_message"], r"[\x00-\x1f\x7f-\x9f]")
+        self.assertNotIn("PRIVATE", stream.value)
+        self.assertNotIn("response_body", stream.value)
+        self.assertNotIn("headers", stream.value)
+        self.assertNotIn("stack", stream.value)
+        self.assertEqual(state["error_http_status"], 503)
+        self.assertIs(state["error_retryable"], True)
+        self.assertEqual(
+            progress,
+            [
+                (
+                    "worker_error",
+                    {
+                        "error_code": "APIError",
+                        "error_message": event["error_message"],
+                        "error_http_status": 503,
+                        "error_retryable": True,
+                    },
+                )
+            ],
+        )
+
+        long_event = _handle_runner_line(
+            json.dumps(
+                {
+                    "event": "error",
+                    "error_code": "APIError",
+                    "error_message": "x" * 700,
+                }
+            ),
+            events_stream=Buffer(),
+            progress_callback=None,
+            state=state,
+        )
+        self.assertEqual(len(long_event["error_message"]), MAX_ERROR_MESSAGE_CHARACTERS)
+        self.assertTrue(long_event["error_message"].endswith("…"))
+
+        fallback = _handle_runner_line(
+            json.dumps(
+                {
+                    "event": "error",
+                    "error_code": "APIError",
+                    "error_http_status": "503",
+                    "error_retryable": "true",
+                    "headers": {"message": "PRIVATE_NESTED_MESSAGE"},
+                }
+            ),
+            events_stream=Buffer(),
+            progress_callback=None,
+            state=state,
+        )
+        self.assertEqual(
+            fallback,
+            {
+                "event": "error",
+                "error_code": "APIError",
+                "error_message": "OpenCode request failed (APIError)",
+            },
+        )
+
+    def test_opencode_worker_preserves_safe_error_diagnostics(self) -> None:
+        expected = {
+            "final_text": "",
+            "status": "error",
+            "stop_reason": "opencode_runner_exit",
+            "error_code": "APIError",
+            "error_message": "getaddrinfo EAI_AGAIN api.openrouter.ai",
+            "error_http_status": 503,
+            "error_retryable": True,
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            paths = {
+                "worker_script": root / "worker.ts",
+                "bun_bin": root / "bun",
+                "opencode_bin": root / "opencode",
+                "workdir": root / "workdir",
+                "control_dir": root / "control",
+                "worker_state_dir": root / "state",
+            }
+            with patch("main_loop.run_opencode_rollout", return_value=expected):
+                result = run_opencode_worker(
+                    **paths,
+                    model="provider/model",
+                    timeout_seconds=17,
+                    initial_user_text="prompt",
+                )
+        self.assertEqual(result.error_message, expected["error_message"])
+        self.assertEqual(result.error_http_status, 503)
+        self.assertIs(result.error_retryable, True)
 
     def test_two_and_eight_workers_have_unique_isolation_and_no_lingering_processes(self) -> None:
         for count in (2, 8):

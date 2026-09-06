@@ -386,6 +386,13 @@ export class SseDecoder {
 
 export type Terminal = "continue" | "idle" | "error"
 
+export type SafeErrorDiagnostic = {
+  error_code: string
+  error_message: string
+  error_http_status?: number
+  error_retryable?: boolean
+}
+
 type PermissionAskedEvent = {
   type: "permission.asked"
   properties: { sessionID?: string }
@@ -398,11 +405,12 @@ export class EventNormalizer {
   private readonly textOrderByMessage = new Map<string, string[]>()
   private readonly textParts = new Map<string, { messageID: string; text: string }>()
   private turnStarted = false
-  error?: [string, string]
+  error?: SafeErrorDiagnostic
 
   constructor(
     private readonly sessionId: string,
     private readonly sensitiveToolIds: Set<string>,
+    private readonly sensitiveValues: readonly string[] = [],
   ) {}
 
   finalText(): string {
@@ -446,17 +454,17 @@ export class EventNormalizer {
       }
       const error = isRecord(properties.error) ? properties.error : {}
       const code = providerErrorCode(error.name)
-      const message = safeErrorMessage(code)
-      this.error = [code, message]
-      output.push({ event: "error", error_code: code, error_message: message })
+      const diagnostic = safeProviderErrorDiagnostic(code, error, this.sensitiveValues)
+      this.error = diagnostic
+      output.push({ event: "error", ...diagnostic })
       return { events: output, terminal: "error" }
     }
 
     if (eventType === "permission.asked") {
       if (properties.sessionID === this.sessionId) {
         const message = "OpenCode requested interactive permission in a noninteractive rollout"
-        this.error = ["permission_requested", message]
-        output.push({ event: "error", error_code: "permission_requested", error_message: message })
+        this.error = { error_code: "permission_requested", error_message: message }
+        output.push({ event: "error", ...this.error })
         return { events: output, terminal: "error" }
       }
       return { events: output, terminal: "continue" }
@@ -597,6 +605,63 @@ function providerErrorCode(value: unknown): string {
     return value
   }
   return "opencode_session_error"
+}
+
+const MAX_ERROR_MESSAGE_CHARACTERS = 512
+
+function safeProviderErrorDiagnostic(
+  code: string,
+  error: Record<string, unknown>,
+  sensitiveValues: readonly string[],
+): SafeErrorDiagnostic {
+  const data = isRecord(error.data) ? error.data : {}
+  const message = sanitizedErrorMessage(data.message ?? error.message, code, sensitiveValues)
+  const status = validHttpStatus(data.statusCode ?? data.status ?? error.statusCode ?? error.status)
+  const retryable = validRetryability(
+    data.isRetryable ?? data.retryable ?? error.isRetryable ?? error.retryable,
+  )
+  return {
+    error_code: code,
+    error_message: message,
+    ...(status === undefined ? {} : { error_http_status: status }),
+    ...(retryable === undefined ? {} : { error_retryable: retryable }),
+  }
+}
+
+function validHttpStatus(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value >= 100 && value <= 599
+    ? value
+    : undefined
+}
+
+function validRetryability(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined
+}
+
+function sanitizedErrorMessage(value: unknown, code: string, sensitiveValues: readonly string[]): string {
+  if (typeof value !== "string") return safeErrorMessage(code)
+  let message = value
+    .replaceAll(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+    .replaceAll(/\s+/g, " ")
+    .trim()
+  if (!message) return safeErrorMessage(code)
+  message = message
+    .replaceAll(/(https?:\/\/[^\s?#]+)\?[^\s]*/gi, "$1")
+    .replaceAll(/\bbearer\s+[A-Za-z0-9._~+/=-]{8,}/gi, "Bearer [REDACTED]")
+    .replaceAll(/\bsk-[A-Za-z0-9_-]{6,}\b/gi, "[REDACTED]")
+    .replaceAll(
+      /(["']?)\b(authorization|[A-Za-z0-9_-]*api[\s_-]?key|[A-Za-z0-9_-]*token|password|secret|credential)\1\s*[:=]\s*(?:(?:bearer|basic)\s+)?(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi,
+      "$2=[REDACTED]",
+    )
+  for (const sensitive of [...new Set(sensitiveValues)].filter(Boolean).sort((a, b) => b.length - a.length)) {
+    message = message.replaceAll(sensitive, "[REDACTED]")
+  }
+  const scrubbed = scrubValue(message)
+  if (typeof scrubbed !== "string") return safeErrorMessage(code)
+  const characters = [...scrubbed]
+  return characters.length <= MAX_ERROR_MESSAGE_CHARACTERS
+    ? scrubbed
+    : `${characters.slice(0, MAX_ERROR_MESSAGE_CHARACTERS - 1).join("")}…`
 }
 
 function loggedPayload(value: unknown, sensitive: boolean): unknown {

@@ -104,6 +104,8 @@ class WorkerResult:
     error_code: str | int | None = None
     error_message: str | None = None
     metadata: dict[str, Any] | None = None
+    error_http_status: int | None = None
+    error_retryable: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -2511,6 +2513,8 @@ def run_opencode_worker(
         error_code=result.get("error_code"),
         error_message=result.get("error_message"),
         metadata=metadata,
+        error_http_status=result.get("error_http_status"),
+        error_retryable=result.get("error_retryable"),
     )
 
 
@@ -4630,6 +4634,14 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 worker_stop_reason=worker_result.stop_reason,
                 worker_error_code=worker_result.error_code,
                 worker_error_message=worker_result.error_message,
+                **(
+                    {
+                        "worker_error_http_status": worker_result.error_http_status,
+                        "worker_error_retryable": worker_result.error_retryable,
+                    }
+                    if worker_backend == "opencode"
+                    else {}
+                ),
             )
             evaluation_unconfigured = (
                 prepared_benchmark_batch.metadata.get("evaluation") == "unconfigured"
@@ -4779,6 +4791,14 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 "worker_stop_reason": worker_result.stop_reason,
                 "worker_error_code": worker_result.error_code,
                 "worker_error_message": worker_result.error_message,
+                **(
+                    {
+                        "worker_error_http_status": worker_result.error_http_status,
+                        "worker_error_retryable": worker_result.error_retryable,
+                    }
+                    if worker_backend == "opencode"
+                    else {}
+                ),
                 "worker_backend": worker_backend,
                 **(
                     _private_inbox_capability_record(worker_backend)

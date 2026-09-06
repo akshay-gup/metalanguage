@@ -16,6 +16,7 @@ import {
   type McpStatus,
   type OpenCodeEvent,
   type RunnerRequest,
+  type SafeErrorDiagnostic,
   type SessionCreateBody,
   type SessionCreateResponse,
   type SessionMessagesResponse,
@@ -35,12 +36,15 @@ const SOURCE_AUDITED_OPENCODE_VERSION = "1.18.29"
 const SOURCE_AUDITED_BUN_VERSION = "1.3.14"
 
 class RunnerError extends Error {
+  readonly diagnostic?: SafeErrorDiagnostic
+
   constructor(
     readonly code: string,
     message: string,
-    options?: ErrorOptions,
+    options?: ErrorOptions & { diagnostic?: SafeErrorDiagnostic },
   ) {
-    super(message, options)
+    super(message, options?.cause === undefined ? undefined : { cause: options.cause })
+    this.diagnostic = options?.diagnostic
   }
 }
 
@@ -840,6 +844,7 @@ async function runSession(
   providerId: string,
   modelId: string,
   cancelled: Promise<void>,
+  sensitiveValues: readonly string[],
 ): Promise<void> {
   const queue = new AsyncQueue<unknown>()
   const startupTimeoutMs = seconds(request.startup_timeout_seconds, 15) * 1000
@@ -889,7 +894,7 @@ async function runSession(
   const timeoutSeconds = seconds(request.timeout_seconds, 3600)
   const deadline = sleep(timeoutSeconds * 1000).then(() => "timeout" as const)
   const cancellation = cancelled.then(() => "cancel" as const)
-  const normalizer = new EventNormalizer(sessionId, translated.sensitiveToolIds)
+  const normalizer = new EventNormalizer(sessionId, translated.sensitiveToolIds, sensitiveValues)
   let terminal: Terminal = "continue"
   let completed = false
   try {
@@ -925,8 +930,11 @@ async function runSession(
     }
 
     if (terminal === "error") {
-      const [code, message] = normalizer.error ?? ["opencode_session_error", "OpenCode session failed"]
-      throw new RunnerError(code, message)
+      const diagnostic = normalizer.error ?? {
+        error_code: "opencode_session_error",
+        error_message: "OpenCode session failed",
+      }
+      throw new RunnerError(diagnostic.error_code, diagnostic.error_message, { diagnostic })
     }
     const messages = await api.json<SessionMessagesResponse>(
       "GET",
@@ -1105,7 +1113,10 @@ export async function runRequest(request: RunnerRequest, cancelled: Promise<void
         cwd,
         seconds(request.startup_timeout_seconds, 15) * 1000,
       )
-      await runSession(api, request, translated, providerId, modelId, cancelled)
+      const sensitiveValues = (request.provider_env_names ?? [])
+        .map((name) => env[name])
+        .filter((value): value is string => typeof value === "string" && value.length > 0)
+      await runSession(api, request, translated, providerId, modelId, cancelled, sensitiveValues)
     } finally {
       await stopServer(server)
     }
@@ -1132,10 +1143,13 @@ export async function main(): Promise<void> {
     process.exit(0)
   } catch (error) {
     const normalized = asRunnerError("opencode_worker_failed", error)
-    emit({
-      event: "error",
+    const diagnostic = normalized.diagnostic ?? {
       error_code: safeErrorCode(normalized.code),
       error_message: safeErrorMessage(normalized.code),
+    }
+    emit({
+      event: "error",
+      ...diagnostic,
     })
     process.exit(1)
   }

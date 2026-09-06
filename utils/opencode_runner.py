@@ -81,6 +81,7 @@ _CREDENTIAL_MOUNT_ROOT = Path("/run/metalanguage/credentials")
 MAX_CREDENTIAL_FILES = 4096
 MAX_CREDENTIAL_BYTES = 64 * 1024 * 1024
 MAX_CREDENTIAL_DEPTH = 16
+MAX_ERROR_MESSAGE_CHARACTERS = 512
 _DURABLE_ERROR_CODES = {
     "APIError",
     "MessageAbortedError",
@@ -758,15 +759,20 @@ def _durable_event(event: dict[str, Any]) -> dict[str, Any]:
     name = event.get("event")
     if name == "error":
         code = normalize_error_code(event.get("error_code"))
-        return {
-            **{
-                key: value
-                for key, value in event.items()
-                if key not in {"error_code", "error_message"}
-            },
+        durable = {
+            "event": "error",
             "error_code": code,
-            "error_message": f"OpenCode request failed ({code})",
+            "error_message": _sanitize_error_message(
+                event.get("error_message"), code
+            ),
         }
+        status = _normalize_error_http_status(event.get("error_http_status"))
+        if status is not None:
+            durable["error_http_status"] = status
+        retryable = _normalize_error_retryable(event.get("error_retryable"))
+        if retryable is not None:
+            durable["error_retryable"] = retryable
+        return durable
     if name in {"agent_message", "turn_complete"}:
         return _scrub_durable_value(event, preserve_text=True)
     return _scrub_durable_value(event)
@@ -777,6 +783,63 @@ def normalize_error_code(value: object) -> str:
     if raw in _DURABLE_ERROR_CODES:
         return raw
     return "unknown"
+
+
+def _sanitize_error_message(value: object, code: str) -> str:
+    fallback = f"OpenCode request failed ({code})"
+    if not isinstance(value, str):
+        return fallback
+    message = re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", value)
+    message = re.sub(r"\s+", " ", message).strip()
+    if not message:
+        return fallback
+    message = re.sub(
+        r"(https?://[^\s?#]+)\?[^\s]*",
+        r"\1",
+        message,
+        flags=re.IGNORECASE,
+    )
+    message = re.sub(
+        r"\bbearer\s+[A-Za-z0-9._~+/=-]{8,}",
+        "Bearer [REDACTED]",
+        message,
+        flags=re.IGNORECASE,
+    )
+    message = re.sub(
+        r"\bsk-[A-Za-z0-9_-]{6,}\b",
+        "[REDACTED]",
+        message,
+        flags=re.IGNORECASE,
+    )
+    message = re.sub(
+        r"([\"']?)\b(authorization|[A-Za-z0-9_-]*api[\s_-]?key|"
+        r"[A-Za-z0-9_-]*token|password|secret|credential)\1"
+        r"\s*[:=]\s*(?:(?:bearer|basic)\s+)?"
+        r'(?:"[^"]*"|\'[^\']*\'|[^\s,;]+)',
+        r"\2=[REDACTED]",
+        message,
+        flags=re.IGNORECASE,
+    )
+    scrubbed = _scrub_durable_value(message)
+    if not isinstance(scrubbed, str):
+        return fallback
+    if len(scrubbed) <= MAX_ERROR_MESSAGE_CHARACTERS:
+        return scrubbed
+    return scrubbed[: MAX_ERROR_MESSAGE_CHARACTERS - 1] + "…"
+
+
+def _normalize_error_http_status(value: object) -> int | None:
+    return (
+        value
+        if isinstance(value, int)
+        and not isinstance(value, bool)
+        and 100 <= value <= 599
+        else None
+    )
+
+
+def _normalize_error_retryable(value: object) -> bool | None:
+    return value if isinstance(value, bool) else None
 
 
 def run_opencode_rollout(
@@ -1025,6 +1088,8 @@ def run_opencode_rollout(
         "patched_files": set(),
         "error_code": "",
         "error_message": "",
+        "error_http_status": None,
+        "error_retryable": None,
         "runtime_version": "",
         "bun_version": "",
         "runtime_process_pid": None,
@@ -1146,6 +1211,8 @@ def run_opencode_rollout(
             "stop_reason": "worker_timeout",
             "error_code": "worker_timeout",
             "error_message": f"OpenCode runner exceeded {timeout_seconds} seconds.",
+            "error_http_status": None,
+            "error_retryable": None,
             **metadata,
         }
     if state["error_code"] == "worker_timeout":
@@ -1155,6 +1222,8 @@ def run_opencode_rollout(
             "stop_reason": "worker_timeout",
             "error_code": "worker_timeout",
             "error_message": state["error_message"],
+            "error_http_status": state["error_http_status"],
+            "error_retryable": state["error_retryable"],
             **metadata,
         }
     if return_code != 0 or state["malformed_output"]:
@@ -1167,6 +1236,8 @@ def run_opencode_rollout(
                 state["error_message"]
                 or f"OpenCode runner exited nonzero ({return_code}); see {stderr_path}"
             ),
+            "error_http_status": state["error_http_status"],
+            "error_retryable": state["error_retryable"],
             **metadata,
         }
     return {
@@ -1175,6 +1246,8 @@ def run_opencode_rollout(
         "stop_reason": "final_message",
         "error_code": None,
         "error_message": None,
+        "error_http_status": None,
+        "error_retryable": None,
         **metadata,
     }
 
@@ -1262,6 +1335,8 @@ def _handle_runner_line(
     elif name == "error":
         state["error_code"] = str(event.get("error_code") or "")
         state["error_message"] = str(event.get("error_message") or "")
+        state["error_http_status"] = event.get("error_http_status")
+        state["error_retryable"] = event.get("error_retryable")
 
     if progress_callback is not None:
         if name == "thread_started":
@@ -1319,5 +1394,7 @@ def _handle_runner_line(
                 "worker_error",
                 error_code=event.get("error_code"),
                 error_message=event.get("error_message"),
+                error_http_status=event.get("error_http_status"),
+                error_retryable=event.get("error_retryable"),
             )
     return event

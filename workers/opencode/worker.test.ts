@@ -353,10 +353,10 @@ describe("OpenCode native protocol adapter", () => {
       },
     })
     expect(failed.terminal).toBe("error")
-    expect(normalizer.error).toEqual([
-      "ProviderAuthError",
-      "OpenCode request failed (ProviderAuthError)",
-    ])
+    expect(normalizer.error).toEqual({
+      error_code: "ProviderAuthError",
+      error_message: "authentication failed [REDACTED]",
+    })
     expect(JSON.stringify(failed.events)).not.toContain("PRIVATE")
 
     const adversarial = normalizer.handle({
@@ -372,6 +372,90 @@ describe("OpenCode native protocol adapter", () => {
     expect(String(code)).toMatch(/^[a-zA-Z0-9_.-]+$/)
     expect(JSON.stringify(adversarial.events)).not.toContain("PRIVATE")
     expect(safeErrorCode(42)).toBe("unknown")
+  })
+
+  test("preserves only bounded sanitized provider diagnostics", () => {
+    const normalizer = new EventNormalizer("ses_test", new Set(), ["OPAQUE_PROVIDER_VALUE_123"])
+    const failed = normalizer.handle({
+      type: "session.error",
+      properties: {
+        sessionID: "ses_test",
+        error: {
+          name: "APIError",
+          data: {
+            message:
+              "fetch failed\ngetaddrinfo EAI_AGAIN api.openrouter.ai\u0000 " +
+              "Bearer bearer-secret-value OPENROUTER_API_KEY=sk-PRIVATE-KEY " +
+              "Authorization: Basic PRIVATE_BASIC \"token\":\"PRIVATE_JSON_TOKEN\" " +
+              "OPAQUE_PROVIDER_VALUE_123 " +
+              "https://example.test/provider?api_key=PRIVATE_QUERY",
+            statusCode: 503,
+            isRetryable: true,
+            responseHeaders: { authorization: "Bearer PRIVATE_HEADER" },
+            responseBody: "PRIVATE_RESPONSE_BODY",
+            metadata: { request: "PRIVATE_REQUEST_PAYLOAD" },
+          },
+          stack: "PRIVATE_STACK",
+        },
+      },
+    })
+    expect(failed.terminal).toBe("error")
+    expect(failed.events[0]).toEqual({ event: "error", ...normalizer.error })
+    expect(Object.keys(failed.events[0] ?? {}).sort()).toEqual([
+      "error_code",
+      "error_http_status",
+      "error_message",
+      "error_retryable",
+      "event",
+    ])
+    const serialized = JSON.stringify(failed.events)
+    expect(serialized).toContain("getaddrinfo EAI_AGAIN api.openrouter.ai")
+    expect(serialized).toContain("https://example.test/provider")
+    expect(serialized).not.toContain("api_key=")
+    expect(serialized).toContain("[REDACTED]")
+    expect(serialized).not.toContain("PRIVATE")
+    expect(serialized).not.toContain("responseHeaders")
+    expect(serialized).not.toContain("responseBody")
+    expect(serialized).not.toContain("metadata")
+    expect(serialized).not.toContain("stack")
+    expect(normalizer.error?.error_message).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/)
+    expect(normalizer.error?.error_http_status).toBe(503)
+    expect(normalizer.error?.error_retryable).toBe(true)
+
+    const long = new EventNormalizer("ses_long", new Set())
+    long.handle({
+      type: "session.error",
+      properties: {
+        sessionID: "ses_long",
+        error: { name: "APIError", data: { message: "x".repeat(700), isRetryable: false } },
+      },
+    })
+    expect([...(long.error?.error_message ?? "")].length).toBe(512)
+    expect(long.error?.error_message.endsWith("…")).toBe(true)
+
+    const fallback = new EventNormalizer("ses_fallback", new Set())
+    const fallbackEvent = fallback.handle({
+      type: "session.error",
+      properties: {
+        sessionID: "ses_fallback",
+        error: {
+          name: "APIError",
+          data: {
+            statusCode: "503",
+            isRetryable: "true",
+            responseBody: { message: "PRIVATE_NESTED_MESSAGE" },
+          },
+        },
+      },
+    })
+    expect(fallbackEvent.events).toEqual([
+      {
+        event: "error",
+        error_code: "APIError",
+        error_message: "OpenCode request failed (APIError)",
+      },
+    ])
+    expect(JSON.stringify(fallbackEvent.events)).not.toContain("PRIVATE")
   })
 
   test("selects only the final assistant message in production event order", () => {
