@@ -159,6 +159,8 @@ CODEX_READ_README_BASE_INSTRUCTIONS = READ_README_TASK_INSTRUCTIONS
 BENCHMARK_README_FILENAME = "BENCHMARK.md"
 ORDERED_ROLLOUT_MODE = "ordered-backend-model-v1"
 ORDERED_ROLLOUT_BACKENDS = frozenset({"codex", "opencode"})
+ROLLOUT_CONFIG_FORMAT = "metalanguage-rollout-config"
+ROLLOUT_CONFIG_VERSION = 1
 
 
 def _strip_env_quotes(value: str) -> str:
@@ -973,7 +975,7 @@ def _claim_runtime_rollout_identity(
         if not explicitly_configured:
             raise SystemExit(
                 "error: runtime uses ordered per-slot rollouts; repeat its "
-                "--rollout-slot configuration to continue"
+                "--rollout-slot or --rollout-config assignments to continue"
             )
         try:
             recorded = json.loads(identity_path.read_text(encoding="utf-8"))
@@ -983,7 +985,7 @@ def _claim_runtime_rollout_identity(
             ) from None
         if recorded != expected:
             raise SystemExit(
-                "error: ordered --rollout-slot configuration does not match this runtime"
+                "error: ordered rollout configuration does not match this runtime"
             )
         return
     if not explicitly_configured:
@@ -2640,14 +2642,121 @@ def _rollout_slot_argument(value: str) -> RolloutSlot:
     return RolloutSlot(worker_backend=worker_backend, model=model)
 
 
+def _reject_duplicate_json_fields(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    parsed: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in parsed:
+            raise ValueError(f"duplicate JSON field: {key}")
+        parsed[key] = value
+    return parsed
+
+
+def _load_rollout_config(path_value: str | Path) -> tuple[RolloutSlot, ...]:
+    path = Path(path_value).expanduser()
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"cannot read rollout config {path}: {exc}") from exc
+    try:
+        payload = json.loads(raw, object_pairs_hook=_reject_duplicate_json_fields)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise ValueError(f"invalid rollout config JSON in {path}: {exc}") from exc
+
+    if not isinstance(payload, dict):
+        raise ValueError("rollout config must be a JSON object")
+    expected_fields = {"format", "version", "rollouts"}
+    actual_fields = set(payload)
+    if actual_fields != expected_fields:
+        unknown = sorted(actual_fields - expected_fields)
+        missing = sorted(expected_fields - actual_fields)
+        details = []
+        if unknown:
+            details.append(f"unknown fields: {', '.join(unknown)}")
+        if missing:
+            details.append(f"missing fields: {', '.join(missing)}")
+        raise ValueError(f"invalid rollout config schema ({'; '.join(details)})")
+    if payload["format"] != ROLLOUT_CONFIG_FORMAT:
+        raise ValueError(
+            f"rollout config format must be {ROLLOUT_CONFIG_FORMAT!r}"
+        )
+    if (
+        type(payload["version"]) is not int
+        or payload["version"] != ROLLOUT_CONFIG_VERSION
+    ):
+        raise ValueError(
+            f"rollout config version must be {ROLLOUT_CONFIG_VERSION}"
+        )
+    rollout_entries = payload["rollouts"]
+    if not isinstance(rollout_entries, list) or not rollout_entries:
+        raise ValueError("rollout config rollouts must be a non-empty array")
+
+    rollout_slots: list[RolloutSlot] = []
+    for index, entry in enumerate(rollout_entries):
+        if not isinstance(entry, dict):
+            raise ValueError(f"rollout config rollouts[{index}] must be an object")
+        entry_fields = set(entry)
+        expected_entry_fields = {"backend", "model"}
+        if entry_fields != expected_entry_fields:
+            unknown = sorted(entry_fields - expected_entry_fields)
+            missing = sorted(expected_entry_fields - entry_fields)
+            details = []
+            if unknown:
+                details.append(f"unknown fields: {', '.join(unknown)}")
+            if missing:
+                details.append(f"missing fields: {', '.join(missing)}")
+            raise ValueError(
+                f"invalid rollout config rollouts[{index}] schema "
+                f"({'; '.join(details)})"
+            )
+        backend = entry["backend"]
+        model = entry["model"]
+        if not isinstance(backend, str) or not isinstance(model, str):
+            raise ValueError(
+                f"rollout config rollouts[{index}] backend and model must be strings"
+            )
+        try:
+            rollout_slot = _rollout_slot_argument(f"{backend}={model}")
+        except argparse.ArgumentTypeError as exc:
+            raise ValueError(
+                f"invalid rollout config rollouts[{index}]: {exc}"
+            ) from exc
+        if rollout_slot.worker_backend != backend or rollout_slot.model != model:
+            raise ValueError(
+                f"rollout config rollouts[{index}] backend and model must not have "
+                "surrounding whitespace"
+            )
+        rollout_slots.append(rollout_slot)
+    return tuple(rollout_slots)
+
+
 def _resolve_rollout_slots(args: argparse.Namespace) -> tuple[RolloutSlot, ...]:
-    configured = tuple(getattr(args, "rollout_slot", ()) or ())
-    if configured:
-        if len(configured) != args.num_rollouts:
+    rollout_config = getattr(args, "rollout_config", None)
+    rollout_slot_configuration = tuple(getattr(args, "rollout_slot", ()) or ())
+    if rollout_config is not None and rollout_slot_configuration:
+        raise SystemExit(
+            "error: --rollout-config and --rollout-slot are mutually exclusive"
+        )
+    if rollout_config is not None:
+        try:
+            configured = _load_rollout_config(rollout_config)
+        except ValueError as exc:
+            raise SystemExit(f"error: {exc}") from None
+        num_rollouts_explicit = getattr(args, "_num_rollouts_explicit", True)
+        if num_rollouts_explicit:
+            if len(configured) != args.num_rollouts:
+                raise SystemExit(
+                    "error: the number of rollout config entries must equal "
+                    "--num-rollouts"
+                )
+        else:
+            args.num_rollouts = len(configured)
+        return configured
+    if rollout_slot_configuration:
+        if len(rollout_slot_configuration) != args.num_rollouts:
             raise SystemExit(
                 "error: the number of --rollout-slot entries must equal --num-rollouts"
             )
-        return configured
+        return rollout_slot_configuration
     return tuple(
         RolloutSlot(worker_backend=args.worker_backend, model=args.model)
         for _ in range(args.num_rollouts)
@@ -2719,7 +2828,8 @@ def parse_args() -> argparse.Namespace:
         default="openrouter",
         help="Worker runtime to use for rollouts.",
     )
-    parser.add_argument(
+    rollout_configuration = parser.add_mutually_exclusive_group()
+    rollout_configuration.add_argument(
         "--rollout-slot",
         action="append",
         type=_rollout_slot_argument,
@@ -2731,12 +2841,21 @@ def parse_args() -> argparse.Namespace:
             "--worker-backend and --model retain their existing homogeneous behavior."
         ),
     )
+    rollout_configuration.add_argument(
+        "--rollout-config",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Versioned JSON file containing ordered per-rollout backend/model "
+            "assignments. Its rollout count is inferred unless --num-rollouts is explicit."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--generation", type=int, default=0)
     parser.add_argument(
         "--num-rollouts",
         type=int,
-        default=DEFAULT_NUM_ROLLOUTS,
+        default=None,
         help="Configured rollout population size for every batch.",
     )
     parser.add_argument(
@@ -3059,7 +3178,11 @@ def parse_args() -> argparse.Namespace:
             "'read-readme' injects the fixed scaffold instruction through the prompt system field."
         ),
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    args._num_rollouts_explicit = args.num_rollouts is not None
+    if args.num_rollouts is None:
+        args.num_rollouts = DEFAULT_NUM_ROLLOUTS
+    return args
 
 
 def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
@@ -3069,7 +3192,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
     if args.num_rollouts <= 0:
         raise ValueError("--num-rollouts must be > 0")
     rollout_slots = _resolve_rollout_slots(args)
-    ordered_rollouts_enabled = bool(args.rollout_slot)
+    ordered_rollouts_enabled = bool(args.rollout_slot or args.rollout_config)
     ordered_rollout_metadata = _ordered_rollout_metadata(
         rollout_slots, enabled=ordered_rollouts_enabled
     )

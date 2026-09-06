@@ -244,6 +244,23 @@ read-only directory. Inbox contents are excluded from child workspaces and
 episode outputs and are removed with the batch workspaces. ARC, SuperGPQA,
 controls, OpenRouter, and other unsupported paths expose no messaging tool.
 
+### Mixed rollout configuration
+
+Use repeated `--rollout-slot BACKEND=MODEL` flags for an ordered mixed Codex and
+OpenCode population, or reuse a strict versioned JSON file with
+`--rollout-config PATH`. The config file's rollout count is inferred unless an
+explicit `--num-rollouts` is also supplied, in which case the counts must match.
+Resolved assignments, not the config path, form the persisted continuation
+identity.
+
+For the checked-in six-model flash population:
+
+```bash
+uv run python -B main_loop.py \
+  --rollout-config configs/rollouts/gpt6-astra-openrouter-flash.json \
+  --step
+```
+
 ### OpenCode rollout backend
 
 The OpenCode backend uses a native TypeScript worker under Bun and one private

@@ -15,16 +15,23 @@ from main_loop import (
     RolloutSlot,
     WorkerResult,
     _claim_runtime_rollout_identity,
+    _load_rollout_config,
     _resolve_rollout_slots,
     _rollout_slot_argument,
     _run_main,
     _validate_ordered_rollout_records,
     parse_args,
 )
+from utils.opencode_runner import provider_environment_names
 from utils.supergpqa_benchmark import SuperGpqaBenchmarkDriver, SuperGpqaConfig
 
 
 class MixedRolloutBackendTests(unittest.TestCase):
+    rollout_config_path = (
+        Path(__file__).parents[1]
+        / "configs/rollouts/gpt6-astra-openrouter-flash.json"
+    )
+
     def test_rollout_slot_parsing_and_count_validation(self) -> None:
         self.assertEqual(
             _rollout_slot_argument("opencode=openai/gpt-5.1"),
@@ -71,6 +78,157 @@ class MixedRolloutBackendTests(unittest.TestCase):
                 runtime_was_empty=True,
             )
             self.assertFalse((root / RUNTIME_ROLLOUT_IDENTITY_FILENAME).exists())
+
+        with patch("sys.argv", ["main_loop.py"]):
+            defaults = parse_args()
+        self.assertEqual(defaults.num_rollouts, 8)
+        self.assertFalse(defaults._num_rollouts_explicit)
+
+    def test_rollout_config_loads_in_order_and_infers_count(self) -> None:
+        expected = (
+            RolloutSlot("codex", "gpt-6-astra"),
+            RolloutSlot("opencode", "openrouter/z-ai/glm-5.3-flash"),
+            RolloutSlot(
+                "opencode", "openrouter/deepseek/deepseek-v4-flash-0731"
+            ),
+            RolloutSlot("opencode", "openrouter/google/gemini-3.8-flash"),
+            RolloutSlot(
+                "opencode", "openrouter/meta/muse-spark-1.3-contributor"
+            ),
+            RolloutSlot("opencode", "openrouter/qwen/qwen3.8-flash"),
+        )
+        self.assertEqual(_load_rollout_config(self.rollout_config_path), expected)
+
+        with patch(
+            "sys.argv",
+            ["main_loop.py", "--rollout-config", str(self.rollout_config_path)],
+        ):
+            args = parse_args()
+        self.assertEqual(_resolve_rollout_slots(args), expected)
+        self.assertEqual(args.num_rollouts, 6)
+        self.assertFalse(args._num_rollouts_explicit)
+        for slot in expected[1:]:
+            self.assertEqual(
+                provider_environment_names(slot.model), ("OPENROUTER_API_KEY",)
+            )
+
+    def test_rollout_config_explicit_count_must_match(self) -> None:
+        with patch(
+            "sys.argv",
+            [
+                "main_loop.py",
+                "--rollout-config",
+                str(self.rollout_config_path),
+                "--num-rollouts",
+                "6",
+            ],
+        ):
+            matching = parse_args()
+        self.assertEqual(len(_resolve_rollout_slots(matching)), 6)
+        self.assertTrue(matching._num_rollouts_explicit)
+
+        with patch(
+            "sys.argv",
+            [
+                "main_loop.py",
+                "--rollout-config",
+                str(self.rollout_config_path),
+                "--num-rollouts",
+                "8",
+            ],
+        ):
+            mismatching = parse_args()
+        with self.assertRaisesRegex(SystemExit, "entries must equal --num-rollouts"):
+            _resolve_rollout_slots(mismatching)
+
+    def test_rollout_config_is_mutually_exclusive_with_slots(self) -> None:
+        with patch(
+            "sys.argv",
+            [
+                "main_loop.py",
+                "--rollout-config",
+                str(self.rollout_config_path),
+                "--rollout-slot",
+                "codex=gpt-6-astra",
+            ],
+        ), self.assertRaises(SystemExit):
+            parse_args()
+
+    def test_rollout_config_schema_is_strict(self) -> None:
+        invalid_payloads = {
+            "malformed": "{",
+            "unknown_top_level": json.dumps(
+                {
+                    "format": "metalanguage-rollout-config",
+                    "version": 1,
+                    "rollouts": [{"backend": "codex", "model": "gpt"}],
+                    "unexpected": True,
+                }
+            ),
+            "unknown_entry_field": json.dumps(
+                {
+                    "format": "metalanguage-rollout-config",
+                    "version": 1,
+                    "rollouts": [
+                        {"backend": "codex", "model": "gpt", "extra": None}
+                    ],
+                }
+            ),
+            "invalid_backend": json.dumps(
+                {
+                    "format": "metalanguage-rollout-config",
+                    "version": 1,
+                    "rollouts": [{"backend": "openrouter", "model": "model"}],
+                }
+            ),
+            "duplicate_field": (
+                '{"format":"metalanguage-rollout-config","version":1,'
+                '"version":1,"rollouts":[]}'
+            ),
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            for name, payload in invalid_payloads.items():
+                with self.subTest(name=name):
+                    path = Path(temp) / f"{name}.json"
+                    path.write_text(payload, encoding="utf-8")
+                    with self.assertRaises(ValueError):
+                        _load_rollout_config(path)
+
+    def test_rollout_config_and_repeated_slots_have_same_runtime_identity(self) -> None:
+        with patch(
+            "sys.argv",
+            ["main_loop.py", "--rollout-config", str(self.rollout_config_path)],
+        ):
+            config_args = parse_args()
+        config_slots = _resolve_rollout_slots(config_args)
+        slot_argv = ["main_loop.py", "--num-rollouts", str(len(config_slots))]
+        for slot in config_slots:
+            slot_argv.extend(
+                ["--rollout-slot", f"{slot.worker_backend}={slot.model}"]
+            )
+        with patch("sys.argv", slot_argv):
+            repeated_args = parse_args()
+        repeated_slots = _resolve_rollout_slots(repeated_args)
+        self.assertEqual(repeated_slots, config_slots)
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            _claim_runtime_rollout_identity(
+                root,
+                config_slots,
+                explicitly_configured=True,
+                runtime_was_empty=True,
+            )
+            identity = json.loads(
+                (root / RUNTIME_ROLLOUT_IDENTITY_FILENAME).read_text()
+            )
+            self.assertNotIn("rollout_config", identity)
+            _claim_runtime_rollout_identity(
+                root,
+                repeated_slots,
+                explicitly_configured=True,
+                runtime_was_empty=False,
+            )
 
     def test_ordered_identity_rejects_omitted_or_changed_resume(self) -> None:
         configured = (

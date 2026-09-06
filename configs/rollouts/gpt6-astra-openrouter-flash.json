@@ -1,0 +1,30 @@
+{
+  "format": "metalanguage-rollout-config",
+  "version": 1,
+  "rollouts": [
+    {
+      "backend": "codex",
+      "model": "gpt-6-astra"
+    },
+    {
+      "backend": "opencode",
+      "model": "openrouter/z-ai/glm-5.3-flash"
+    },
+    {
+      "backend": "opencode",
+      "model": "openrouter/deepseek/deepseek-v4-flash-0731"
+    },
+    {
+      "backend": "opencode",
+      "model": "openrouter/google/gemini-3.8-flash"
+    },
+    {
+      "backend": "opencode",
+      "model": "openrouter/meta/muse-spark-1.3-contributor"
+    },
+    {
+      "backend": "opencode",
+      "model": "openrouter/qwen/qwen3.8-flash"
+    }
+  ]
+}
