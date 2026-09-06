@@ -321,7 +321,10 @@ class SuperGpqaBenchmarkDriver:
         records = list(batch.private)
         json_path = Path(batch.metadata["problem_pool_json_path"])
         markdown_path = Path(batch.metadata["problem_pool_markdown_path"])
-        if backend != self.config.backend:
+        managed_backends = {"codex", "opencode"}
+        if backend != self.config.backend and not (
+            backend in managed_backends and self.config.backend in managed_backends
+        ):
             raise ValueError("rollout backend does not match prepared benchmark batch")
         benchmark_context = {
             **context,

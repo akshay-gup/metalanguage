@@ -105,6 +105,25 @@ class WorkerResult:
     metadata: dict[str, Any] | None = None
 
 
+@dataclass(frozen=True)
+class RolloutSlot:
+    worker_backend: str
+    model: str
+
+    def to_metadata(self) -> dict[str, str]:
+        return {"worker_backend": self.worker_backend, "model": self.model}
+
+
+@dataclass(frozen=True)
+class OpenCodeSlotEnvironment:
+    provider_env_names: tuple[str, ...]
+    provider_environment: dict[str, str]
+    credential_mounts: tuple[tuple[Path, Path], ...]
+    provider_env_sha256: str
+    custom_provider: dict[str, Any] | None
+    custom_provider_sha256: str | None
+
+
 class ArchiveCleanupError(RuntimeError):
     def __init__(self, code: str, archive_name: str | None, message: str) -> None:
         super().__init__(message)
@@ -125,6 +144,7 @@ DEFAULT_CODEX_HOME = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
 BUNDLED_BOOTSTRAP_SEED_DIR = PROJECT_ROOT / "seeds" / "bootstrap"
 RUNTIME_BENCHMARK_IDENTITY_FILENAME = "runtime_benchmark.json"
 RUNTIME_ARCHIVE_IDENTITY_FILENAME = "runtime_archive.json"
+RUNTIME_ROLLOUT_IDENTITY_FILENAME = "runtime_rollouts.json"
 METALANGUAGE_VERSION = "3.9"
 SHARED_ARCHIVES_MODE = "shared-concurrent"
 SHARED_ARCHIVES_ROOT_NAME = "archives"
@@ -137,6 +157,8 @@ READ_README_TASK_INSTRUCTIONS = (
 )
 CODEX_READ_README_BASE_INSTRUCTIONS = READ_README_TASK_INSTRUCTIONS
 BENCHMARK_README_FILENAME = "BENCHMARK.md"
+ORDERED_ROLLOUT_MODE = "ordered-backend-model-v1"
+ORDERED_ROLLOUT_BACKENDS = frozenset({"codex", "opencode"})
 
 
 def _strip_env_quotes(value: str) -> str:
@@ -850,7 +872,11 @@ def _runtime_benchmark(runtime_root: Path) -> str | None:
             [
                 path
                 for path in runtime_root.iterdir()
-                if path.name != RUNTIME_ARCHIVE_IDENTITY_FILENAME
+                if path.name
+                not in {
+                    RUNTIME_ARCHIVE_IDENTITY_FILENAME,
+                    RUNTIME_ROLLOUT_IDENTITY_FILENAME,
+                }
             ]
             if runtime_root.exists()
             else []
@@ -926,6 +952,46 @@ def _claim_runtime_archive_identity(runtime_root: Path) -> None:
         raise SystemExit(
             "error: existing runtime predates the Metalanguage v3.9 shared-archive "
             "identity; use a fresh --runtime-root"
+        )
+    _write_json_file_atomic(identity_path, expected)
+
+
+def _claim_runtime_rollout_identity(
+    runtime_root: Path,
+    rollout_slots: tuple[RolloutSlot, ...],
+    *,
+    explicitly_configured: bool,
+    runtime_was_empty: bool,
+) -> None:
+    identity_path = runtime_root / RUNTIME_ROLLOUT_IDENTITY_FILENAME
+    expected = {
+        "format": "metalanguage-runtime-rollouts",
+        "version": 1,
+        **_ordered_rollout_metadata(rollout_slots, enabled=True),
+    }
+    if identity_path.exists():
+        if not explicitly_configured:
+            raise SystemExit(
+                "error: runtime uses ordered per-slot rollouts; repeat its "
+                "--rollout-slot configuration to continue"
+            )
+        try:
+            recorded = json.loads(identity_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            raise SystemExit(
+                "error: runtime rollout identity is unreadable; refusing to continue"
+            ) from None
+        if recorded != expected:
+            raise SystemExit(
+                "error: ordered --rollout-slot configuration does not match this runtime"
+            )
+        return
+    if not explicitly_configured:
+        return
+    if not runtime_was_empty:
+        raise SystemExit(
+            "error: existing runtime has no ordered rollout identity; use its homogeneous "
+            "--worker-backend/--model configuration or a fresh --runtime-root"
         )
     _write_json_file_atomic(identity_path, expected)
 
@@ -1422,7 +1488,7 @@ def _create_benchmark_driver(
             task_store_dir=task_store_dir,
             dataset_cache_dir=dataset_cache_dir,
             historical_run_records=tuple(existing_records),
-            backend=args.worker_backend,
+            backend=getattr(args, "_benchmark_worker_backend", args.worker_backend),
         )
     )
 
@@ -1585,17 +1651,20 @@ def _validate_private_inbox_partial_resume(
     records: list[dict[str, Any]],
     args: argparse.Namespace,
 ) -> None:
-    if not private_inbox_enabled(
-        getattr(args, "benchmark", ""),
-        getattr(args, "worker_backend", ""),
+    rollout_slots = tuple(getattr(args, "_rollout_slots", ()) or ())
+    if not rollout_slots:
+        rollout_slots = tuple(
+            RolloutSlot(
+                worker_backend=getattr(args, "worker_backend", ""),
+                model=getattr(args, "model", ""),
+            )
+            for _ in range(getattr(args, "num_rollouts", 0))
+        )
+    if not any(
+        private_inbox_enabled(getattr(args, "benchmark", ""), slot.worker_backend)
+        for slot in rollout_slots
     ):
         return
-    capability_field = (
-        "codex_capability_identity"
-        if args.worker_backend == "codex"
-        else "opencode_capability_identity"
-    )
-    backend_label = "Codex" if args.worker_backend == "codex" else "OpenCode"
     by_task: dict[int, dict[int, dict[str, Any]]] = {}
     for record in records:
         task_index = record.get("task_index")
@@ -1619,16 +1688,28 @@ def _validate_private_inbox_partial_resume(
         expected_count = max(expected_counts) if expected_counts else args.num_rollouts
         if len(per_task) >= expected_count:
             continue
-        if any(
-            record.get(capability_field)
-            != PRIVATE_INBOX_CAPABILITY_IDENTITY
-            for record in per_task.values()
-        ):
-            raise SystemExit(
-                f"error: incomplete {backend_label} open-ended task "
-                f"{task_index} predates this backend's private-inbox capability; "
-                "the partial batch cannot be resumed safely"
+        for rollout_index, record in per_task.items():
+            if not 0 <= rollout_index < len(rollout_slots):
+                continue
+            worker_backend = rollout_slots[rollout_index].worker_backend
+            if not private_inbox_enabled(
+                getattr(args, "benchmark", ""), worker_backend
+            ):
+                continue
+            capability_field = (
+                "codex_capability_identity"
+                if worker_backend == "codex"
+                else "opencode_capability_identity"
             )
+            if record.get(capability_field) != PRIVATE_INBOX_CAPABILITY_IDENTITY:
+                backend_label = (
+                    "Codex" if worker_backend == "codex" else "OpenCode"
+                )
+                raise SystemExit(
+                    f"error: incomplete {backend_label} open-ended task "
+                    f"{task_index} predates this backend's private-inbox capability; "
+                    "the partial batch cannot be resumed safely"
+                )
 
 
 def _private_inbox_capability_record(worker_backend: str) -> dict[str, str]:
@@ -2545,6 +2626,73 @@ def _positive_int_argument(value: str) -> int:
     return parsed
 
 
+def _rollout_slot_argument(value: str) -> RolloutSlot:
+    if "=" not in value:
+        raise argparse.ArgumentTypeError("must use BACKEND=MODEL syntax")
+    worker_backend, model = (part.strip() for part in value.split("=", 1))
+    if worker_backend not in ORDERED_ROLLOUT_BACKENDS:
+        supported = ", ".join(sorted(ORDERED_ROLLOUT_BACKENDS))
+        raise argparse.ArgumentTypeError(
+            f"backend must be one of: {supported}"
+        )
+    if not model:
+        raise argparse.ArgumentTypeError("model must be non-empty")
+    return RolloutSlot(worker_backend=worker_backend, model=model)
+
+
+def _resolve_rollout_slots(args: argparse.Namespace) -> tuple[RolloutSlot, ...]:
+    configured = tuple(getattr(args, "rollout_slot", ()) or ())
+    if configured:
+        if len(configured) != args.num_rollouts:
+            raise SystemExit(
+                "error: the number of --rollout-slot entries must equal --num-rollouts"
+            )
+        return configured
+    return tuple(
+        RolloutSlot(worker_backend=args.worker_backend, model=args.model)
+        for _ in range(args.num_rollouts)
+    )
+
+
+def _ordered_rollout_metadata(
+    rollout_slots: tuple[RolloutSlot, ...], *, enabled: bool
+) -> dict[str, Any]:
+    if not enabled:
+        return {}
+    return {
+        "rollout_assignment_mode": ORDERED_ROLLOUT_MODE,
+        "rollout_slots": [slot.to_metadata() for slot in rollout_slots],
+    }
+
+
+def _validate_ordered_rollout_records(
+    records: list[dict[str, Any]],
+    rollout_slots: tuple[RolloutSlot, ...],
+    identity_metadata: dict[str, Any],
+) -> None:
+    for record in records:
+        rollout_index = record.get("rollout_index")
+        if (
+            not isinstance(rollout_index, int)
+            or not 0 <= rollout_index < len(rollout_slots)
+        ):
+            raise SystemExit(
+                "error: persisted run record is incompatible with ordered rollout slots"
+            )
+        slot = rollout_slots[rollout_index]
+        if (
+            record.get("worker_backend") != slot.worker_backend
+            or record.get("model") != slot.model
+            or any(
+                record.get(key) != value
+                for key, value in identity_metadata.items()
+            )
+        ):
+            raise SystemExit(
+                "error: persisted run record does not match the ordered rollout identity"
+            )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run one RLVR episode.")
     parser.add_argument(
@@ -2570,6 +2718,18 @@ def parse_args() -> argparse.Namespace:
         choices=["openrouter", "codex", "opencode"],
         default="openrouter",
         help="Worker runtime to use for rollouts.",
+    )
+    parser.add_argument(
+        "--rollout-slot",
+        action="append",
+        type=_rollout_slot_argument,
+        default=[],
+        metavar="BACKEND=MODEL",
+        help=(
+            "Ordered per-rollout backend/model assignment. Repeat exactly --num-rollouts "
+            "times; supported backends are codex and opencode. When omitted, "
+            "--worker-backend and --model retain their existing homogeneous behavior."
+        ),
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--generation", type=int, default=0)
@@ -2908,6 +3068,14 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
     difficulty_filter_payload = list(args.difficulty_filter) if args.difficulty_filter is not None else None
     if args.num_rollouts <= 0:
         raise ValueError("--num-rollouts must be > 0")
+    rollout_slots = _resolve_rollout_slots(args)
+    ordered_rollouts_enabled = bool(args.rollout_slot)
+    ordered_rollout_metadata = _ordered_rollout_metadata(
+        rollout_slots, enabled=ordered_rollouts_enabled
+    )
+    args._rollout_slots = rollout_slots
+    required_backends = {slot.worker_backend for slot in rollout_slots}
+    args._benchmark_worker_backend = rollout_slots[0].worker_backend
     if args.worker_timeout_seconds <= 0:
         raise ValueError("--worker-timeout-seconds must be > 0")
     if args.bash_timeout_seconds <= 0:
@@ -2918,29 +3086,40 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
         raise SystemExit(
             "error: --problem-pool-size is not valid with --benchmark open-ended"
         )
-    if private_inbox_enabled(args.benchmark, args.worker_backend):
+    if any(
+        private_inbox_enabled(args.benchmark, slot.worker_backend)
+        for slot in rollout_slots
+    ):
         if args.num_rollouts > len(ROLLOUT_HUMAN_NAMES):
             raise SystemExit(
                 "error: open-ended private inbox supports rollout indices 0 through 7"
             )
         if (
-            args.worker_backend == "codex"
+            "codex" in required_backends
             and args.codex_sandbox_mode == "danger-full-access"
         ):
             raise SystemExit(
                 "error: Codex open-ended private inbox requires read-only or workspace-write sandboxing"
             )
         if (
-            args.worker_backend == "opencode"
+            "opencode" in required_backends
             and args.opencode_sandbox_mode != "bubblewrap"
         ):
             raise SystemExit(
                 "error: OpenCode open-ended private inbox requires bubblewrap sandboxing"
             )
 
-    _validate_benchmark_backend(args.benchmark, args.worker_backend)
+    for worker_backend in required_backends:
+        _validate_benchmark_backend(args.benchmark, worker_backend)
     runtime_root = _resolve_runtime_root(args.runtime_root)
+    runtime_was_empty = not any(runtime_root.iterdir())
     _claim_runtime_archive_identity(runtime_root)
+    _claim_runtime_rollout_identity(
+        runtime_root,
+        rollout_slots,
+        explicitly_configured=ordered_rollouts_enabled,
+        runtime_was_empty=runtime_was_empty,
+    )
     _check_runtime_benchmark(runtime_root, args.benchmark)
     open_ended_state_dir = runtime_root / "logs" / "open_ended_task"
     open_ended_task: OpenEndedTask | None = None
@@ -2956,28 +3135,54 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
         raise SystemExit("error: --task-file is only valid with --benchmark open-ended")
 
     load_dotenv()
-    opencode_custom_provider = custom_provider_configuration(
-        model=args.model,
-        provider_id=args.opencode_custom_provider_id,
-        name=args.opencode_custom_provider_name,
-        npm=args.opencode_custom_provider_npm,
-        base_url=args.opencode_custom_provider_base_url,
-        api_key_env=args.opencode_custom_provider_api_key_env,
-        header_env=tuple(args.opencode_custom_provider_header_env),
-        context_limit=args.opencode_custom_provider_context_limit,
-        output_limit=args.opencode_custom_provider_output_limit,
-    )
-    if opencode_custom_provider is not None and args.worker_backend != "opencode":
-        raise ValueError("custom OpenCode provider flags require --worker-backend=opencode")
-    opencode_custom_provider_sha256 = custom_provider_fingerprint(
-        opencode_custom_provider
-    )
+    custom_provider_requested = any(
+        value is not None
+        for value in (
+            args.opencode_custom_provider_id,
+            args.opencode_custom_provider_name,
+            args.opencode_custom_provider_npm,
+            args.opencode_custom_provider_base_url,
+            args.opencode_custom_provider_api_key_env,
+            args.opencode_custom_provider_context_limit,
+            args.opencode_custom_provider_output_limit,
+        )
+    ) or bool(args.opencode_custom_provider_header_env)
+    if custom_provider_requested and "opencode" not in required_backends:
+        raise ValueError("custom OpenCode provider flags require an OpenCode rollout")
+    opencode_slot_indices = [
+        index
+        for index, slot in enumerate(rollout_slots)
+        if slot.worker_backend == "opencode"
+    ]
+    if custom_provider_requested:
+        validation_index = next(
+            (
+                index
+                for index in opencode_slot_indices
+                if rollout_slots[index].model.split("/", 1)[0]
+                == args.opencode_custom_provider_id
+            ),
+            opencode_slot_indices[0],
+        )
+        custom_provider_configuration(
+            model=rollout_slots[validation_index].model,
+            provider_id=args.opencode_custom_provider_id,
+            name=args.opencode_custom_provider_name,
+            npm=args.opencode_custom_provider_npm,
+            base_url=args.opencode_custom_provider_base_url,
+            api_key_env=args.opencode_custom_provider_api_key_env,
+            header_env=tuple(args.opencode_custom_provider_header_env),
+            context_limit=args.opencode_custom_provider_context_limit,
+            output_limit=args.opencode_custom_provider_output_limit,
+        )
     api_key: str | None = os.environ.get("OPENROUTER_API_KEY")
-    if args.worker_backend == "openrouter" and not api_key:
-        raise RuntimeError(f"OPENROUTER_API_KEY is required. Set it in the environment or {DEFAULT_ENV_PATH}.")
+    if "openrouter" in required_backends and not api_key:
+        raise RuntimeError(
+            f"OPENROUTER_API_KEY is required. Set it in the environment or {DEFAULT_ENV_PATH}."
+        )
     codex_home = Path(args.codex_home).expanduser().resolve()
     codex_runner_bin: Path | None = None
-    if args.worker_backend == "codex":
+    if "codex" in required_backends:
         codex_runner_bin = resolve_codex_runner_bin(
             Path(args.codex_runner_bin) if args.codex_runner_bin else None,
             release=args.codex_runner_release,
@@ -3004,17 +3209,14 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
     opencode_bun_sha256: str | None = None
     opencode_worker_sha256: str | None = None
     opencode_auth_sha256: str | None = None
-    opencode_provider_env_names: tuple[str, ...] = ()
-    opencode_provider_env_sha256: str | None = None
-    opencode_provider_environment: dict[str, str] | None = None
-    opencode_credential_mounts: tuple[tuple[Path, Path], ...] = ()
+    opencode_slot_environments: dict[int, OpenCodeSlotEnvironment] = {}
     opencode_python_sha256: str | None = None
     opencode_bubblewrap_version: str | None = None
     opencode_bubblewrap_sha256: str | None = None
     opencode_system_instructions: str | None = None
     opencode_system_instructions_sha256: str | None = None
     opencode_configured_initial_prompt_sha256: str | None = None
-    if args.worker_backend == "opencode":
+    if "opencode" in required_backends:
         if not opencode_allowed_versions:
             raise ValueError("--opencode-allowed-versions must contain at least one version")
         if not opencode_allowed_bun_versions:
@@ -3074,33 +3276,61 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
         opencode_auth_sha256 = (
             file_sha256(opencode_auth_file) if opencode_auth_file is not None else None
         )
-        opencode_provider_env_names = provider_environment_names(
-            args.model,
-            (
-                *tuple(args.opencode_provider_env),
-                *custom_provider_environment_names(opencode_custom_provider),
-            ),
-        )
-        opencode_provider_environment, opencode_credential_mounts = (
-            prepare_provider_environment(
-                opencode_provider_env_names,
-                sandbox_mode=args.opencode_sandbox_mode,
+        for rollout_index in opencode_slot_indices:
+            slot_model = rollout_slots[rollout_index].model
+            slot_custom_provider = None
+            if (
+                custom_provider_requested
+                and slot_model.split("/", 1)[0]
+                == args.opencode_custom_provider_id
+            ):
+                slot_custom_provider = custom_provider_configuration(
+                    model=slot_model,
+                    provider_id=args.opencode_custom_provider_id,
+                    name=args.opencode_custom_provider_name,
+                    npm=args.opencode_custom_provider_npm,
+                    base_url=args.opencode_custom_provider_base_url,
+                    api_key_env=args.opencode_custom_provider_api_key_env,
+                    header_env=tuple(args.opencode_custom_provider_header_env),
+                    context_limit=args.opencode_custom_provider_context_limit,
+                    output_limit=args.opencode_custom_provider_output_limit,
+                )
+            slot_provider_env_names = provider_environment_names(
+                slot_model,
+                (
+                    *tuple(args.opencode_provider_env),
+                    *custom_provider_environment_names(slot_custom_provider),
+                ),
             )
-        )
-        missing_custom_provider_env = [
-            name
-            for name in custom_provider_environment_names(opencode_custom_provider)
-            if name not in opencode_provider_environment
-        ]
-        if missing_custom_provider_env:
-            raise ValueError(
-                "custom OpenCode provider environment variables are unset: "
-                + ", ".join(missing_custom_provider_env)
+            slot_provider_environment, slot_credential_mounts = (
+                prepare_provider_environment(
+                    slot_provider_env_names,
+                    sandbox_mode=args.opencode_sandbox_mode,
+                )
             )
-        opencode_provider_env_sha256 = provider_environment_fingerprint(
-            opencode_provider_env_names,
-            sandbox_mode=args.opencode_sandbox_mode,
-        )
+            missing_custom_provider_env = [
+                name
+                for name in custom_provider_environment_names(slot_custom_provider)
+                if name not in slot_provider_environment
+            ]
+            if missing_custom_provider_env:
+                raise ValueError(
+                    "custom OpenCode provider environment variables are unset: "
+                    + ", ".join(missing_custom_provider_env)
+                )
+            opencode_slot_environments[rollout_index] = OpenCodeSlotEnvironment(
+                provider_env_names=slot_provider_env_names,
+                provider_environment=slot_provider_environment,
+                credential_mounts=slot_credential_mounts,
+                provider_env_sha256=provider_environment_fingerprint(
+                    slot_provider_env_names,
+                    sandbox_mode=args.opencode_sandbox_mode,
+                ),
+                custom_provider=slot_custom_provider,
+                custom_provider_sha256=custom_provider_fingerprint(
+                    slot_custom_provider
+                ),
+            )
         opencode_python_sha256 = opencode_python_fingerprint(Path(__file__))
         opencode_system_instructions = resolve_opencode_system_instructions(
             args.opencode_base_instructions_mode
@@ -3111,29 +3341,45 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
         opencode_configured_initial_prompt_sha256 = text_sha256(
             args.opencode_initial_prompt
         )
-        args._opencode_runtime_version = opencode_runtime_version
-        args._opencode_bin_sha256 = opencode_bin_sha256
-        args._opencode_bun_version = opencode_bun_version
-        args._opencode_bun_sha256 = opencode_bun_sha256
-        args._opencode_worker_sha256 = opencode_worker_sha256
-        args._opencode_python_sha256 = opencode_python_sha256
-        args._opencode_auth_sha256 = opencode_auth_sha256
-        args._opencode_provider_env_names = opencode_provider_env_names
-        args._opencode_provider_env_sha256 = opencode_provider_env_sha256
-        args._opencode_custom_provider_sha256 = opencode_custom_provider_sha256
-        args._opencode_custom_provider = opencode_custom_provider
-        args._opencode_allowed_bun_versions = opencode_allowed_bun_versions
-        args._opencode_bubblewrap_bin = (
-            str(opencode_bubblewrap_bin) if opencode_bubblewrap_bin is not None else None
-        )
-        args._opencode_bubblewrap_version = opencode_bubblewrap_version
-        args._opencode_bubblewrap_sha256 = opencode_bubblewrap_sha256
-        args._opencode_system_instructions_sha256 = (
-            opencode_system_instructions_sha256
-        )
-        args._opencode_configured_initial_prompt_sha256 = (
-            opencode_configured_initial_prompt_sha256
-        )
+    rollout_resume_args: list[argparse.Namespace] = []
+    for rollout_index, slot in enumerate(rollout_slots):
+        slot_args = argparse.Namespace(**vars(args))
+        slot_args.worker_backend = slot.worker_backend
+        slot_args.model = slot.model
+        if slot.worker_backend == "opencode":
+            slot_environment = opencode_slot_environments[rollout_index]
+            slot_args._opencode_runtime_version = opencode_runtime_version
+            slot_args._opencode_bin_sha256 = opencode_bin_sha256
+            slot_args._opencode_bun_version = opencode_bun_version
+            slot_args._opencode_bun_sha256 = opencode_bun_sha256
+            slot_args._opencode_worker_sha256 = opencode_worker_sha256
+            slot_args._opencode_python_sha256 = opencode_python_sha256
+            slot_args._opencode_auth_sha256 = opencode_auth_sha256
+            slot_args._opencode_provider_env_names = (
+                slot_environment.provider_env_names
+            )
+            slot_args._opencode_provider_env_sha256 = (
+                slot_environment.provider_env_sha256
+            )
+            slot_args._opencode_custom_provider_sha256 = (
+                slot_environment.custom_provider_sha256
+            )
+            slot_args._opencode_custom_provider = slot_environment.custom_provider
+            slot_args._opencode_allowed_bun_versions = opencode_allowed_bun_versions
+            slot_args._opencode_bubblewrap_bin = (
+                str(opencode_bubblewrap_bin)
+                if opencode_bubblewrap_bin is not None
+                else None
+            )
+            slot_args._opencode_bubblewrap_version = opencode_bubblewrap_version
+            slot_args._opencode_bubblewrap_sha256 = opencode_bubblewrap_sha256
+            slot_args._opencode_system_instructions_sha256 = (
+                opencode_system_instructions_sha256
+            )
+            slot_args._opencode_configured_initial_prompt_sha256 = (
+                opencode_configured_initial_prompt_sha256
+            )
+        rollout_resume_args.append(slot_args)
 
     _claim_runtime_benchmark(runtime_root, args.benchmark)
     runs_log_path = _resolve_runtime_path(args.runs_log, runtime_root, "--runs-log")
@@ -3210,16 +3456,34 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
     existing_records: list[dict[str, Any]] = []
     if not args.no_resume:
         all_records = load_existing_run_records(runs_log_path)
+        if ordered_rollouts_enabled:
+            _validate_ordered_rollout_records(
+                all_records,
+                rollout_slots,
+                ordered_rollout_metadata,
+            )
         def _matches_run(rec: dict[str, Any]) -> bool:
+            rollout_index = rec.get("rollout_index")
+            if (
+                not isinstance(rollout_index, int)
+                or not 0 <= rollout_index < len(rollout_slots)
+            ):
+                return False
+            slot = rollout_slots[rollout_index]
+            slot_args = rollout_resume_args[rollout_index]
             if not (
                 rec.get("benchmark", "supergpqa") == args.benchmark
-                and rec.get("model") == args.model
+                and rec.get("model") == slot.model
                 and rec.get("seed") == args.seed
                 and rec.get("generation") == args.generation
                 and rec.get("bootstrap_rollout_count", rec.get("num_rollouts"))
                 == args.num_rollouts
-                and _worker_backend_resume_compatible(rec, args)
+                and _worker_backend_resume_compatible(rec, slot_args)
                 and _archive_record_resume_compatible(rec, archive_mode_metadata)
+                and all(
+                    rec.get(key) == value
+                    for key, value in ordered_rollout_metadata.items()
+                )
             ):
                 return False
             if args.benchmark != "supergpqa":
@@ -3266,9 +3530,14 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 partial_tasks.add(task_idx)
 
         def _partial_prompt_matches(record: dict[str, Any]) -> bool:
-            if record.get("task_index") not in partial_tasks or args.worker_backend != "opencode":
-                return True
             rollout_idx = record.get("rollout_index")
+            if (
+                record.get("task_index") not in partial_tasks
+                or not isinstance(rollout_idx, int)
+                or not 0 <= rollout_idx < len(rollout_slots)
+                or rollout_slots[rollout_idx].worker_backend != "opencode"
+            ):
+                return True
             inherited_prompt = None
             if record.get("bootstrap_seed_used") is not True:
                 if not isinstance(rollout_idx, int) or not 0 <= rollout_idx < len(parent_pool):
@@ -3278,7 +3547,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                     return False
             return _worker_backend_resume_compatible(
                 record,
-                args,
+                rollout_resume_args[rollout_idx],
                 effective_initial_prompt=inherited_prompt,
                 require_effective_prompt=True,
             )
@@ -3367,6 +3636,10 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             raise RuntimeError(
                 f"No rollout population positions available for task_index={task_index}."
             )
+        if task_rollout_count > len(rollout_slots):
+            raise RuntimeError(
+                "Persisted rollout population exceeds the configured rollout slots."
+            )
         task_instance_uuids: dict[int, str] = {}
         for rollout_index in range(task_rollout_count):
             if rollout_index in existing_task_records:
@@ -3438,9 +3711,16 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             if rollout_index not in existing_task_records
         ]
         private_inbox_configs: dict[int, PrivateInboxConfig] = {}
-        if private_inbox_enabled(args.benchmark, args.worker_backend):
+        private_inbox_rollout_indices = [
+            rollout_index
+            for rollout_index in missing_rollout_indices
+            if private_inbox_enabled(
+                args.benchmark, rollout_slots[rollout_index].worker_backend
+            )
+        ]
+        if private_inbox_rollout_indices:
             rollout_workdirs: dict[int, Path] = {}
-            for rollout_index in missing_rollout_indices:
+            for rollout_index in private_inbox_rollout_indices:
                 rollout_workdir = (
                     fixed_temp_dir
                     / f"{task_index:06d}"
@@ -3461,6 +3741,22 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             if existing is not None:
                 raise RuntimeError(f"rollout {rollout_index} already exists and should not have been submitted")
 
+            rollout_slot = rollout_slots[rollout_index]
+            worker_backend = rollout_slot.worker_backend
+            model = rollout_slot.model
+            opencode_slot_environment = opencode_slot_environments.get(
+                rollout_index
+            )
+            slot_progress_metadata = (
+                {"worker_backend": worker_backend, "model": model}
+                if ordered_rollouts_enabled
+                else {}
+            )
+            slot_summary = (
+                f" backend={worker_backend} model={model}"
+                if ordered_rollouts_enabled
+                else ""
+            )
             rollout_username = _rollout_username(rollout_index)
             private_inbox = private_inbox_configs.get(rollout_index)
             sampled_parent: dict[str, Any] | None = (
@@ -3488,6 +3784,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                     "rollout_index": rollout_index,
                     "rollout_username": rollout_username,
                     "task_id": task_id,
+                    **slot_progress_metadata,
                     **({"problem_uid": problem_uid} if has_problem_pool else {}),
                     **batch_reporting,
                     **archive_mode_metadata,
@@ -3534,7 +3831,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             bootstrap_seed_used = sampled_parent is None or bootstrap_reinitialized
             rollout_initial_prompt = (
                 args.opencode_initial_prompt
-                if args.worker_backend == "opencode"
+                if worker_backend == "opencode"
                 else args.codex_initial_prompt
             )
             if sampled_parent is not None and not bootstrap_reinitialized:
@@ -3567,7 +3864,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                     temp_dir,
                     exclude_names=("messages",) if private_inbox is not None else (),
                 )
-                if args.worker_backend != "opencode":
+                if worker_backend != "opencode":
                     rollout_initial_prompt = _format_bootstrap_seed_prompt(
                         bootstrap_seed_dir
                     )
@@ -3582,19 +3879,19 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             runtime_file = temp_dir / "runtime.md"
             codex_base_instructions = (
                 resolve_codex_base_instructions(args.codex_base_instructions_mode)
-                if args.worker_backend == "codex"
+                if worker_backend == "codex"
                 else None
             )
             opencode_system_instructions = (
                 resolve_opencode_system_instructions(
                     args.opencode_base_instructions_mode
                 )
-                if args.worker_backend == "opencode"
+                if worker_backend == "opencode"
                 else None
             )
             continuation_context = _make_continuation_context(
-                worker_backend=args.worker_backend,
-                model=args.model,
+                worker_backend=worker_backend,
+                model=model,
                 workdir=temp_dir,
                 seed_output_dir=seed_output_dir,
                 shared_workspace_dir=shared_workspace_dir,
@@ -3614,7 +3911,9 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 worker_timeout_seconds=args.worker_timeout_seconds,
                 bash_timeout_seconds=args.bash_timeout_seconds,
                 openrouter_max_retries=args.openrouter_max_retries,
-                codex_runner_bin=codex_runner_bin,
+                codex_runner_bin=(
+                    codex_runner_bin if worker_backend == "codex" else None
+                ),
                 codex_home=codex_home,
                 codex_sandbox_mode=args.codex_sandbox_mode,
                 codex_initial_prompt=args.codex_initial_prompt,
@@ -3622,14 +3921,15 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 shared_archives_root=shared_archives_root,
                 private_inbox=private_inbox,
             )
+            continuation_context.update(ordered_rollout_metadata)
             planned_context_path = (
                 opencode_mcp_control_dir / CONTINUATION_CONTEXT_FILENAME
-                if args.worker_backend == "opencode"
+                if worker_backend == "opencode"
                 else rollout_control_dir / CONTINUATION_CONTEXT_FILENAME
             )
             rollout_benchmark = benchmark_driver.prepare_rollout(
                 prepared_benchmark_batch,
-                backend=args.worker_backend,
+                backend=worker_backend,
                 context={
                     **continuation_context,
                     "continuation_context_path": str(planned_context_path),
@@ -3674,7 +3974,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             )
             continuation_context_path = (
                 _write_continuation_context(continuation_context, rollout_control_dir)
-                if args.worker_backend in {"codex", "opencode"}
+                if worker_backend in {"codex", "opencode"}
                 else None
             )
             opencode_mcp_context_path = (
@@ -3682,7 +3982,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                     continuation_context,
                     opencode_mcp_control_dir,
                 )
-                if args.worker_backend == "opencode"
+                if worker_backend == "opencode"
                 else None
             )
             _progress(
@@ -3705,7 +4005,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 seed_output_dir=str(seed_output_dir),
                 rollout_control_dir=(
                     str(rollout_control_dir)
-                    if args.worker_backend in {"codex", "opencode"}
+                    if worker_backend in {"codex", "opencode"}
                     else None
                 ),
                 rollout_state_dir=str(rollout_state_dir),
@@ -3713,7 +4013,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                     str(continuation_context_path) if continuation_context_path is not None else None
                 ),
                 codex_base_instructions_mode=(
-                    args.codex_base_instructions_mode if args.worker_backend == "codex" else None
+                    args.codex_base_instructions_mode if worker_backend == "codex" else None
                 ),
                 codex_base_instructions_chars=(
                     len(codex_base_instructions) if codex_base_instructions is not None else None
@@ -3735,7 +4035,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                             rollout_initial_prompt
                         ),
                     }
-                    if args.worker_backend == "opencode"
+                    if worker_backend == "opencode"
                     else {}
                 ),
                 bootstrap_seed_used=bootstrap_seed_used,
@@ -3745,12 +4045,12 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
 
             try:
                 try:
-                    if args.worker_backend == "codex":
+                    if worker_backend == "codex":
                         if codex_runner_bin is None:
                             raise RuntimeError("Codex runner binary was not initialized.")
                         worker_result = run_codex_worker(
                             runner_bin=codex_runner_bin,
-                            model=args.model,
+                            model=model,
                             workdir=temp_dir,
                             control_dir=rollout_control_dir,
                             worker_state_dir=rollout_state_dir,
@@ -3770,7 +4070,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                             persist_session=(args.benchmark == "open-ended"),
                             private_inbox=private_inbox,
                         )
-                    elif args.worker_backend == "opencode":
+                    elif worker_backend == "opencode":
                         if (
                             opencode_worker_script is None
                             or opencode_bun_bin is None
@@ -3779,11 +4079,15 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                             raise RuntimeError(
                                 "OpenCode worker, Bun, and CLI were not initialized."
                             )
+                        if opencode_slot_environment is None:
+                            raise RuntimeError(
+                                "OpenCode provider environment was not initialized."
+                            )
                         worker_result = run_opencode_worker(
                             worker_script=opencode_worker_script,
                             bun_bin=opencode_bun_bin,
                             opencode_bin=opencode_bin,
-                            model=args.model,
+                            model=model,
                             workdir=temp_dir,
                             control_dir=rollout_control_dir,
                             worker_state_dir=rollout_state_dir,
@@ -3801,9 +4105,15 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                             startup_timeout_seconds=(
                                 args.opencode_server_startup_timeout_seconds
                             ),
-                            provider_env_names=opencode_provider_env_names,
-                            provider_environment=opencode_provider_environment,
-                            custom_provider=opencode_custom_provider,
+                            provider_env_names=(
+                                opencode_slot_environment.provider_env_names
+                            ),
+                            provider_environment=(
+                                opencode_slot_environment.provider_environment
+                            ),
+                            custom_provider=(
+                                opencode_slot_environment.custom_provider
+                            ),
                             sandbox_mode=(
                                 "bubblewrap"
                                 if args.opencode_sandbox_mode == "bubblewrap"
@@ -3811,7 +4121,9 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                             ),
                             sandbox_network=args.opencode_network_mode,
                             bubblewrap_bin=opencode_bubblewrap_bin,
-                            sandbox_read_only_mounts=opencode_credential_mounts,
+                            sandbox_read_only_mounts=(
+                                opencode_slot_environment.credential_mounts
+                            ),
                             sandbox_writable_roots=tuple(
                                 path
                                 for path in (
@@ -3832,7 +4144,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                             raise RuntimeError("OPENROUTER_API_KEY is required for the OpenRouter backend.")
                         worker_result = run_worker(
                             api_key=api_key,
-                            model=args.model,
+                            model=model,
                             workdir=temp_dir,
                             seed_output_dir=seed_output_dir,
                             shared_archives_root=shared_archives_root,
@@ -4023,12 +4335,13 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 "worker_stop_reason": worker_result.stop_reason,
                 "worker_error_code": worker_result.error_code,
                 "worker_error_message": worker_result.error_message,
-                "worker_backend": args.worker_backend,
+                "worker_backend": worker_backend,
                 **(
-                    _private_inbox_capability_record(args.worker_backend)
+                    _private_inbox_capability_record(worker_backend)
                     if private_inbox is not None
                     else {}
                 ),
+                **ordered_rollout_metadata,
                 "worker_metadata": worker_result.metadata,
                 "research_turn_count": int(
                     (worker_result.metadata or {}).get("turn_count") or 0
@@ -4054,65 +4367,69 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 "difficulty_filter": (
                     difficulty_filter_payload if args.benchmark == "supergpqa" else None
                 ),
-                "model": args.model,
+                "model": model,
                 "num_rollouts": args.num_rollouts,
                 "bootstrap_rollout_count": args.num_rollouts,
                 "task_rollout_count": task_rollout_count,
                 "worker_timeout_seconds": args.worker_timeout_seconds,
                 "bash_timeout_seconds": args.bash_timeout_seconds,
                 "openrouter_max_retries": args.openrouter_max_retries,
-                "codex_home": str(codex_home) if args.worker_backend == "codex" else None,
-                "codex_runner_bin": str(codex_runner_bin) if codex_runner_bin is not None else None,
-                "codex_sandbox_mode": args.codex_sandbox_mode if args.worker_backend == "codex" else None,
-                "codex_initial_prompt": args.codex_initial_prompt if args.worker_backend == "codex" else None,
+                "codex_home": str(codex_home) if worker_backend == "codex" else None,
+                "codex_runner_bin": (
+                    str(codex_runner_bin)
+                    if worker_backend == "codex" and codex_runner_bin is not None
+                    else None
+                ),
+                "codex_sandbox_mode": args.codex_sandbox_mode if worker_backend == "codex" else None,
+                "codex_initial_prompt": args.codex_initial_prompt if worker_backend == "codex" else None,
                 "codex_base_instructions_mode": (
-                    args.codex_base_instructions_mode if args.worker_backend == "codex" else None
+                    args.codex_base_instructions_mode if worker_backend == "codex" else None
                 ),
                 "codex_base_instructions_chars": (
                     len(codex_base_instructions)
-                    if args.worker_backend == "codex" and codex_base_instructions is not None
+                    if worker_backend == "codex" and codex_base_instructions is not None
                     else None
                 ),
                 "opencode_bin": (
-                    str(opencode_bin) if args.worker_backend == "opencode" else None
+                    str(opencode_bin) if worker_backend == "opencode" else None
                 ),
                 "opencode_runner_bin": (
                     str(opencode_worker_script)
-                    if args.worker_backend == "opencode"
+                    if worker_backend == "opencode"
                     and opencode_worker_script is not None
                     else None
                 ),
                 "opencode_worker_script": (
                     str(opencode_worker_script)
-                    if args.worker_backend == "opencode"
+                    if worker_backend == "opencode"
                     and opencode_worker_script is not None
                     else None
                 ),
                 "opencode_bun_bin": (
                     str(opencode_bun_bin)
-                    if args.worker_backend == "opencode"
+                    if worker_backend == "opencode"
                     and opencode_bun_bin is not None
                     else None
                 ),
                 "opencode_base_instructions_mode": (
                     args.opencode_base_instructions_mode
-                    if args.worker_backend == "opencode"
+                    if worker_backend == "opencode"
                     else None
                 ),
                 "opencode_system_instructions_chars": (
                     len(opencode_system_instructions)
-                    if args.worker_backend == "opencode"
+                    if worker_backend == "opencode"
                     and opencode_system_instructions is not None
                     else None
                 ),
                 "opencode_allowed_versions": (
                     list(opencode_allowed_versions)
-                    if args.worker_backend == "opencode"
+                    if worker_backend == "opencode"
                     else None
                 ),
                 "opencode_allowed_bun_versions": (
                     list(opencode_allowed_bun_versions)
-                    if args.worker_backend == "opencode"
+                    if worker_backend == "opencode"
                     else None
                 ),
                 "opencode_runtime_version": opencode_runtime_version,
@@ -4122,36 +4439,40 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 "opencode_worker_sha256": opencode_worker_sha256,
                 "opencode_python_sha256": opencode_python_sha256,
                 "opencode_auth_sha256": opencode_auth_sha256,
-                "opencode_provider_env_sha256": opencode_provider_env_sha256,
+                "opencode_provider_env_sha256": (
+                    opencode_slot_environment.provider_env_sha256
+                    if opencode_slot_environment is not None
+                    else None
+                ),
                 "opencode_custom_provider": (
-                    opencode_custom_provider
-                    if args.worker_backend == "opencode"
+                    opencode_slot_environment.custom_provider
+                    if opencode_slot_environment is not None
                     else None
                 ),
                 "opencode_custom_provider_sha256": (
-                    opencode_custom_provider_sha256
-                    if args.worker_backend == "opencode"
+                    opencode_slot_environment.custom_provider_sha256
+                    if opencode_slot_environment is not None
                     else None
                 ),
                 "opencode_server_startup_timeout_seconds": (
                     args.opencode_server_startup_timeout_seconds
-                    if args.worker_backend == "opencode"
+                    if worker_backend == "opencode"
                     else None
                 ),
                 "opencode_worker_timeout_seconds": (
                     args.worker_timeout_seconds
-                    if args.worker_backend == "opencode"
+                    if worker_backend == "opencode"
                     else None
                 ),
                 "opencode_sandbox_mode": (
-                    args.opencode_sandbox_mode if args.worker_backend == "opencode" else None
+                    args.opencode_sandbox_mode if worker_backend == "opencode" else None
                 ),
                 "opencode_network_mode": (
-                    args.opencode_network_mode if args.worker_backend == "opencode" else None
+                    args.opencode_network_mode if worker_backend == "opencode" else None
                 ),
                 "opencode_bubblewrap_bin": (
                     str(opencode_bubblewrap_bin)
-                    if args.worker_backend == "opencode"
+                    if worker_backend == "opencode"
                     and opencode_bubblewrap_bin is not None
                     else None
                 ),
@@ -4159,34 +4480,34 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 "opencode_bubblewrap_sha256": opencode_bubblewrap_sha256,
                 "opencode_system_instructions_sha256": (
                     text_sha256(opencode_system_instructions)
-                    if args.worker_backend == "opencode"
+                    if worker_backend == "opencode"
                     else None
                 ),
                 "opencode_configured_initial_prompt_sha256": (
                     opencode_configured_initial_prompt_sha256
-                    if args.worker_backend == "opencode"
+                    if worker_backend == "opencode"
                     else None
                 ),
                 "opencode_effective_initial_prompt_sha256": (
                     text_sha256(rollout_initial_prompt)
-                    if args.worker_backend == "opencode"
+                    if worker_backend == "opencode"
                     else None
                 ),
                 "opencode_provider_env_names": (
-                    list(opencode_provider_env_names)
-                    if args.worker_backend == "opencode"
+                    list(opencode_slot_environment.provider_env_names)
+                    if opencode_slot_environment is not None
                     else None
                 ),
                 "opencode_agent": (
-                    args.opencode_agent if args.worker_backend == "opencode" else None
+                    args.opencode_agent if worker_backend == "opencode" else None
                 ),
                 "opencode_variant": (
-                    args.opencode_variant if args.worker_backend == "opencode" else None
+                    args.opencode_variant if worker_backend == "opencode" else None
                 ),
                 "opencode_auth_source": (
                     "file"
-                    if args.worker_backend == "opencode" and opencode_auth_file is not None
-                    else "environment" if args.worker_backend == "opencode" else None
+                    if worker_backend == "opencode" and opencode_auth_file is not None
+                    else "environment" if worker_backend == "opencode" else None
                 ),
                 "bootstrap_seed_used": bootstrap_seed_used,
                 "bootstrap_seed_embedded": False,
@@ -4197,19 +4518,21 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                     str(dataset_cache_dir) if args.benchmark == "supergpqa" else None
                 ),
                 **archive_mode_metadata,
-            }, args.worker_backend)
+            }, worker_backend)
             if benchmark_outcome is not None:
                 record.update(benchmark_outcome.run_record)
                 summary = (
                     f"gen={args.generation} seed={args.seed} task_index={task_index} rollout_index={rollout_index} "
-                    f"rollout_username={rollout_username} task_id={record_task_id or 'unassigned'} "
+                    f"rollout_username={rollout_username}{slot_summary} "
+                    f"task_id={record_task_id or 'unassigned'} "
                     f"benchmark_attempted={benchmark_outcome.attempted} "
                     f"benchmark_solved={benchmark_outcome.solved} output={output_dir}"
                 )
             else:
                 summary = (
                     f"gen={args.generation} seed={args.seed} task_index={task_index} rollout_index={rollout_index} "
-                    f"rollout_username={rollout_username} task_id={record_task_id} "
+                    f"rollout_username={rollout_username}{slot_summary} "
+                    f"task_id={record_task_id} "
                     f"evaluation=unconfigured output={output_dir}"
                 )
             if worker_result.status == "error":
@@ -4238,6 +4561,22 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                         continue
                     for future in done:
                         rollout_index = futures[future]
+                        rollout_slot = rollout_slots[rollout_index]
+                        worker_backend = rollout_slot.worker_backend
+                        model = rollout_slot.model
+                        opencode_slot_environment = opencode_slot_environments.get(
+                            rollout_index
+                        )
+                        slot_progress_metadata = (
+                            {"worker_backend": worker_backend, "model": model}
+                            if ordered_rollouts_enabled
+                            else {}
+                        )
+                        slot_summary = (
+                            f" backend={worker_backend} model={model}"
+                            if ordered_rollouts_enabled
+                            else ""
+                        )
                         try:
                             results.append(future.result())
                         except BaseException as exc:
@@ -4253,6 +4592,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                                     "rollout_index": rollout_index,
                                     "rollout_username": _rollout_username(rollout_index),
                                     "task_id": task_id,
+                                    **slot_progress_metadata,
                                     **({"problem_uid": problem_uid} if has_problem_pool else {}),
                                     **batch_reporting,
                                     "worker_status": "error",
@@ -4290,17 +4630,18 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                                         "worker_stop_reason": type(exc).__name__,
                                         "worker_error_code": None,
                                         "worker_error_message": str(exc),
-                                        "worker_backend": args.worker_backend,
+                                        "worker_backend": worker_backend,
                                         **(
                                             _private_inbox_capability_record(
-                                                args.worker_backend
+                                                worker_backend
                                             )
                                             if private_inbox_enabled(
                                                 args.benchmark,
-                                                args.worker_backend,
+                                                worker_backend,
                                             )
                                             else {}
                                         ),
+                                        **ordered_rollout_metadata,
                                         "worker_metadata": None,
                                         **(
                                             {
@@ -4336,60 +4677,65 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                                             if args.benchmark == "supergpqa"
                                             else None
                                         ),
-                                        "model": args.model,
+                                        "model": model,
                                         "num_rollouts": args.num_rollouts,
                                         "bootstrap_rollout_count": args.num_rollouts,
                                         "task_rollout_count": task_rollout_count,
                                         "worker_timeout_seconds": args.worker_timeout_seconds,
                                         "bash_timeout_seconds": args.bash_timeout_seconds,
                                         "openrouter_max_retries": args.openrouter_max_retries,
-                                        "codex_home": str(codex_home) if args.worker_backend == "codex" else None,
-                                        "codex_runner_bin": str(codex_runner_bin) if codex_runner_bin is not None else None,
-                                        "codex_sandbox_mode": args.codex_sandbox_mode if args.worker_backend == "codex" else None,
-                                        "codex_initial_prompt": args.codex_initial_prompt if args.worker_backend == "codex" else None,
+                                        "codex_home": str(codex_home) if worker_backend == "codex" else None,
+                                        "codex_runner_bin": (
+                                            str(codex_runner_bin)
+                                            if worker_backend == "codex"
+                                            and codex_runner_bin is not None
+                                            else None
+                                        ),
+                                        "codex_sandbox_mode": args.codex_sandbox_mode if worker_backend == "codex" else None,
+                                        "codex_initial_prompt": args.codex_initial_prompt if worker_backend == "codex" else None,
                                         "codex_base_instructions_mode": (
                                             args.codex_base_instructions_mode
-                                            if args.worker_backend == "codex"
+                                            if worker_backend == "codex"
                                             else None
                                         ),
                                         "codex_base_instructions_chars": None,
                                         "opencode_bin": (
                                             str(opencode_bin)
-                                            if args.worker_backend == "opencode"
+                                            if worker_backend == "opencode"
                                             else None
                                         ),
                                         "opencode_runner_bin": (
                                             str(opencode_worker_script)
-                                            if args.worker_backend == "opencode"
+                                            if worker_backend == "opencode"
                                             and opencode_worker_script is not None
                                             else None
                                         ),
                                         "opencode_worker_script": (
                                             str(opencode_worker_script)
-                                            if args.worker_backend == "opencode"
+                                            if worker_backend == "opencode"
                                             and opencode_worker_script is not None
                                             else None
                                         ),
                                         "opencode_bun_bin": (
                                             str(opencode_bun_bin)
-                                            if args.worker_backend == "opencode"
+                                            if worker_backend == "opencode"
                                             and opencode_bun_bin is not None
                                             else None
                                         ),
                                         "opencode_base_instructions_mode": (
                                             args.opencode_base_instructions_mode
-                                            if args.worker_backend == "opencode"
+                                            if worker_backend == "opencode"
                                             else None
                                         ),
                                         "opencode_system_instructions_chars": None,
                                         "opencode_allowed_versions": (
                                             list(opencode_allowed_versions)
-                                            if args.worker_backend == "opencode"
+                                            if worker_backend == "opencode"
                                             else None
                                         ),
                                         "opencode_allowed_bun_versions": (
                                             list(opencode_allowed_bun_versions)
-                                            if args.worker_backend == "opencode"
+                                            if worker_backend == "opencode"
                                             else None
                                         ),
                                         "opencode_runtime_version": opencode_runtime_version,
@@ -4399,54 +4745,56 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                                         "opencode_worker_sha256": opencode_worker_sha256,
                                         "opencode_auth_sha256": opencode_auth_sha256,
                                         "opencode_provider_env_sha256": (
-                                            opencode_provider_env_sha256
+                                            opencode_slot_environment.provider_env_sha256
+                                            if opencode_slot_environment is not None
+                                            else None
                                         ),
                                         "opencode_custom_provider": (
-                                            opencode_custom_provider
-                                            if args.worker_backend == "opencode"
+                                            opencode_slot_environment.custom_provider
+                                            if opencode_slot_environment is not None
                                             else None
                                         ),
                                         "opencode_custom_provider_sha256": (
-                                            opencode_custom_provider_sha256
-                                            if args.worker_backend == "opencode"
+                                            opencode_slot_environment.custom_provider_sha256
+                                            if opencode_slot_environment is not None
                                             else None
                                         ),
                                         "opencode_server_startup_timeout_seconds": (
                                             args.opencode_server_startup_timeout_seconds
-                                            if args.worker_backend == "opencode"
+                                            if worker_backend == "opencode"
                                             else None
                                         ),
                                         "opencode_sandbox_mode": (
                                             args.opencode_sandbox_mode
-                                            if args.worker_backend == "opencode"
+                                            if worker_backend == "opencode"
                                             else None
                                         ),
                                         "opencode_network_mode": (
                                             args.opencode_network_mode
-                                            if args.worker_backend == "opencode"
+                                            if worker_backend == "opencode"
                                             else None
                                         ),
                                         "opencode_provider_env_names": (
-                                            list(opencode_provider_env_names)
-                                            if args.worker_backend == "opencode"
+                                            list(opencode_slot_environment.provider_env_names)
+                                            if opencode_slot_environment is not None
                                             else None
                                         ),
                                         "opencode_agent": (
                                             args.opencode_agent
-                                            if args.worker_backend == "opencode"
+                                            if worker_backend == "opencode"
                                             else None
                                         ),
                                         "opencode_variant": (
                                             args.opencode_variant
-                                            if args.worker_backend == "opencode"
+                                            if worker_backend == "opencode"
                                             else None
                                         ),
                                         "opencode_auth_source": (
                                             "file"
-                                            if args.worker_backend == "opencode"
+                                            if worker_backend == "opencode"
                                             and opencode_auth_file is not None
                                             else "environment"
-                                            if args.worker_backend == "opencode"
+                                            if worker_backend == "opencode"
                                             else None
                                         ),
                                         "config_name": (
@@ -4474,11 +4822,11 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                                             if args.benchmark == "supergpqa"
                                             else {"benchmark_item": None}
                                         ),
-                                    }, args.worker_backend),
+                                    }, worker_backend),
                                     successful_dir=None,
                                     summary=(
                                         f"gen={args.generation} seed={args.seed} task_index={task_index} "
-                                        f"rollout_index={rollout_index} rollout_username={_rollout_username(rollout_index)} "
+                                        f"rollout_index={rollout_index} rollout_username={_rollout_username(rollout_index)}{slot_summary} "
                                         f"task_id={task_id} "
                                         + (
                                             "evaluation=unconfigured "
