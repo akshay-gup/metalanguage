@@ -1,5 +1,6 @@
 .DS_Store
 .env
+.env.openrouter
 .venv/
 .uv-cache/
 __pycache__/
