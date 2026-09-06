@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises"
+import { lstat, mkdir, mkdtemp, readlink, realpath, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join, resolve } from "node:path"
 
 import {
   EventNormalizer,
@@ -30,6 +30,168 @@ function mcpServer(): McpServerInput {
 }
 
 describe("OpenCode native protocol adapter", () => {
+  test("mounts only the resolved resolver file after its empty parent directories", async () => {
+    const root = await mkdtemp(join(tmpdir(), "metalanguage-opencode-resolver-"))
+    try {
+      const cwd = join(root, "work")
+      const state = join(root, "state")
+      const resolver = join(root, "etc", "resolv.conf")
+      const target = join(root, "run", "systemd", "resolve", "stub-resolv.conf")
+      const source = join(root, "source", "actual-resolv.conf")
+      await mkdir(cwd, { recursive: true })
+      await mkdir(state, { recursive: true })
+      await mkdir(join(root, "etc"), { recursive: true })
+      await mkdir(dirname(target), { recursive: true })
+      await mkdir(dirname(source), { recursive: true })
+      await writeFile(source, "nameserver 127.0.0.53\n")
+      await symlink(source, target)
+      await symlink("../run/systemd/resolve/stub-resolv.conf", resolver)
+      const request: RunnerRequest = {
+        opencode_bin: "/usr/bin/true",
+        model: "fixture/model",
+        cwd,
+        state_root: state,
+        sandbox: {
+          mode: "bubblewrap",
+          network: "allow",
+          bubblewrap_bin: "/usr/bin/bwrap",
+          writable_roots: [join(root, "run")],
+        },
+      }
+      const command = await sandboxedServerCommand(request, state, resolver)
+      const mountIndex = command.findIndex(
+        (value, index) => value === "--ro-bind" && command[index + 1] === source && command[index + 2] === target,
+      )
+      expect(mountIndex).toBeGreaterThan(-1)
+      expect(
+        command.findIndex(
+          (value, index) => value === "--ro-bind" && command[index + 1] === "/etc",
+        ),
+      ).toBeLessThan(mountIndex)
+      expect(
+        command.findIndex(
+          (value, index) => value === "--bind" && command[index + 1] === join(root, "run"),
+        ),
+      ).toBeLessThan(mountIndex)
+      for (const parent of [root, join(root, "run"), join(root, "run", "systemd"), dirname(target)]) {
+        expect(
+          command.findIndex((value, index) => value === "--dir" && command[index + 1] === parent),
+        ).toBeLessThan(mountIndex)
+      }
+      expect(
+        command.findIndex(
+          (value, index) => value === "--ro-bind" && command[index + 1] === dirname(target),
+        ),
+      ).toBe(-1)
+      expect(
+        command.findIndex(
+          (value, index) => value === "--bind" && command[index + 1] === target,
+        ),
+      ).toBe(-1)
+      expect(command.indexOf("--chdir")).toBeGreaterThan(mountIndex)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  test("uses the /etc mount for a regular resolver and fails closed on invalid resolver paths", async () => {
+    const root = await mkdtemp(join(tmpdir(), "metalanguage-opencode-resolver-invalid-"))
+    try {
+      const cwd = join(root, "work")
+      const state = join(root, "state")
+      const request: RunnerRequest = {
+        opencode_bin: "/usr/bin/true",
+        model: "fixture/model",
+        cwd,
+        state_root: state,
+        sandbox: { mode: "bubblewrap", network: "allow", bubblewrap_bin: "/usr/bin/bwrap" },
+      }
+      await mkdir(cwd, { recursive: true })
+      await mkdir(state, { recursive: true })
+      const regular = join(root, "regular-resolv.conf")
+      await writeFile(regular, "nameserver 192.0.2.1\n")
+      const command = await sandboxedServerCommand(request, state, regular)
+      expect(
+        command.findIndex(
+          (value, index) => value === "--ro-bind" && command[index + 1] === regular && command[index + 2] === regular,
+        ),
+      ).toBe(-1)
+
+      const broken = join(root, "broken-resolv.conf")
+      await symlink("missing", broken)
+      await expect(sandboxedServerCommand(request, state, broken)).rejects.toThrow(
+        "OpenCode resolver configuration must resolve to a readable regular file",
+      )
+      const directory = join(root, "resolver-directory")
+      await mkdir(directory)
+      await expect(sandboxedServerCommand(request, state, directory)).rejects.toThrow(
+        "OpenCode resolver configuration must resolve to a readable regular file",
+      )
+      const directoryLink = join(root, "resolver-directory-link")
+      await symlink(directory, directoryLink)
+      await expect(sandboxedServerCommand(request, state, directoryLink)).rejects.toThrow(
+        "OpenCode resolver configuration must resolve to a readable regular file",
+      )
+      await expect(sandboxedServerCommand(request, state, "relative-resolv.conf")).rejects.toThrow(
+        "OpenCode resolver configuration must resolve to a readable regular file",
+      )
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  test("does not expose a broad /run mount for the host resolver", async () => {
+    const root = await mkdtemp(join(tmpdir(), "metalanguage-opencode-host-resolver-"))
+    try {
+      const cwd = join(root, "work")
+      const state = join(root, "state")
+      await mkdir(cwd, { recursive: true })
+      await mkdir(state, { recursive: true })
+      const request: RunnerRequest = {
+        opencode_bin: "/usr/bin/true",
+        model: "fixture/model",
+        cwd,
+        state_root: state,
+        sandbox: { mode: "bubblewrap", network: "allow", bubblewrap_bin: "/usr/bin/bwrap" },
+      }
+      const command = await sandboxedServerCommand(request, state)
+      expect(
+        command.findIndex(
+          (value, index) => value === "--ro-bind" && command[index + 1] === "/run",
+        ),
+      ).toBe(-1)
+      expect(
+        command.findIndex(
+          (value, index) => value === "--bind" && command[index + 1] === "/run",
+        ),
+      ).toBe(-1)
+      if ((await lstat("/etc/resolv.conf")).isSymbolicLink()) {
+        const source = await realpath("/etc/resolv.conf")
+        const target = resolve("/etc", await readlink("/etc/resolv.conf"))
+        expect(
+          command.findIndex(
+            (value, index) => value === "--ro-bind" && command[index + 1] === source && command[index + 2] === target,
+          ),
+        ).toBeGreaterThan(-1)
+        expect(
+          command.findIndex(
+            (value, index) => value === "--ro-bind" && command[index + 1] === dirname(target) && command[index + 2] === dirname(target),
+          ),
+        ).toBe(-1)
+        expect(
+          command
+            .flatMap((value, index) =>
+              value === "--ro-bind" && command[index + 1]?.startsWith("/run/")
+                ? [[command[index + 1], command[index + 2]]]
+                : [],
+            ),
+        ).toEqual([[source, target]])
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   test("orders read-only carve-outs after writable parents", async () => {
     const root = await mkdtemp(join(tmpdir(), "metalanguage-opencode-mounts-"))
     const cwd = join(root, "work")

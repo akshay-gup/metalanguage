@@ -1,6 +1,19 @@
 #!/usr/bin/env bun
 
-import { chmod, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises"
+import { constants } from "node:fs"
+import {
+  access,
+  chmod,
+  lstat,
+  mkdir,
+  readFile,
+  readdir,
+  readlink,
+  realpath,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises"
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path"
 
 import {
@@ -554,7 +567,11 @@ function isWithin(path: string, root: string): boolean {
   return candidate === "" || (!candidate.startsWith("..") && !isAbsolute(candidate))
 }
 
-export async function sandboxedServerCommand(request: RunnerRequest, root: string): Promise<string[]> {
+export async function sandboxedServerCommand(
+  request: RunnerRequest,
+  root: string,
+  resolverPath = "/etc/resolv.conf",
+): Promise<string[]> {
   const base = [request.opencode_bin, "serve", "--hostname=127.0.0.1", "--port=0", "--log-level=ERROR"]
   const sandbox = request.sandbox ?? { mode: "none" as const, network: "allow" as const }
   if (sandbox.mode === "none") return base
@@ -629,6 +646,11 @@ export async function sandboxedServerCommand(request: RunnerRequest, root: strin
     addParentDirectories(command, mount.target)
     command.push("--ro-bind", source, mount.target)
   }
+  const resolver = await sandboxResolverMount(resolverPath)
+  if (resolver) {
+    addParentDirectories(command, resolver.target)
+    command.push("--ro-bind", resolver.source, resolver.target)
+  }
   if (sandbox.masked_paths?.length) {
     command.push("--ro-bind", join(root, "masked-empty"), join(root, "masked-empty"))
   }
@@ -655,6 +677,32 @@ export async function sandboxedServerCommand(request: RunnerRequest, root: strin
   }
   command.push("--chdir", request.cwd, "--", ...base)
   return command
+}
+
+async function sandboxResolverMount(path: string): Promise<{ source: string; target: string } | undefined> {
+  try {
+    if (!isAbsolute(path) || resolve(path) !== path) {
+      throw new Error("resolver path is not absolute and normalized")
+    }
+    const pathStat = await lstat(path)
+    if (!pathStat.isFile() && !pathStat.isSymbolicLink()) throw new Error("resolver path is not a file")
+    const source = await realpath(path)
+    if (!(await stat(source)).isFile()) throw new Error("resolved resolver path is not a regular file")
+    await access(source, constants.R_OK)
+    if (pathStat.isFile()) return undefined
+    const link = await readlink(path)
+    const target = resolve(dirname(path), link)
+    if (!link || target === "/" || /[\u0000-\u001f\u007f]/.test(link)) {
+      throw new Error("resolver target is not a safe file path")
+    }
+    return { source, target }
+  } catch (error) {
+    throw new RunnerError(
+      "invalid_sandbox_mount",
+      "OpenCode resolver configuration must resolve to a readable regular file",
+      { cause: error },
+    )
+  }
 }
 
 function signalGroup(pid: number, signal: NodeJS.Signals): void {
