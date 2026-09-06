@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 import { chmod, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises"
-import { basename, dirname, join, resolve } from "node:path"
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path"
 
 import {
   EventNormalizer,
@@ -23,7 +23,16 @@ import {
   type Terminal,
   type TranslatedMcp,
 } from "./protocol.ts"
-import { runHandler, runSpawnBridgeFromStdio, SYSTEM_PLUGIN_SOURCE, TOOL_SOURCE } from "./spawn_bridge.ts"
+import {
+  runHandler,
+  runSpawnBridgeFromStdio,
+  sendMessageToolSource,
+  SYSTEM_PLUGIN_SOURCE,
+  TOOL_SOURCE,
+} from "./spawn_bridge.ts"
+
+const SOURCE_AUDITED_OPENCODE_VERSION = "1.18.29"
+const SOURCE_AUDITED_BUN_VERSION = "1.3.14"
 
 class RunnerError extends Error {
   constructor(
@@ -186,7 +195,7 @@ class ApiClient {
   }
 }
 
-async function prepareStateRoot(path: string): Promise<string> {
+async function prepareStateRoot(path: string, recipients: string[] = []): Promise<string> {
   if (!path) throw new Error("state_root is empty")
   await mkdir(path, { recursive: true, mode: 0o700 })
   await chmod(path, 0o700)
@@ -200,6 +209,7 @@ async function prepareStateRoot(path: string): Promise<string> {
     "state",
     "cache",
     "tmp",
+    "masked-empty-directory",
   ]) {
     const directory = join(root, relative)
     await mkdir(directory, { recursive: true, mode: 0o700 })
@@ -210,12 +220,17 @@ async function prepareStateRoot(path: string): Promise<string> {
     if (entry.endsWith(".js")) await rm(join(toolDirectory, entry), { force: true })
   }
   const toolPath = join(root, "config/tool/spawn_child.js")
+  const sendMessageToolPath = join(root, "config/tool/send_message.js")
   const pluginPath = join(root, "config/plugin/metalanguage_system.js")
   const maskedFilePath = join(root, "masked-empty")
   await writeFile(toolPath, TOOL_SOURCE, { mode: 0o600 })
+  if (recipients.length) {
+    await writeFile(sendMessageToolPath, sendMessageToolSource(recipients), { mode: 0o600 })
+  }
   await writeFile(pluginPath, SYSTEM_PLUGIN_SOURCE, { mode: 0o600 })
   await writeFile(maskedFilePath, "", { mode: 0o600 })
   await chmod(toolPath, 0o600)
+  if (recipients.length) await chmod(sendMessageToolPath, 0o600)
   await chmod(pluginPath, 0o600)
   await chmod(maskedFilePath, 0o600)
   for (const configRoot of [join(root, "config"), join(root, "config/opencode")]) {
@@ -225,7 +240,7 @@ async function prepareStateRoot(path: string): Promise<string> {
     await mkdir(join(configRoot, "node_modules"), { recursive: true, mode: 0o700 })
     await writeFile(
       packagePath,
-      `${JSON.stringify({ private: true, dependencies: { "@opencode-ai/plugin": "1.18.21" } }, null, 2)}\n`,
+      `${JSON.stringify({ private: true, dependencies: { "@opencode-ai/plugin": SOURCE_AUDITED_OPENCODE_VERSION } }, null, 2)}\n`,
       { mode: 0o600 },
     )
     await writeFile(
@@ -234,7 +249,7 @@ async function prepareStateRoot(path: string): Promise<string> {
         name: "metalanguage-opencode-config",
         lockfileVersion: 3,
         requires: true,
-        packages: { "": { dependencies: { "@opencode-ai/plugin": "1.18.21" } } },
+        packages: { "": { dependencies: { "@opencode-ai/plugin": SOURCE_AUDITED_OPENCODE_VERSION } } },
       }, null, 2)}\n`,
       { mode: 0o600 },
     )
@@ -492,10 +507,13 @@ async function verifyVersion(request: RunnerRequest, env: WorkerEnvironment): Pr
   }
   if (code !== 0) throw new RunnerError("opencode_version_failed", `OpenCode --version exited ${code}`)
   const version = stdout.trim()
-  if (request.allowed_versions?.length && !request.allowed_versions.includes(version)) {
+  if (
+    version !== SOURCE_AUDITED_OPENCODE_VERSION ||
+    (request.allowed_versions?.length && !request.allowed_versions.includes(version))
+  ) {
     throw new RunnerError(
       "unsupported_opencode_version",
-      `OpenCode version ${version} is not one of the source-audited versions: ${request.allowed_versions.join(", ")}`,
+      `OpenCode version ${version} is not one of the source-audited versions: ${(request.allowed_versions ?? [SOURCE_AUDITED_OPENCODE_VERSION]).join(", ")}`,
     )
   }
   emit({ event: "runtime_verified", runtime: "opencode", version })
@@ -503,7 +521,10 @@ async function verifyVersion(request: RunnerRequest, env: WorkerEnvironment): Pr
 
 function verifyBunVersion(request: RunnerRequest): void {
   const version = Bun.version
-  if (request.allowed_bun_versions?.length && !request.allowed_bun_versions.includes(version)) {
+  if (
+    version !== SOURCE_AUDITED_BUN_VERSION ||
+    (request.allowed_bun_versions?.length && !request.allowed_bun_versions.includes(version))
+  ) {
     throw new RunnerError(
       "unsupported_bun_version",
       `Bun version ${version} is not source-audited`,
@@ -522,6 +543,11 @@ function addParentDirectories(command: string[], path: string): void {
     current = dirname(current)
   }
   for (const directory of missing.reverse()) command.push("--dir", directory)
+}
+
+function isWithin(path: string, root: string): boolean {
+  const candidate = relative(root, path)
+  return candidate === "" || (!candidate.startsWith("..") && !isAbsolute(candidate))
 }
 
 export async function sandboxedServerCommand(request: RunnerRequest, root: string): Promise<string[]> {
@@ -599,9 +625,29 @@ export async function sandboxedServerCommand(request: RunnerRequest, root: strin
     addParentDirectories(command, mount.target)
     command.push("--ro-bind", source, mount.target)
   }
+  if (sandbox.masked_paths?.length) {
+    command.push("--ro-bind", join(root, "masked-empty"), join(root, "masked-empty"))
+  }
   for (const path of sandbox.masked_paths ?? []) {
     const real = await realpath(path)
     command.push("--ro-bind", join(root, "masked-empty"), real)
+  }
+  if (sandbox.masked_directories?.length) {
+    command.push(
+      "--ro-bind",
+      join(root, "masked-empty-directory"),
+      join(root, "masked-empty-directory"),
+    )
+  }
+  for (const path of sandbox.masked_directories ?? []) {
+    const real = await realpath(path)
+    if (!orderedMounts.some(([mount, access]) => access === "read" && isWithin(real, mount))) {
+      throw new RunnerError(
+        "invalid_sandbox_mount",
+        "masked directory is not contained by a read-only sandbox root",
+      )
+    }
+    command.push("--ro-bind", join(root, "masked-empty-directory"), real)
   }
   command.push("--chdir", request.cwd, "--", ...base)
   return command
@@ -931,14 +977,13 @@ export async function startSpawnCallback(command: string[], handlerTimeoutMs = 1
       if (request.headers.get("authorization") !== `Bearer ${token}`) {
         return new Response("unauthorized", { status: 401 })
       }
-      const length = Number(request.headers.get("content-length") ?? "0")
-      if (!Number.isFinite(length) || length > 64 * 1024) {
-        return new Response("request too large", { status: 413 })
-      }
       try {
         const raw = await request.text()
-        if (raw.length > 64 * 1024) return new Response("request too large", { status: 413 })
-        const result = await runHandler(command, JSON.parse(raw), handlerTimeoutMs)
+        const payload = JSON.parse(raw)
+        if (isRecord(payload) && payload.tool === "spawn_child" && raw.length > 64 * 1024) {
+          return new Response("request too large", { status: 413 })
+        }
+        const result = await runHandler(command, payload, handlerTimeoutMs)
         return Response.json(result)
       } catch {
         return Response.json(
@@ -966,7 +1011,27 @@ function parseRequest(value: unknown): RunnerRequest {
   for (const field of ["opencode_bin", "model", "cwd", "state_root"] as const) {
     if (typeof value[field] !== "string" || !value[field]) throw new Error(`runner request requires ${field}`)
   }
-  return value as RunnerRequest
+  const request = value as RunnerRequest
+  validatePrivateInbox(request)
+  return request
+}
+
+function validatePrivateInbox(request: RunnerRequest): void {
+  if (request.private_inbox === undefined || request.private_inbox === null) return
+  const inbox = request.private_inbox
+  const roster = ["Daniel", "Noah", "Elizabeth", "George", "Eva", "Eleanor", "Zoe", "Oliver"]
+  if (
+    !isRecord(inbox) ||
+    inbox.capability_identity !== "metalanguage-v3.7-codex-open-ended-private-inbox-v1" ||
+    !roster.includes(inbox.sender) ||
+    !Array.isArray(inbox.recipients) ||
+    !inbox.recipients.every((recipient) => typeof recipient === "string" && roster.includes(recipient)) ||
+    inbox.recipients.includes(inbox.sender) ||
+    new Set(inbox.recipients).size !== inbox.recipients.length ||
+    !request.spawn_child_handler_command?.length
+  ) {
+    throw new Error("runner request private inbox is invalid")
+  }
 }
 
 export async function runRequest(request: RunnerRequest, cancelled: Promise<void>): Promise<void> {
@@ -979,7 +1044,7 @@ export async function runRequest(request: RunnerRequest, cancelled: Promise<void
   }
   let root: string
   try {
-    root = await prepareStateRoot(request.state_root)
+    root = await prepareStateRoot(request.state_root, request.private_inbox?.recipients ?? [])
   } catch (error) {
     throw asRunnerError("state_isolation_failed", error)
   }

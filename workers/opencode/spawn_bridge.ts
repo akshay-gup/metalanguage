@@ -54,6 +54,62 @@ export const TOOL_SOURCE = `export default {
 }
 `
 
+export function sendMessageToolSource(recipients: string[]): string {
+  const recipientEnum = JSON.stringify(recipients)
+  return `export default {
+  description: "Deliver a private batch-local message to one other current rollout. Delivery does not inject context or prove that the recipient read it.",
+  args: {
+    recipient: { type: "string", enum: ${recipientEnum}, description: "Exact human name of one other current rollout." },
+    message: { type: "string", minLength: 1, description: "Non-empty UTF-8 message body." },
+  },
+  async execute(args, context) {
+    const endpoint = process.env.METALANGUAGE_SPAWN_CHILD_ENDPOINT
+    const token = process.env.METALANGUAGE_SPAWN_CHILD_TOKEN
+    const failure = (error_code) => JSON.stringify({
+      success: false,
+      status: "rejected",
+      retryable: true,
+      error_code,
+      error: "message was not delivered",
+    })
+    if (!endpoint || !token) return failure("send_message_bridge_unavailable")
+    const payload = JSON.stringify({
+      tool: "send_message",
+      namespace: null,
+      call_id: context.callID ?? null,
+      arguments: args,
+    })
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          authorization: \`Bearer \${token}\`,
+          "content-type": "application/json",
+        },
+        body: payload,
+        signal: context.abort,
+      })
+      const body = await response.text()
+      if (!response.ok) return failure("send_message_bridge_failed")
+      let parsed
+      try {
+        parsed = JSON.parse(body)
+      } catch {
+        return failure("send_message_bridge_malformed_response")
+      }
+      if (!parsed || typeof parsed !== "object" || typeof parsed.success !== "boolean") {
+        return failure("send_message_bridge_malformed_response")
+      }
+      return JSON.stringify(parsed)
+    } catch (error) {
+      if (context.abort?.aborted) throw error
+      return failure("send_message_bridge_failed")
+    }
+  },
+}
+`
+}
+
 export const SYSTEM_PLUGIN_SOURCE = `export default async function metalanguageSystemPlugin() {
   return {
     "experimental.chat.system.transform": async (input, output) => {
@@ -90,16 +146,33 @@ function failure(code: string, message: string): Record<string, unknown> {
   }
 }
 
+function messageFailure(code: string): Record<string, unknown> {
+  return {
+    success: false,
+    status: "rejected",
+    retryable: true,
+    error_code: code,
+    error: "message was not delivered",
+  }
+}
+
 export async function runHandler(command: string[], payload: unknown, timeoutMs = 15_000): Promise<unknown> {
-  if (!command.length) return failure("spawn_child_handler_unavailable", "spawn_child handler command is empty")
-  if (!isRecord(payload) || payload.tool !== "spawn_child") {
-    return failure("unsupported_dynamic_tool", "spawn_child bridge only supports spawn_child")
+  const tool = isRecord(payload) ? payload.tool : undefined
+  if (tool !== "spawn_child" && tool !== "send_message") {
+    return failure("unsupported_dynamic_tool", "dynamic tool bridge supports only Metalanguage tools")
+  }
+  if (!command.length) {
+    return tool === "send_message"
+      ? messageFailure("send_message_handler_unavailable")
+      : failure("spawn_child_handler_unavailable", "spawn_child handler command is empty")
   }
   let child: Bun.PipedSubprocess
   try {
     child = Bun.spawn(command, { stdin: "pipe", stdout: "pipe", stderr: "pipe" })
   } catch {
-    return failure("spawn_child_handler_crashed", "spawn_child handler could not start")
+    return tool === "send_message"
+      ? messageFailure("send_message_handler_crashed")
+      : failure("spawn_child_handler_crashed", "spawn_child handler could not start")
   }
   const terminate = () => child.kill("SIGTERM")
   process.once("SIGTERM", terminate)
@@ -125,20 +198,34 @@ export async function runHandler(command: string[], payload: unknown, timeoutMs 
     } catch {
       child.kill("SIGKILL")
       await child.exited
-      return failure("spawn_child_handler_timeout", "spawn_child handler timed out")
+      return tool === "send_message"
+        ? messageFailure("send_message_handler_timeout")
+        : failure("spawn_child_handler_timeout", "spawn_child handler timed out")
     } finally {
       if (timer) clearTimeout(timer)
     }
-    if (code !== 0) return failure("spawn_child_handler_crashed", "spawn_child handler crashed")
-    if (!stdout.trim()) return failure("spawn_child_handler_malformed_response", "spawn_child handler returned an empty response")
+    if (code !== 0) {
+      return tool === "send_message"
+        ? messageFailure("send_message_handler_crashed")
+        : failure("spawn_child_handler_crashed", "spawn_child handler crashed")
+    }
+    if (!stdout.trim()) {
+      return tool === "send_message"
+        ? messageFailure("send_message_handler_malformed_response")
+        : failure("spawn_child_handler_malformed_response", "spawn_child handler returned an empty response")
+    }
     try {
       const parsed = JSON.parse(stdout.trim())
       if (!isRecord(parsed) || typeof parsed.success !== "boolean") {
-        return failure("spawn_child_handler_malformed_response", "spawn_child handler returned a malformed response")
+        return tool === "send_message"
+          ? messageFailure("send_message_handler_malformed_response")
+          : failure("spawn_child_handler_malformed_response", "spawn_child handler returned a malformed response")
       }
       return parsed
     } catch {
-      return failure("spawn_child_handler_malformed_response", "spawn_child handler returned a malformed response")
+      return tool === "send_message"
+        ? messageFailure("send_message_handler_malformed_response")
+        : failure("spawn_child_handler_malformed_response", "spawn_child handler returned a malformed response")
     }
   } finally {
     process.off("SIGTERM", terminate)

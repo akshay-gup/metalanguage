@@ -82,6 +82,11 @@ export type RunnerRequest = {
   provider_env_names?: string[]
   custom_provider?: CustomProviderInput | null
   spawn_child_handler_command?: string[] | null
+  private_inbox?: {
+    capability_identity: string
+    sender: string
+    recipients: string[]
+  } | null
   mcp_servers?: Record<string, McpServerInput>
   sensitive_mcp_tools?: McpToolSelector[]
   sandbox?: {
@@ -92,6 +97,7 @@ export type RunnerRequest = {
     read_only_mounts?: Array<{ source: string; target: string }>
     writable_roots?: string[]
     masked_paths?: string[]
+    masked_directories?: string[]
   }
   test_provider_config?: Record<string, unknown>
 }
@@ -416,12 +422,18 @@ export class EventNormalizer {
 
     if (eventType === "session.status") {
       if (properties.sessionID !== this.sessionId) return { events: output, terminal: "continue" }
-      const status = isRecord(properties.status) ? properties.status.type : undefined
+      const statusRecord = isRecord(properties.status) ? properties.status : {}
+      const status = statusRecord.type
       if (status === "busy" && !this.turnStarted) {
         this.turnStarted = true
         output.push({ event: "turn_started" })
       } else if (status === "retry") {
-        output.push({ event: "warning", message: "OpenCode provider request is retrying" })
+        output.push({
+          event: "warning",
+          warning_code: "provider_retry",
+          attempt: typeof statusRecord.attempt === "number" ? statusRecord.attempt : null,
+          next_retry_at_ms: typeof statusRecord.next === "number" ? statusRecord.next : null,
+        })
       } else if (status === "idle" && this.turnStarted) {
         return { events: output, terminal: "idle" }
       }
@@ -468,6 +480,41 @@ export class EventNormalizer {
     if (!part || part.sessionID !== this.sessionId) return { events: output, terminal: "continue" }
     const partId = typeof part.id === "string" ? part.id : ""
 
+    if (part.type === "step-start") {
+      output.push({ event: "provider_step_started", step_id: partId })
+      return { events: output, terminal: "continue" }
+    }
+
+    if (part.type === "step-finish") {
+      const tokens = isRecord(part.tokens) ? part.tokens : {}
+      const cache = isRecord(tokens.cache) ? tokens.cache : {}
+      output.push({
+        event: "turn_usage",
+        step_id: partId,
+        reason: typeof part.reason === "string" ? cappedString(part.reason, 128) : null,
+        usage_input_tokens: nonnegativeNumber(tokens.input),
+        usage_output_tokens: nonnegativeNumber(tokens.output),
+        usage_reasoning_tokens: nonnegativeNumber(tokens.reasoning),
+        usage_cache_read_tokens: nonnegativeNumber(cache.read),
+        usage_cache_write_tokens: nonnegativeNumber(cache.write),
+        usage_cost: nonnegativeNumber(part.cost),
+      })
+      return { events: output, terminal: "continue" }
+    }
+
+    if (part.type === "patch") {
+      const files = Array.isArray(part.files)
+        ? part.files.filter((file): file is string => typeof file === "string").map((file) => cappedString(file, 4096))
+        : []
+      output.push({
+        event: "patch",
+        patch_hash: typeof part.hash === "string" ? cappedString(part.hash, 256) : null,
+        files,
+        file_count: files.length,
+      })
+      return { events: output, terminal: "continue" }
+    }
+
     if (part.type === "text" && typeof part.text === "string") {
       const messageID = typeof part.messageID === "string" ? part.messageID : ""
       if (!partId || !messageID) return { events: output, terminal: "continue" }
@@ -487,24 +534,41 @@ export class EventNormalizer {
       const tool = typeof part.tool === "string" ? part.tool : "unknown"
       const state = isRecord(part.state) ? part.state : {}
       const status = typeof state.status === "string" ? state.status : "unknown"
-      if (this.toolStatus.get(partId) === status) return { events: output, terminal: "continue" }
+      const previousStatus = this.toolStatus.get(partId)
+      if (previousStatus === status) return { events: output, terminal: "continue" }
       this.toolStatus.set(partId, status)
-      const sensitive = this.sensitiveToolIds.has(tool)
-      if (status === "pending" || status === "running") {
+      const sensitive = tool === "send_message" || this.sensitiveToolIds.has(tool)
+      const timing = isRecord(state.time) ? state.time : {}
+      const startedAt = nonnegativeNumber(timing.start)
+      const completedAt = nonnegativeNumber(timing.end)
+      const duration = startedAt !== null && completedAt !== null && completedAt >= startedAt
+        ? completedAt - startedAt
+        : null
+      const input = isRecord(state.input) ? state.input : {}
+      const callId = typeof part.callID === "string" && part.callID ? part.callID : partId
+      if ((status === "pending" || status === "running") && previousStatus !== "pending" && previousStatus !== "running") {
         output.push({
           event: "tool_begin",
           tool,
-          call_id: partId,
-          arguments: loggedPayload(state.input, sensitive),
+          call_id: callId,
+          arguments: loggedPayload(input, sensitive),
+          command: sensitive ? null : loggedPayload(input.command, false),
+          title: loggedPayload(state.title, sensitive),
+          started_at_ms: startedAt,
         })
       } else if (status === "completed" || status === "error") {
         output.push({
           event: "tool_end",
           tool,
-          call_id: partId,
+          call_id: callId,
           status,
           result: loggedPayload(state.output, sensitive),
           error: loggedPayload(state.error, sensitive),
+          title: loggedPayload(state.title, sensitive),
+          started_at_ms: startedAt,
+          completed_at_ms: completedAt,
+          duration_ms: duration,
+          attachment_count: Array.isArray(state.attachments) ? state.attachments.length : 0,
         })
       }
       return { events: output, terminal: "continue" }
@@ -537,6 +601,10 @@ function providerErrorCode(value: unknown): string {
 
 function loggedPayload(value: unknown, sensitive: boolean): unknown {
   return sensitive ? { redacted: true } : scrubValue(value)
+}
+
+function nonnegativeNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null
 }
 
 export function scrubValue(value: unknown): unknown {
