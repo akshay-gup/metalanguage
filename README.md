@@ -246,12 +246,14 @@ controls, OpenRouter, and other unsupported paths expose no messaging tool.
 
 ### Mixed rollout configuration
 
-Use repeated `--rollout-slot BACKEND=MODEL` flags for an ordered mixed Codex and
-OpenCode population, or reuse a strict versioned JSON file with
-`--rollout-config PATH`. The config file's rollout count is inferred unless an
-explicit `--num-rollouts` is also supplied, in which case the counts must match.
-Resolved assignments, not the config path, form the persisted continuation
-identity.
+Use repeated `--rollout-slot BACKEND=MODEL` flags for a fixed ordered mixed
+Codex and OpenCode population. Use `--rollout-config PATH` for a strict
+versioned pool that is shuffled without replacement across incoming lineage
+slots at every task index. The config file's rollout count is inferred unless
+an explicit `--num-rollouts` is also supplied, in which case the counts must
+match. Resolved pool content, not the config path, forms the runtime identity;
+each realized task assignment is persisted under `logs/rollout_assignments/`
+before workers launch and is reused when that task is resumed.
 
 For the checked-in six-model flash population:
 

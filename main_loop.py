@@ -16,6 +16,7 @@ import argparse
 import fcntl
 import json
 import os
+import random
 import shutil
 import stat
 import subprocess
@@ -161,6 +162,10 @@ ORDERED_ROLLOUT_MODE = "ordered-backend-model-v1"
 ORDERED_ROLLOUT_BACKENDS = frozenset({"codex", "opencode"})
 ROLLOUT_CONFIG_FORMAT = "metalanguage-rollout-config"
 ROLLOUT_CONFIG_VERSION = 1
+SHUFFLED_ROLLOUT_MODE = "shuffled-backend-model-pool-v1"
+ROLLOUT_ASSIGNMENTS_DIRNAME = "rollout_assignments"
+TASK_ROLLOUT_ASSIGNMENT_FORMAT = "metalanguage-task-rollout-assignment"
+TASK_ROLLOUT_ASSIGNMENT_VERSION = 1
 
 
 def _strip_env_quotes(value: str) -> str:
@@ -964,35 +969,47 @@ def _claim_runtime_rollout_identity(
     *,
     explicitly_configured: bool,
     runtime_was_empty: bool,
+    assignment_mode: str = ORDERED_ROLLOUT_MODE,
 ) -> None:
     identity_path = runtime_root / RUNTIME_ROLLOUT_IDENTITY_FILENAME
+    if assignment_mode == ORDERED_ROLLOUT_MODE:
+        assignment_metadata = _ordered_rollout_metadata(
+            rollout_slots, enabled=True
+        )
+    elif assignment_mode == SHUFFLED_ROLLOUT_MODE:
+        assignment_metadata = _rollout_pool_metadata(rollout_slots)
+    else:
+        raise ValueError(f"unsupported rollout assignment mode: {assignment_mode}")
     expected = {
         "format": "metalanguage-runtime-rollouts",
         "version": 1,
-        **_ordered_rollout_metadata(rollout_slots, enabled=True),
+        **assignment_metadata,
     }
     if identity_path.exists():
         if not explicitly_configured:
             raise SystemExit(
-                "error: runtime uses ordered per-slot rollouts; repeat its "
-                "--rollout-slot or --rollout-config assignments to continue"
+                "error: runtime uses configured rollouts; repeat its "
+                "--rollout-slot or --rollout-config configuration to continue"
             )
         try:
-            recorded = json.loads(identity_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            recorded = json.loads(
+                identity_path.read_text(encoding="utf-8"),
+                object_pairs_hook=_reject_duplicate_json_fields,
+            )
+        except (OSError, json.JSONDecodeError, ValueError):
             raise SystemExit(
                 "error: runtime rollout identity is unreadable; refusing to continue"
             ) from None
         if recorded != expected:
             raise SystemExit(
-                "error: ordered rollout configuration does not match this runtime"
+                "error: rollout configuration does not match this runtime"
             )
         return
     if not explicitly_configured:
         return
     if not runtime_was_empty:
         raise SystemExit(
-            "error: existing runtime has no ordered rollout identity; use its homogeneous "
+            "error: existing runtime has no configured rollout identity; use its homogeneous "
             "--worker-backend/--model configuration or a fresh --runtime-root"
         )
     _write_json_file_atomic(identity_path, expected)
@@ -1653,18 +1670,11 @@ def _validate_private_inbox_partial_resume(
     records: list[dict[str, Any]],
     args: argparse.Namespace,
 ) -> None:
-    rollout_slots = tuple(getattr(args, "_rollout_slots", ()) or ())
-    if not rollout_slots:
-        rollout_slots = tuple(
-            RolloutSlot(
-                worker_backend=getattr(args, "worker_backend", ""),
-                model=getattr(args, "model", ""),
-            )
-            for _ in range(getattr(args, "num_rollouts", 0))
-        )
     if not any(
-        private_inbox_enabled(getattr(args, "benchmark", ""), slot.worker_backend)
-        for slot in rollout_slots
+        private_inbox_enabled(
+            getattr(args, "benchmark", ""), str(record.get("worker_backend", ""))
+        )
+        for record in records
     ):
         return
     by_task: dict[int, dict[int, dict[str, Any]]] = {}
@@ -1691,9 +1701,7 @@ def _validate_private_inbox_partial_resume(
         if len(per_task) >= expected_count:
             continue
         for rollout_index, record in per_task.items():
-            if not 0 <= rollout_index < len(rollout_slots):
-                continue
-            worker_backend = rollout_slots[rollout_index].worker_backend
+            worker_backend = str(record.get("worker_backend", ""))
             if not private_inbox_enabled(
                 getattr(args, "benchmark", ""), worker_backend
             ):
@@ -2726,6 +2734,8 @@ def _load_rollout_config(path_value: str | Path) -> tuple[RolloutSlot, ...]:
                 "surrounding whitespace"
             )
         rollout_slots.append(rollout_slot)
+    if len(set(rollout_slots)) != len(rollout_slots):
+        raise ValueError("rollout config pool entries must be unique")
     return tuple(rollout_slots)
 
 
@@ -2774,6 +2784,183 @@ def _ordered_rollout_metadata(
     }
 
 
+def _rollout_pool_metadata(rollout_pool: tuple[RolloutSlot, ...]) -> dict[str, Any]:
+    return {
+        "rollout_assignment_mode": SHUFFLED_ROLLOUT_MODE,
+        "rollout_pool": [slot.to_metadata() for slot in rollout_pool],
+    }
+
+
+def _shuffled_rollout_metadata(
+    rollout_pool: tuple[RolloutSlot, ...],
+    rollout_slots: tuple[RolloutSlot, ...],
+) -> dict[str, Any]:
+    return {
+        **_rollout_pool_metadata(rollout_pool),
+        "rollout_slots": [slot.to_metadata() for slot in rollout_slots],
+    }
+
+
+def _rollout_slots_from_metadata(
+    raw_slots: Any, *, label: str
+) -> tuple[RolloutSlot, ...]:
+    if not isinstance(raw_slots, list) or not raw_slots:
+        raise ValueError(f"{label} must be a non-empty array")
+    slots: list[RolloutSlot] = []
+    for index, raw_slot in enumerate(raw_slots):
+        if not isinstance(raw_slot, dict) or set(raw_slot) != {
+            "worker_backend",
+            "model",
+        }:
+            raise ValueError(
+                f"{label}[{index}] must contain exactly worker_backend and model"
+            )
+        worker_backend = raw_slot["worker_backend"]
+        model = raw_slot["model"]
+        if not isinstance(worker_backend, str) or not isinstance(model, str):
+            raise ValueError(
+                f"{label}[{index}] worker_backend and model must be strings"
+            )
+        try:
+            slot = _rollout_slot_argument(f"{worker_backend}={model}")
+        except argparse.ArgumentTypeError as exc:
+            raise ValueError(f"invalid {label}[{index}]: {exc}") from exc
+        if slot.worker_backend != worker_backend or slot.model != model:
+            raise ValueError(
+                f"{label}[{index}] worker_backend and model must not have "
+                "surrounding whitespace"
+            )
+        slots.append(slot)
+    return tuple(slots)
+
+
+def _fresh_rollout_permutation(
+    rollout_pool: tuple[RolloutSlot, ...], *, shuffle: Any = None
+) -> tuple[RolloutSlot, ...]:
+    realized = list(rollout_pool)
+    (shuffle or random.SystemRandom().shuffle)(realized)
+    if len(realized) != len(rollout_pool) or set(realized) != set(rollout_pool):
+        raise ValueError("rollout pool shuffle did not produce a valid permutation")
+    return tuple(realized)
+
+
+def _task_rollout_assignment_path(assignment_root: Path, task_index: int) -> Path:
+    if type(task_index) is not int or task_index < 0:
+        raise ValueError("task rollout assignment index must be a non-negative integer")
+    return assignment_root / f"{task_index:06d}.json"
+
+
+def _load_task_rollout_assignment(
+    path: Path,
+    rollout_pool: tuple[RolloutSlot, ...],
+    *,
+    task_index: int,
+) -> tuple[RolloutSlot, ...]:
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"task rollout assignment is not a regular file: {path}")
+    try:
+        payload = json.loads(
+            path.read_text(encoding="utf-8"),
+            object_pairs_hook=_reject_duplicate_json_fields,
+        )
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        raise ValueError(f"invalid task rollout assignment {path}: {exc}") from exc
+    expected_fields = {
+        "format",
+        "version",
+        "task_index",
+        "rollout_assignment_mode",
+        "rollout_pool",
+        "rollout_slots",
+    }
+    if not isinstance(payload, dict) or set(payload) != expected_fields:
+        raise ValueError(f"task rollout assignment has an invalid schema: {path}")
+    if (
+        payload["format"] != TASK_ROLLOUT_ASSIGNMENT_FORMAT
+        or type(payload["version"]) is not int
+        or payload["version"] != TASK_ROLLOUT_ASSIGNMENT_VERSION
+        or payload["rollout_assignment_mode"] != SHUFFLED_ROLLOUT_MODE
+        or type(payload["task_index"]) is not int
+        or payload["task_index"] != task_index
+    ):
+        raise ValueError(f"task rollout assignment identity mismatch: {path}")
+    recorded_pool = _rollout_slots_from_metadata(
+        payload["rollout_pool"], label="rollout_pool"
+    )
+    if recorded_pool != rollout_pool:
+        raise ValueError(f"task rollout assignment pool mismatch: {path}")
+    rollout_slots = _rollout_slots_from_metadata(
+        payload["rollout_slots"], label="rollout_slots"
+    )
+    if (
+        len(rollout_slots) != len(rollout_pool)
+        or len(set(rollout_slots)) != len(rollout_slots)
+        or set(rollout_slots) != set(rollout_pool)
+    ):
+        raise ValueError(
+            f"task rollout assignment is not a no-replacement permutation: {path}"
+        )
+    return rollout_slots
+
+
+def _claim_task_rollout_assignment(
+    assignment_root: Path,
+    rollout_pool: tuple[RolloutSlot, ...],
+    *,
+    task_index: int,
+    shuffle: Any = None,
+) -> tuple[RolloutSlot, ...]:
+    if assignment_root.is_symlink():
+        raise ValueError("task rollout assignment root must not be a symlink")
+    assignment_root.mkdir(parents=True, exist_ok=True)
+    path = _task_rollout_assignment_path(assignment_root, task_index)
+    if path.is_symlink():
+        raise ValueError(f"task rollout assignment must not be a symlink: {path}")
+    if path.exists():
+        return _load_task_rollout_assignment(
+            path, rollout_pool, task_index=task_index
+        )
+    rollout_slots = _fresh_rollout_permutation(rollout_pool, shuffle=shuffle)
+    _write_json_file_atomic(
+        path,
+        {
+            "format": TASK_ROLLOUT_ASSIGNMENT_FORMAT,
+            "version": TASK_ROLLOUT_ASSIGNMENT_VERSION,
+            "task_index": task_index,
+            **_shuffled_rollout_metadata(rollout_pool, rollout_slots),
+        },
+    )
+    return rollout_slots
+
+
+def _load_task_rollout_assignments(
+    assignment_root: Path,
+    rollout_pool: tuple[RolloutSlot, ...],
+) -> dict[int, tuple[RolloutSlot, ...]]:
+    if not assignment_root.exists():
+        return {}
+    if assignment_root.is_symlink() or not assignment_root.is_dir():
+        raise ValueError("task rollout assignment root is invalid")
+    assignments: dict[int, tuple[RolloutSlot, ...]] = {}
+    for path in sorted(assignment_root.iterdir()):
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or path.suffix != ".json"
+            or not path.stem.isdigit()
+        ):
+            raise ValueError(f"unexpected task rollout assignment entry: {path}")
+        task_index = int(path.stem)
+        if task_index in assignments:
+            raise ValueError(
+                f"duplicate task rollout assignment for task {task_index}"
+            )
+        assignments[task_index] = _load_task_rollout_assignment(
+            path, rollout_pool, task_index=task_index
+        )
+    return assignments
+
+
 def _validate_ordered_rollout_records(
     records: list[dict[str, Any]],
     rollout_slots: tuple[RolloutSlot, ...],
@@ -2799,6 +2986,44 @@ def _validate_ordered_rollout_records(
         ):
             raise SystemExit(
                 "error: persisted run record does not match the ordered rollout identity"
+            )
+
+
+def _validate_shuffled_rollout_records(
+    records: list[dict[str, Any]],
+    rollout_pool: tuple[RolloutSlot, ...],
+    task_assignments: dict[int, tuple[RolloutSlot, ...]],
+) -> None:
+    for record in records:
+        task_index = record.get("task_index")
+        rollout_index = record.get("rollout_index")
+        if (
+            type(task_index) is not int
+            or task_index not in task_assignments
+            or type(rollout_index) is not int
+            or not 0 <= rollout_index < len(task_assignments[task_index])
+        ):
+            raise SystemExit(
+                "error: persisted run record has no valid shuffled rollout assignment"
+            )
+        rollout_slots = task_assignments[task_index]
+        slot = rollout_slots[rollout_index]
+        expected_metadata = _shuffled_rollout_metadata(
+            rollout_pool, rollout_slots
+        )
+        if (
+            record.get("worker_backend") != slot.worker_backend
+            or record.get("model") != slot.model
+            or record.get("task_rollout_count") != len(rollout_pool)
+            or record.get("bootstrap_rollout_count", record.get("num_rollouts"))
+            != len(rollout_pool)
+            or any(
+                record.get(key) != value
+                for key, value in expected_metadata.items()
+            )
+        ):
+            raise SystemExit(
+                "error: persisted run record does not match its shuffled rollout assignment"
             )
 
 
@@ -2846,8 +3071,8 @@ def parse_args() -> argparse.Namespace:
         default=None,
         metavar="PATH",
         help=(
-            "Versioned JSON file containing ordered per-rollout backend/model "
-            "assignments. Its rollout count is inferred unless --num-rollouts is explicit."
+            "Versioned JSON backend/model pool shuffled without replacement for "
+            "each task. Its rollout count is inferred unless --num-rollouts is explicit."
         ),
     )
     parser.add_argument("--seed", type=int, default=42)
@@ -3192,11 +3417,12 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
     if args.num_rollouts <= 0:
         raise ValueError("--num-rollouts must be > 0")
     rollout_slots = _resolve_rollout_slots(args)
-    ordered_rollouts_enabled = bool(args.rollout_slot or args.rollout_config)
-    ordered_rollout_metadata = _ordered_rollout_metadata(
-        rollout_slots, enabled=ordered_rollouts_enabled
+    rollout_pool_enabled = args.rollout_config is not None
+    fixed_rollouts_enabled = bool(args.rollout_slot)
+    configured_rollouts_enabled = rollout_pool_enabled or fixed_rollouts_enabled
+    fixed_rollout_metadata = _ordered_rollout_metadata(
+        rollout_slots, enabled=fixed_rollouts_enabled
     )
-    args._rollout_slots = rollout_slots
     required_backends = {slot.worker_backend for slot in rollout_slots}
     args._benchmark_worker_backend = rollout_slots[0].worker_backend
     if args.worker_timeout_seconds <= 0:
@@ -3240,8 +3466,13 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
     _claim_runtime_rollout_identity(
         runtime_root,
         rollout_slots,
-        explicitly_configured=ordered_rollouts_enabled,
+        explicitly_configured=configured_rollouts_enabled,
         runtime_was_empty=runtime_was_empty,
+        assignment_mode=(
+            SHUFFLED_ROLLOUT_MODE
+            if rollout_pool_enabled
+            else ORDERED_ROLLOUT_MODE
+        ),
     )
     _check_runtime_benchmark(runtime_root, args.benchmark)
     open_ended_state_dir = runtime_root / "logs" / "open_ended_task"
@@ -3272,23 +3503,22 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
     ) or bool(args.opencode_custom_provider_header_env)
     if custom_provider_requested and "opencode" not in required_backends:
         raise ValueError("custom OpenCode provider flags require an OpenCode rollout")
-    opencode_slot_indices = [
-        index
-        for index, slot in enumerate(rollout_slots)
-        if slot.worker_backend == "opencode"
-    ]
+    opencode_slots = tuple(
+        dict.fromkeys(
+            slot for slot in rollout_slots if slot.worker_backend == "opencode"
+        )
+    )
     if custom_provider_requested:
-        validation_index = next(
+        validation_slot = next(
             (
-                index
-                for index in opencode_slot_indices
-                if rollout_slots[index].model.split("/", 1)[0]
-                == args.opencode_custom_provider_id
+                slot
+                for slot in opencode_slots
+                if slot.model.split("/", 1)[0] == args.opencode_custom_provider_id
             ),
-            opencode_slot_indices[0],
+            opencode_slots[0],
         )
         custom_provider_configuration(
-            model=rollout_slots[validation_index].model,
+            model=validation_slot.model,
             provider_id=args.opencode_custom_provider_id,
             name=args.opencode_custom_provider_name,
             npm=args.opencode_custom_provider_npm,
@@ -3332,7 +3562,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
     opencode_bun_sha256: str | None = None
     opencode_worker_sha256: str | None = None
     opencode_auth_sha256: str | None = None
-    opencode_slot_environments: dict[int, OpenCodeSlotEnvironment] = {}
+    opencode_slot_environments: dict[RolloutSlot, OpenCodeSlotEnvironment] = {}
     opencode_python_sha256: str | None = None
     opencode_bubblewrap_version: str | None = None
     opencode_bubblewrap_sha256: str | None = None
@@ -3399,8 +3629,8 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
         opencode_auth_sha256 = (
             file_sha256(opencode_auth_file) if opencode_auth_file is not None else None
         )
-        for rollout_index in opencode_slot_indices:
-            slot_model = rollout_slots[rollout_index].model
+        for slot in opencode_slots:
+            slot_model = slot.model
             slot_custom_provider = None
             if (
                 custom_provider_requested
@@ -3441,7 +3671,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                     "custom OpenCode provider environment variables are unset: "
                     + ", ".join(missing_custom_provider_env)
                 )
-            opencode_slot_environments[rollout_index] = OpenCodeSlotEnvironment(
+            opencode_slot_environments[slot] = OpenCodeSlotEnvironment(
                 provider_env_names=slot_provider_env_names,
                 provider_environment=slot_provider_environment,
                 credential_mounts=slot_credential_mounts,
@@ -3464,13 +3694,13 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
         opencode_configured_initial_prompt_sha256 = text_sha256(
             args.opencode_initial_prompt
         )
-    rollout_resume_args: list[argparse.Namespace] = []
-    for rollout_index, slot in enumerate(rollout_slots):
+    rollout_resume_args: dict[RolloutSlot, argparse.Namespace] = {}
+    for slot in dict.fromkeys(rollout_slots):
         slot_args = argparse.Namespace(**vars(args))
         slot_args.worker_backend = slot.worker_backend
         slot_args.model = slot.model
         if slot.worker_backend == "opencode":
-            slot_environment = opencode_slot_environments[rollout_index]
+            slot_environment = opencode_slot_environments[slot]
             slot_args._opencode_runtime_version = opencode_runtime_version
             slot_args._opencode_bin_sha256 = opencode_bin_sha256
             slot_args._opencode_bun_version = opencode_bun_version
@@ -3502,7 +3732,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             slot_args._opencode_configured_initial_prompt_sha256 = (
                 opencode_configured_initial_prompt_sha256
             )
-        rollout_resume_args.append(slot_args)
+        rollout_resume_args[slot] = slot_args
 
     _claim_runtime_benchmark(runtime_root, args.benchmark)
     runs_log_path = _resolve_runtime_path(args.runs_log, runtime_root, "--runs-log")
@@ -3575,25 +3805,70 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             ) from exc
 
     parent_pool: list[dict[str, Any]] = []
+    task_rollout_assignment_root = (
+        runtime_root / "logs" / ROLLOUT_ASSIGNMENTS_DIRNAME
+    )
+    try:
+        task_rollout_assignments = (
+            _load_task_rollout_assignments(
+                task_rollout_assignment_root, rollout_slots
+            )
+            if rollout_pool_enabled
+            else {}
+        )
+    except ValueError as exc:
+        raise SystemExit(f"error: {exc}") from None
+
+    def _rollout_slots_for_task(task_index: int) -> tuple[RolloutSlot, ...]:
+        if not rollout_pool_enabled:
+            return rollout_slots
+        assignment = task_rollout_assignments.get(task_index)
+        if assignment is None:
+            raise SystemExit(
+                f"error: task {task_index} has no persisted rollout assignment"
+            )
+        return assignment
+
+    def _rollout_metadata_for_task(task_index: int) -> dict[str, Any]:
+        if rollout_pool_enabled:
+            return _shuffled_rollout_metadata(
+                rollout_slots, _rollout_slots_for_task(task_index)
+            )
+        return fixed_rollout_metadata
 
     existing_records: list[dict[str, Any]] = []
     if not args.no_resume:
         all_records = load_existing_run_records(runs_log_path)
-        if ordered_rollouts_enabled:
+        if rollout_pool_enabled:
+            _validate_shuffled_rollout_records(
+                all_records, rollout_slots, task_rollout_assignments
+            )
+        elif fixed_rollouts_enabled:
             _validate_ordered_rollout_records(
                 all_records,
                 rollout_slots,
-                ordered_rollout_metadata,
+                fixed_rollout_metadata,
             )
+
         def _matches_run(rec: dict[str, Any]) -> bool:
+            task_index = rec.get("task_index")
             rollout_index = rec.get("rollout_index")
             if (
-                not isinstance(rollout_index, int)
-                or not 0 <= rollout_index < len(rollout_slots)
+                not isinstance(task_index, int)
+                or (
+                    rollout_pool_enabled
+                    and task_index not in task_rollout_assignments
+                )
+                or not isinstance(rollout_index, int)
+                or not 0
+                <= rollout_index
+                < len(_rollout_slots_for_task(task_index))
             ):
                 return False
-            slot = rollout_slots[rollout_index]
-            slot_args = rollout_resume_args[rollout_index]
+            task_rollout_slots = _rollout_slots_for_task(task_index)
+            slot = task_rollout_slots[rollout_index]
+            slot_args = rollout_resume_args[slot]
+            rollout_metadata = _rollout_metadata_for_task(task_index)
             if not (
                 rec.get("benchmark", "supergpqa") == args.benchmark
                 and rec.get("model") == slot.model
@@ -3605,7 +3880,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 and _archive_record_resume_compatible(rec, archive_mode_metadata)
                 and all(
                     rec.get(key) == value
-                    for key, value in ordered_rollout_metadata.items()
+                    for key, value in rollout_metadata.items()
                 )
             ):
                 return False
@@ -3653,12 +3928,15 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 partial_tasks.add(task_idx)
 
         def _partial_prompt_matches(record: dict[str, Any]) -> bool:
+            task_idx = record.get("task_index")
             rollout_idx = record.get("rollout_index")
             if (
-                record.get("task_index") not in partial_tasks
+                task_idx not in partial_tasks
+                or not isinstance(task_idx, int)
                 or not isinstance(rollout_idx, int)
-                or not 0 <= rollout_idx < len(rollout_slots)
-                or rollout_slots[rollout_idx].worker_backend != "opencode"
+                or not 0 <= rollout_idx < len(_rollout_slots_for_task(task_idx))
+                or _rollout_slots_for_task(task_idx)[rollout_idx].worker_backend
+                != "opencode"
             ):
                 return True
             inherited_prompt = None
@@ -3670,7 +3948,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                     return False
             return _worker_backend_resume_compatible(
                 record,
-                rollout_resume_args[rollout_idx],
+                rollout_resume_args[_rollout_slots_for_task(task_idx)[rollout_idx]],
                 effective_initial_prompt=inherited_prompt,
                 require_effective_prompt=True,
             )
@@ -3706,9 +3984,14 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
         return max(counts) if counts else None
 
     def _next_step_task_index() -> int:
-        eligible_indices = [idx for idx in existing_by_task if idx >= args.start_task_index]
+        known_indices = set(existing_by_task)
+        if rollout_pool_enabled:
+            known_indices.update(task_rollout_assignments)
+        eligible_indices = [
+            idx for idx in known_indices if idx >= args.start_task_index
+        ]
         for idx in sorted(eligible_indices):
-            per_task = existing_by_task[idx]
+            per_task = existing_by_task.get(idx, {})
             expected_count = _recorded_task_rollout_count(per_task) or args.num_rollouts
             if len(per_task) < expected_count:
                 return idx
@@ -3744,6 +4027,41 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
     for scheduled_batch in scheduled_batches:
         task_index = scheduled_batch.iteration_index
         task_id = scheduled_batch.scheduler_id
+        if rollout_pool_enabled:
+            try:
+                assignment_path = _task_rollout_assignment_path(
+                    task_rollout_assignment_root, task_index
+                )
+                assignment_reused = assignment_path.exists()
+                task_rollout_slots = _claim_task_rollout_assignment(
+                    task_rollout_assignment_root,
+                    rollout_slots,
+                    task_index=task_index,
+                )
+            except ValueError as exc:
+                raise SystemExit(f"error: {exc}") from None
+            task_rollout_assignments[task_index] = task_rollout_slots
+            task_rollout_metadata = _shuffled_rollout_metadata(
+                rollout_slots, task_rollout_slots
+            )
+            append_progress_log(
+                progress_log_path,
+                progress_log_lock,
+                {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "event": "task_rollout_assignment_ready",
+                    "generation": args.generation,
+                    "seed": args.seed,
+                    "task_index": task_index,
+                    "task_id": task_id,
+                    "assignment_path": str(assignment_path),
+                    "assignment_reused": assignment_reused,
+                    **task_rollout_metadata,
+                },
+            )
+        else:
+            task_rollout_slots = rollout_slots
+            task_rollout_metadata = fixed_rollout_metadata
         problem_uid = (
             None if args.benchmark == "open-ended" else scheduled_batch.scheduler_id
         )
@@ -3759,7 +4077,11 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             raise RuntimeError(
                 f"No rollout population positions available for task_index={task_index}."
             )
-        if task_rollout_count > len(rollout_slots):
+        if rollout_pool_enabled and task_rollout_count != len(task_rollout_slots):
+            raise RuntimeError(
+                "Persisted rollout population does not match the configured rollout pool."
+            )
+        if task_rollout_count > len(task_rollout_slots):
             raise RuntimeError(
                 "Persisted rollout population exceeds the configured rollout slots."
             )
@@ -3838,7 +4160,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             rollout_index
             for rollout_index in missing_rollout_indices
             if private_inbox_enabled(
-                args.benchmark, rollout_slots[rollout_index].worker_backend
+                args.benchmark, task_rollout_slots[rollout_index].worker_backend
             )
         ]
         if private_inbox_rollout_indices:
@@ -3864,20 +4186,18 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             if existing is not None:
                 raise RuntimeError(f"rollout {rollout_index} already exists and should not have been submitted")
 
-            rollout_slot = rollout_slots[rollout_index]
+            rollout_slot = task_rollout_slots[rollout_index]
             worker_backend = rollout_slot.worker_backend
             model = rollout_slot.model
-            opencode_slot_environment = opencode_slot_environments.get(
-                rollout_index
-            )
+            opencode_slot_environment = opencode_slot_environments.get(rollout_slot)
             slot_progress_metadata = (
                 {"worker_backend": worker_backend, "model": model}
-                if ordered_rollouts_enabled
+                if configured_rollouts_enabled
                 else {}
             )
             slot_summary = (
                 f" backend={worker_backend} model={model}"
-                if ordered_rollouts_enabled
+                if configured_rollouts_enabled
                 else ""
             )
             rollout_username = _rollout_username(rollout_index)
@@ -3908,6 +4228,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                     "rollout_username": rollout_username,
                     "task_id": task_id,
                     **slot_progress_metadata,
+                    **task_rollout_metadata,
                     **({"problem_uid": problem_uid} if has_problem_pool else {}),
                     **batch_reporting,
                     **archive_mode_metadata,
@@ -4044,7 +4365,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 shared_archives_root=shared_archives_root,
                 private_inbox=private_inbox,
             )
-            continuation_context.update(ordered_rollout_metadata)
+            continuation_context.update(task_rollout_metadata)
             planned_context_path = (
                 opencode_mcp_control_dir / CONTINUATION_CONTEXT_FILENAME
                 if worker_backend == "opencode"
@@ -4464,7 +4785,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                     if private_inbox is not None
                     else {}
                 ),
-                **ordered_rollout_metadata,
+                **task_rollout_metadata,
                 "worker_metadata": worker_result.metadata,
                 "research_turn_count": int(
                     (worker_result.metadata or {}).get("turn_count") or 0
@@ -4684,20 +5005,20 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                         continue
                     for future in done:
                         rollout_index = futures[future]
-                        rollout_slot = rollout_slots[rollout_index]
+                        rollout_slot = task_rollout_slots[rollout_index]
                         worker_backend = rollout_slot.worker_backend
                         model = rollout_slot.model
                         opencode_slot_environment = opencode_slot_environments.get(
-                            rollout_index
+                            rollout_slot
                         )
                         slot_progress_metadata = (
                             {"worker_backend": worker_backend, "model": model}
-                            if ordered_rollouts_enabled
+                            if configured_rollouts_enabled
                             else {}
                         )
                         slot_summary = (
                             f" backend={worker_backend} model={model}"
-                            if ordered_rollouts_enabled
+                            if configured_rollouts_enabled
                             else ""
                         )
                         try:
@@ -4716,6 +5037,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                                     "rollout_username": _rollout_username(rollout_index),
                                     "task_id": task_id,
                                     **slot_progress_metadata,
+                                    **task_rollout_metadata,
                                     **({"problem_uid": problem_uid} if has_problem_pool else {}),
                                     **batch_reporting,
                                     "worker_status": "error",
@@ -4764,7 +5086,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                                             )
                                             else {}
                                         ),
-                                        **ordered_rollout_metadata,
+                                        **task_rollout_metadata,
                                         "worker_metadata": None,
                                         **(
                                             {
@@ -4970,6 +5292,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             "seed": args.seed,
             "task_index": task_index,
             "task_id": task_id,
+            **task_rollout_metadata,
             **({"problem_uid": problem_uid} if problem_uid is not None else {}),
         }
         try:
@@ -5023,6 +5346,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                     "configured_problem_pool_size": args.problem_pool_size,
                     "problem_pool_count": problem_pool_count,
                     "benchmark_finalization": benchmark_finalization,
+                    **task_rollout_metadata,
                     **archive_mode_metadata,
                 },
             )
@@ -5049,6 +5373,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 "reinitialized_bootstrap_slot_count": reinitialized_bootstrap_count,
                 "parent_pool_count": len(parent_pool),
                 "parent_pool_path": str(parent_pool_path),
+                **task_rollout_metadata,
                 **archive_mode_metadata,
             },
         )
@@ -5078,6 +5403,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                     ],
                     "details": details,
                     "parent_pool_path": str(parent_pool_path),
+                    **task_rollout_metadata,
                     **archive_mode_metadata,
                 },
             )
