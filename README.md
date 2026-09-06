@@ -65,7 +65,7 @@ take precedence over values in `.env`.
   3. reserve one deterministic next-iteration child opportunity for each source rollout, keyed by `source_rollout_index` and the same `slot_index`,
   3.5. expose a shared cross-rollout workspace at `--rollout-temp-root/shared_workspace` where rollouts can leave readable files for other rollouts (files written during the task batch are cleaned up after the batch; durable state can persist through a child workspace, committed archive artifact, solution, or later behavior); this filesystem visibility is the historical v1 behavior and is not a peer-messaging API,
   3.6. assign every rollout instance a UUID for provenance and isolated runtime state,
-  3.7. for Codex/open-ended research only, create each live rollout's private batch-local `messages/` inbox before workers launch; other named rollouts can place direct messages there only through `send_message(recipient, message)`, and recipients read files with ordinary filesystem tools if desired,
+  3.7. for Codex or OpenCode open-ended research, create each live rollout's private batch-local `messages/` inbox before workers launch; other named rollouts can place direct messages there only through `send_message(recipient, message)`, and recipients read files with ordinary filesystem tools if desired,
   4. expose `archive/world_repo` by default as the durable cross-lineage Git archive available to every rollout (override with `--archive-repo-dir`),
      using a per-rollout temporary worktree so only committed archive changes are merged back and uncommitted archive edits are discarded,
   5. inject the selected parent slot's stored prompt as the rollout's initial user text, copy that slot's inherited workspace directory into the rollout root and consume the slot workspace, and write `shared_workspace/BENCHMARK.md`; evaluated benchmark profiles also write their pool/catalog files, while the open-ended profile writes only the exact human-authored task; bootstrap rollouts receive root `README.md` as a neutral environment description and a short initial message stating that no task is assigned,
@@ -89,7 +89,7 @@ take precedence over values in `.env`.
   - every rollout receives an internal `instance_uuid` recorded in progress logs, run logs, and benchmark events;
   - `submit_solution(uuid, answer)` scores immediately, returns `correct` and `reward`, and records `solution_scored` events;
   - there is no answer-file scoring fallback; a rollout that does not call `submit_solution` receives no solution score;
-  - rollouts can call `submit_solution(uuid, answer)` and `spawn_child(prompt, workspace_dir)` as applicable main-loop tools; Codex/open-ended research rollouts can also call `send_message(recipient, message)`;
+  - rollouts can call `submit_solution(uuid, answer)` and `spawn_child(prompt, workspace_dir)` as applicable main-loop tools; Codex and OpenCode open-ended research rollouts can also call `send_message(recipient, message)`;
   - `spawn_child` stores the required non-empty `prompt` in supervisor-side slot metadata as the child rollout's next initial user text;
   - `workspace_dir` is required and must be a workspace-local directory whose root contains a regular, non-symlinked, readable, non-blank UTF-8 `README.md`; `spawn_child` copies its contents into the reserved slot's inherited workspace, while additional files remain optional;
   - `workspace_dir` must be inside the rollout workspace and must not be the rollout root; after a successful spawn, the source directory is deleted when that parent rollout finishes, while failed attempts do not consume it;
@@ -149,14 +149,14 @@ uv run python -B main_loop.py \
   solved-item state, evaluator, score, reward, solved/failed/no-attempt label,
   or ranking. Generic rollout tools, child spawning, shared workspace,
   artifacts, and archive behavior are unchanged.
-- On the Codex backend only, each research rollout has one fixed human name by
+- On the Codex and OpenCode backends, each research rollout has one fixed human name by
   rollout index: Daniel, Noah, Elizabeth, George, Eva, Eleanor, Zoe, and
   Oliver. `send_message` accepts one other live name and a non-empty UTF-8
   message. It atomically creates a unique sequence-and-sender file in that
   recipient's private `messages/` inbox. Messages are never injected into
   context, and there is no read, broadcast, polling, or delivery-turn API. The
   supervisor imposes no message-size, per-sender, or per-batch message quota;
-  model turns and the filesystem provide the natural bounds. Stable Codex call
+  model turns and the filesystem provide the natural bounds. Stable backend call
   IDs are idempotent; without one, a retry may create another file.
 - Run records and one-line summaries say `evaluation=unconfigured`. Worker
   status, artifacts, archive activity, and child spawns remain lifecycle
@@ -236,14 +236,13 @@ uv run python -B main_loop.py \
   --num-rollouts 8
 ```
 
-For Codex/open-ended research, the runner applies an exact read deny to every
-sibling `messages/` directory while leaving ordinary sibling filesystem
-visibility unchanged. A rollout can read its own inbox but cannot write,
-overwrite, delete, enumerate, or read another rollout's inbox. Inbox contents
-are excluded from child workspaces and episode outputs and are removed with the
-batch workspaces. Resolver turns expose neither `spawn_child` nor
-`send_message`. ARC, SuperGPQA, controls, OpenCode, OpenRouter, and other
-unsupported paths expose no messaging tool.
+For Codex and OpenCode open-ended research, a rollout can read its own inbox but
+cannot write, overwrite, delete, enumerate, or read another rollout's inbox.
+Codex uses exact read-deny rules. OpenCode mounts ordinary sibling workspaces
+read-only while replacing each sibling `messages/` directory with an empty
+read-only directory. Inbox contents are excluded from child workspaces and
+episode outputs and are removed with the batch workspaces. ARC, SuperGPQA,
+controls, OpenRouter, and other unsupported paths expose no messaging tool.
 
 ### OpenCode rollout backend
 
@@ -267,9 +266,9 @@ HTTP/SSE server boundary, validates source-audited CLI versions, injects exact
 system instructions through a private config-scoped hook, translates benchmark
 MCP servers and enforces tool allowlists with session permission rules,
 redacts sensitive MCP payloads, and removes the private OpenCode state after
-normalizing the result. `spawn_child` is an isolated config-scoped tool that
-synchronously calls the existing Python supervisor; its result returns to the
-same parent turn.
+normalizing the result. `spawn_child` and, for open-ended rollouts,
+`send_message` are isolated config-scoped tools that synchronously call the
+existing Python supervisor; their results return to the same parent turn.
 
 The default Linux launcher uses bubblewrap with a private PID namespace,
 only the runtime binaries and fixed MCP socket proxy mounted read-only, explicit
@@ -277,15 +276,16 @@ writable rollout/archive/shared roots, a private `/tmp`, and parent-death
 cleanup. Linux, readable procfs, PID namespaces, and a working bubblewrap launch
 are preflight requirements and fail closed. The Python lineage callback runs
 outside the rollout sandbox behind a random authenticated loopback endpoint;
-its command, context, logs, sibling rollouts, and spawn-slot state are not
-mounted into the OpenCode server. Callback crashes, malformed replies, and
+its command, context, logs, sibling inboxes, and spawn-slot state are not
+mounted into the OpenCode server. Ordinary sibling rollout workspaces are
+read-only. Callback crashes, malformed replies, and
 timeouts return structured retryable tool results over HTTP 200 so the same
 parent can retry and continue. Benchmark modes fail closed if bubblewrap is disabled. Network remains
 explicitly enabled because the private HTTP server
 boundary and provider calls cannot currently operate in a separate network
 namespace; `--opencode-network-mode none` therefore fails closed. The
-`unsafe-none` mode is available only for trusted open-ended work and is named
-to avoid implying containment.
+`unsafe-none` is rejected because open-ended inbox privacy and evaluated
+benchmark containment both require bubblewrap.
 
 The audited OpenCode API reports MCP connection status but does not enumerate
 MCP tool IDs. The runner validates required connectivity and fails closed on
@@ -312,7 +312,7 @@ The native worker supports a narrow form of the official OpenCode
 for generic OpenAI-compatible endpoints. The provider portion of `--model`
 must equal `--opencode-custom-provider-id`. The audited package allowlist is
 `@ai-sdk/openai-compatible` for `/v1/chat/completions` and `@ai-sdk/openai` for
-`/v1/responses`. Both packages are bundled by pinned OpenCode `1.18.21`, so the
+`/v1/responses`. Both packages are bundled by pinned OpenCode `1.18.29`, so the
 worker never installs provider packages at runtime; any other package fails
 before launch.
 
@@ -366,8 +366,8 @@ adapter/orchestration sources, exact effective system/configured initial prompt
 content, relevant provider/auth inputs, and all exposed worker/startup sandbox
 settings. A partial resume recomputes inherited effective prompt identity from
 the current parent-pool child prompt and rejects a missing or mismatched hash.
-Only pinned OpenCode `1.18.21` is source-audited (official tag `v1.18.21`,
-commit `826d9ad46a22bef0294998e08daa3c4904fea28f`).
+Only pinned OpenCode `1.18.29` is source-audited (official tag `v1.18.29`,
+commit `16747470f976aca3d362ad730bcd3fe82ecc2c9a`).
 
 Host-side MCP commands receive only a small fixed base environment plus that
 server's explicitly configured environment. OpenCode server credentials, auth
