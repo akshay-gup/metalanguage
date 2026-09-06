@@ -45,8 +45,9 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
         self.assertEqual(args.task_file, "task.md")
 
     def test_opencode_containment_modes_fail_closed_for_benchmarks(self) -> None:
-        _validate_opencode_containment("open-ended", "unsafe-none", "allow")
         _validate_opencode_containment("supergpqa", "bubblewrap", "allow")
+        with self.assertRaisesRegex(RuntimeError, "private-inbox privacy"):
+            _validate_opencode_containment("open-ended", "unsafe-none", "allow")
         with self.assertRaisesRegex(RuntimeError, "require.*bubblewrap"):
             _validate_opencode_containment("supergpqa", "unsafe-none", "allow")
         with self.assertRaisesRegex(RuntimeError, "fail-closed"):
@@ -60,7 +61,7 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
             args = parse_args()
         self.assertEqual(args.worker_backend, "opencode")
         self.assertEqual(args.opencode_base_instructions_mode, "read-readme")
-        self.assertEqual(args.opencode_allowed_versions, "1.18.21")
+        self.assertEqual(args.opencode_allowed_versions, "1.18.29")
         self.assertEqual(args.opencode_allowed_bun_versions, "1.3.14")
         self.assertEqual(args.opencode_sandbox_mode, "bubblewrap")
         self.assertEqual(args.opencode_network_mode, "allow")
@@ -231,7 +232,7 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
             worker_timeout_seconds=3600,
             opencode_sandbox_mode="bubblewrap",
             opencode_network_mode="allow",
-            _opencode_runtime_version="1.18.21",
+            _opencode_runtime_version="1.18.29",
             _opencode_bin_sha256="opencode-sha",
             _opencode_bun_version="1.3.14",
             _opencode_bun_sha256="bun-sha",
@@ -254,7 +255,7 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
             "opencode_base_instructions_mode": "read-readme",
             "opencode_agent": "build",
             "opencode_variant": None,
-            "opencode_runtime_version": "1.18.21",
+            "opencode_runtime_version": "1.18.29",
             "opencode_bin_sha256": "opencode-sha",
             "opencode_bun_version": "1.3.14",
             "opencode_bun_sha256": "bun-sha",
@@ -495,6 +496,15 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
             self.assertFalse(
                 any("benchmark_events" in str(path) or "arc_agi" in str(path) for path in calls[0]["sandbox_writable_roots"])
             )
+            self.assertIn(
+                str(Path(str(calls[0]["seed_output_dir"]))),
+                [str(path) for path in calls[0]["sandbox_writable_roots"]],
+            )
+            self.assertNotIn(
+                str(Path(str(calls[0]["seed_output_dir"]))),
+                [str(path) for path in calls[0]["sandbox_read_only_roots"]],
+            )
+            self.assertEqual(calls[0]["private_inbox"].sender, "Daniel")
             handler_context = Path(str(calls[0]["continuation_context_path"]))
             mounted_sources = {
                 str(source)

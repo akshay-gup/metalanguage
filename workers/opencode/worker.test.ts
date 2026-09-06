@@ -13,7 +13,7 @@ import {
   type RunnerRequest,
 } from "./protocol.ts"
 import { finalAssistantText, sandboxedServerCommand, startSpawnCallback } from "./worker.ts"
-import { runHandler, SYSTEM_PLUGIN_SOURCE, TOOL_SOURCE } from "./spawn_bridge.ts"
+import { runHandler, sendMessageToolSource, SYSTEM_PLUGIN_SOURCE, TOOL_SOURCE } from "./spawn_bridge.ts"
 
 function mcpServer(): McpServerInput {
   return {
@@ -37,7 +37,9 @@ describe("OpenCode native protocol adapter", () => {
     const shared = join(root, "shared")
     const batch = join(root, "archive_worktrees", "batch")
     const own = join(batch, "rollout_000")
-    for (const path of [cwd, state, shared, own, join(batch, "rollout_001")]) {
+    const siblingMessages = join(batch, "rollout_001", "messages")
+    const emptyDirectory = join(state, "masked-empty-directory")
+    for (const path of [cwd, state, shared, own, siblingMessages, emptyDirectory]) {
       await mkdir(path, { recursive: true })
     }
     const readme = join(cwd, "README.md")
@@ -55,6 +57,7 @@ describe("OpenCode native protocol adapter", () => {
         bubblewrap_bin: "/usr/bin/bwrap",
         read_only_roots: [readme, benchmark, batch],
         writable_roots: [own, shared],
+        masked_directories: [siblingMessages],
       },
     }
     const command = await sandboxedServerCommand(request, state)
@@ -67,6 +70,15 @@ describe("OpenCode native protocol adapter", () => {
     expect(mountIndex("--ro-bind", batch)).toBeGreaterThan(-1)
     expect(mountIndex("--bind", own)).toBeGreaterThan(mountIndex("--ro-bind", batch))
     expect(mountIndex("--ro-bind", benchmark)).toBeGreaterThan(mountIndex("--bind", shared))
+    expect(mountIndex("--ro-bind", emptyDirectory)).toBeGreaterThan(-1)
+    expect(
+      command.findIndex(
+        (value, index) =>
+          value === "--ro-bind" &&
+          command[index + 1] === emptyDirectory &&
+          command[index + 2] === siblingMessages,
+      ),
+    ).toBeGreaterThan(mountIndex("--ro-bind", batch))
   })
 
   test("builds exact offline custom provider configs for chat and responses modes", () => {
@@ -274,6 +286,26 @@ describe("OpenCode native protocol adapter", () => {
     expect(logged).toContain("redacted")
     expect(normalizer.finalText()).toBe("parent continued")
     expect(terminal).toBe("idle")
+
+    const privateMessage = new EventNormalizer("ses_test", new Set()).handle({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "part_message",
+          callID: "call_message",
+          sessionID: "ses_test",
+          type: "tool",
+          tool: "send_message",
+          state: {
+            status: "completed",
+            input: { recipient: "Noah", message: "PRIVATE_MESSAGE_BODY" },
+            output: "PRIVATE_MESSAGE_RESULT",
+          },
+        },
+      },
+    })
+    expect(JSON.stringify(privateMessage.events)).not.toContain("PRIVATE_MESSAGE")
+    expect(JSON.stringify(privateMessage.events)).toContain("redacted")
   })
 
   test("ignores an initial idle status until the submitted turn becomes busy", () => {
@@ -450,6 +482,9 @@ describe("OpenCode native protocol adapter", () => {
     expect(TOOL_SOURCE).toContain("context.abort")
     expect(TOOL_SOURCE).toContain("METALANGUAGE_SPAWN_CHILD_ENDPOINT")
     expect(TOOL_SOURCE).not.toContain("METALANGUAGE_OPENCODE_WORKER_SCRIPT")
+    const sendMessage = sendMessageToolSource(["Noah", "Eva"])
+    expect(sendMessage).toContain('tool: "send_message"')
+    expect(sendMessage).toContain('enum: ["Noah","Eva"]')
     expect(SYSTEM_PLUGIN_SOURCE).toContain("experimental.chat.system.transform")
     expect(SYSTEM_PLUGIN_SOURCE).toContain("output.system.splice")
     expect(SYSTEM_PLUGIN_SOURCE).toContain('"shell.env"')
@@ -458,7 +493,7 @@ describe("OpenCode native protocol adapter", () => {
 })
 
 describe("spawn_child supervisor bridge", () => {
-  test("host callback rejects unauthorized and oversized control requests", async () => {
+  test("host callback rejects unauthorized and oversized spawn requests", async () => {
     const callback = await startSpawnCallback([
       "python3",
       "-c",
@@ -476,7 +511,12 @@ describe("spawn_child supervisor bridge", () => {
         headers: {
           authorization: `Bearer ${callback.token}`,
         },
-        body: "x".repeat(65 * 1024),
+        body: JSON.stringify({
+          tool: "spawn_child",
+          namespace: null,
+          call_id: "oversized",
+          arguments: { prompt: "x".repeat(65 * 1024), workspace_dir: "child" },
+        }),
       })
       expect(oversized.status).toBe(413)
     } finally {

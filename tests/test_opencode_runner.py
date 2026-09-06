@@ -100,7 +100,7 @@ class Buffer:
 
 
 class OpenCodeRunnerTests(unittest.TestCase):
-    audited_opencode_version = "1.18.21"
+    audited_opencode_version = "1.18.29"
 
     def setUp(self) -> None:
         self.worker_script = opencode_worker_script_path()
@@ -414,7 +414,7 @@ class OpenCodeRunnerTests(unittest.TestCase):
             sensitive_mcp_tools=sensitive,
             agent=agent,
             variant=variant,
-            allowed_versions=("1.18.21",),
+            allowed_versions=("1.18.29",),
             startup_timeout_seconds=startup_timeout,
             provider_env_names=provider_env_names,
             extra_environment={
@@ -440,7 +440,7 @@ class OpenCodeRunnerTests(unittest.TestCase):
             )
             self.assertEqual(result["status"], "completed")
             self.assertEqual(result["final_text"], "fixture final")
-            self.assertEqual(result["runtime_version"], "1.18.21")
+            self.assertEqual(result["runtime_version"], "1.18.29")
             self.assertTrue(result["isolated_state_cleaned"])
             prompt = json.loads((root / "workdir/fake_prompt.json").read_text())
             self.assertEqual(prompt["system"], canonical_instructions)
@@ -675,22 +675,21 @@ class OpenCodeRunnerTests(unittest.TestCase):
             root = Path(temp)
             workdir = root / "workdir"
             workdir.mkdir()
-            result = run_opencode_rollout(
-                worker_script=self.worker_script,
-                bun_bin=self.bun_bin,
-                opencode_bin=self._fake_cli(root),
-                model="fixture/model",
-                workdir=workdir,
-                control_dir=root / "control",
-                worker_state_dir=root / "state",
-                timeout_seconds=2,
-                initial_user_text="ordinary prompt",
-                allowed_versions=("1.18.21",),
-                allowed_bun_versions=("9.9.9",),
-                startup_timeout_seconds=2,
-            )
-            self.assertEqual(result["status"], "error")
-            self.assertEqual(result["error_code"], "unsupported_bun_version")
+            with self.assertRaisesRegex(ValueError, "Bun allowed versions"):
+                run_opencode_rollout(
+                    worker_script=self.worker_script,
+                    bun_bin=self.bun_bin,
+                    opencode_bin=self._fake_cli(root),
+                    model="fixture/model",
+                    workdir=workdir,
+                    control_dir=root / "control",
+                    worker_state_dir=root / "state",
+                    timeout_seconds=2,
+                    initial_user_text="ordinary prompt",
+                    allowed_versions=("1.18.29",),
+                    allowed_bun_versions=("9.9.9",),
+                    startup_timeout_seconds=2,
+                )
 
         for variable, expected_code in (
             ("FAKE_OPENCODE_STARTUP_HANG", "opencode_start_timeout"),
@@ -717,7 +716,7 @@ class OpenCodeRunnerTests(unittest.TestCase):
             workdir.mkdir()
             request = {
                 "opencode_bin": str(self._fake_cli(root)),
-                "allowed_versions": ["1.18.21"],
+                "allowed_versions": ["1.18.29"],
                 "model": "fixture/model",
                 "cwd": str(workdir),
                 "state_root": str(root / "state"),
@@ -770,7 +769,7 @@ class OpenCodeRunnerTests(unittest.TestCase):
             workdir.mkdir()
             request = {
                 "opencode_bin": str(self._fake_cli(root)),
-                "allowed_versions": ["1.18.21"],
+                "allowed_versions": ["1.18.29"],
                 "allowed_bun_versions": ["1.3.14"],
                 "model": "fixture/model",
                 "cwd": str(workdir),
@@ -1033,7 +1032,7 @@ class OpenCodeRunnerTests(unittest.TestCase):
                     timeout_seconds=17,
                     initial_user_text="exact prompt",
                     system_instructions="exact system",
-                    allowed_versions=("1.18.21",),
+                    allowed_versions=("1.18.29",),
                     allowed_bun_versions=("1.3.14",),
                     startup_timeout_seconds=19,
                     provider_env_names=("OPENAI_API_KEY",),

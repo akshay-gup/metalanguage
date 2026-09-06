@@ -74,13 +74,10 @@ class PrivateInboxTests(unittest.TestCase):
             ),
         )
         self.assertTrue(private_inbox_enabled("open-ended", "codex"))
-        self.assertFalse(
-            private_inbox_enabled("open-ended", "codex", resolution_phase=True)
-        )
+        self.assertTrue(private_inbox_enabled("open-ended", "opencode"))
         for benchmark, backend in (
             ("arc-agi", "codex"),
             ("supergpqa", "codex"),
-            ("open-ended", "opencode"),
             ("open-ended", "openrouter"),
             ("arc-agi", "opencode"),
             ("supergpqa", "openrouter"),
@@ -367,10 +364,10 @@ class PrivateInboxTests(unittest.TestCase):
             Path(__file__).resolve().parents[1] / "seeds" / "bootstrap" / "README.md"
         ).read_text(encoding="utf-8")
         static_notice = (
-            "`messages/` is this program's private, batch-local inbox. Other named "
-            "programs can place files there through `send_message`, but cannot inspect "
-            "the inbox. `runtime.md` lists the names. Messages disappear at the end "
-            "of the round."
+            "If `runtime.md` lists human names, `messages/` is this program's private,\n"
+            "batch-local inbox. Other named programs can place files there through\n"
+            "`send_message`, but cannot inspect the inbox. Messages disappear at the end of\n"
+            "the round."
         )
         self.assertEqual(contents.count(static_notice), 1)
         self.assertNotIn("should send", contents.lower())
@@ -408,7 +405,7 @@ class PrivateInboxTests(unittest.TestCase):
             num_rollouts=2,
         )
         old_record = {"task_index": 0, "rollout_index": 0, "task_rollout_count": 2}
-        with self.assertRaisesRegex(SystemExit, "predates the v3.7"):
+        with self.assertRaisesRegex(SystemExit, "predates this backend"):
             _validate_private_inbox_partial_resume([old_record], args)
 
         current_record = {
@@ -427,6 +424,23 @@ class PrivateInboxTests(unittest.TestCase):
             num_rollouts=2,
         )
         _validate_private_inbox_partial_resume([old_record], unchanged_args)
+
+        opencode_args = Namespace(
+            benchmark="open-ended",
+            worker_backend="opencode",
+            num_rollouts=2,
+        )
+        with self.assertRaisesRegex(SystemExit, "incomplete OpenCode"):
+            _validate_private_inbox_partial_resume([old_record], opencode_args)
+        _validate_private_inbox_partial_resume(
+            [
+                {
+                    **old_record,
+                    "opencode_capability_identity": PRIVATE_INBOX_CAPABILITY_IDENTITY,
+                }
+            ],
+            opencode_args,
+        )
 
     def test_codex_request_exposes_private_tool_context_only_after_capability_probe(self) -> None:
         root = self._root()

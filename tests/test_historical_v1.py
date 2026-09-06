@@ -62,10 +62,10 @@ class HistoricalV1Tests(unittest.TestCase):
         readme = (PROJECT_ROOT / "seeds/bootstrap/README.md").read_text()
         self.assertEqual(
             readme.count(
-                "`messages/` is this program's private, batch-local inbox. Other named "
-                "programs can place files there through `send_message`, but cannot inspect "
-                "the inbox. `runtime.md` lists the names. Messages disappear at the end "
-                "of the round."
+                "If `runtime.md` lists human names, `messages/` is this program's private,\n"
+                "batch-local inbox. Other named programs can place files there through\n"
+                "`send_message`, but cannot inspect the inbox. Messages disappear at the end of\n"
+                "the round."
             ),
             1,
         )
