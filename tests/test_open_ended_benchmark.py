@@ -487,22 +487,32 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
             )
             self.assertNotIn(
                 str(Path(__file__).resolve().parents[1]),
-                [str(path) for path in calls[0]["sandbox_read_only_roots"]],
+                [
+                    str(path)
+                    for path in calls[0].get("sandbox_read_only_roots", ())
+                ],
             )
             self.assertNotIn(
                 str(runtime / "logs/task_store"),
-                [str(path) for path in calls[0]["sandbox_read_only_roots"]],
+                [
+                    str(path)
+                    for path in calls[0].get("sandbox_read_only_roots", ())
+                ],
             )
             self.assertFalse(
                 any("benchmark_events" in str(path) or "arc_agi" in str(path) for path in calls[0]["sandbox_writable_roots"])
             )
+            seed_output_dir = Path(str(calls[0]["workdir"])) / "seed_output"
             self.assertIn(
-                str(Path(str(calls[0]["seed_output_dir"]))),
+                str(seed_output_dir),
                 [str(path) for path in calls[0]["sandbox_writable_roots"]],
             )
             self.assertNotIn(
-                str(Path(str(calls[0]["seed_output_dir"]))),
-                [str(path) for path in calls[0]["sandbox_read_only_roots"]],
+                str(seed_output_dir),
+                [
+                    str(path)
+                    for path in calls[0].get("sandbox_read_only_roots", ())
+                ],
             )
             self.assertEqual(calls[0]["private_inbox"].sender, "Daniel")
             handler_context = Path(str(calls[0]["continuation_context_path"]))
