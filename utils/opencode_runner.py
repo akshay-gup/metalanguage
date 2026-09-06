@@ -19,14 +19,17 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+from utils.private_inbox import PrivateInboxConfig
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 OPENCODE_WORKER_SCRIPT = PROJECT_ROOT / "workers" / "opencode" / "worker.ts"
-SOURCE_AUDITED_OPENCODE_VERSIONS = ("1.18.21",)
+SOURCE_AUDITED_OPENCODE_VERSIONS = ("1.18.29",)
 SOURCE_AUDITED_BUN_VERSIONS = ("1.3.14",)
 DEFAULT_BUBBLEWRAP_BIN = Path("/usr/bin/bwrap")
-# Both entries are in pinned OpenCode 1.18.21's BUNDLED_PROVIDERS map. Keeping
-# this allowlist closed prevents the Npm.add() runtime-install fallback.
+# OpenCode 1.18.29's worker-facing SDK, permission, HTTP, plugin, MCP, CLI, and
+# runtime-flag seams were checked against the vendored 1.18.21 source. Both
+# entries remain bundled, so this closed allowlist prevents Npm.add() installs.
 SUPPORTED_CUSTOM_PROVIDER_NPM = {
     "@ai-sdk/openai-compatible": "chat_completions",
     "@ai-sdk/openai": "responses",
@@ -807,10 +810,80 @@ def run_opencode_rollout(
     sandbox_read_only_mounts: tuple[tuple[Path, Path], ...] = (),
     sandbox_writable_roots: tuple[Path, ...] = (),
     sandbox_masked_paths: tuple[Path, ...] = (),
+    sandbox_masked_directories: tuple[Path, ...] = (),
     extra_environment: dict[str, str] | None = None,
     test_provider_config: dict[str, Any] | None = None,
     progress_callback: Callable[..., None] | None = None,
+    private_inbox: PrivateInboxConfig | None = None,
 ) -> dict[str, Any]:
+    unsupported_versions = sorted(
+        set(allowed_versions) - set(SOURCE_AUDITED_OPENCODE_VERSIONS)
+    )
+    if not allowed_versions or unsupported_versions:
+        raise ValueError("OpenCode allowed versions must be source-audited")
+    unsupported_bun_versions = sorted(
+        set(allowed_bun_versions) - set(SOURCE_AUDITED_BUN_VERSIONS)
+    )
+    if not allowed_bun_versions or unsupported_bun_versions:
+        raise ValueError("Bun allowed versions must be source-audited")
+    if private_inbox is not None:
+        if sandbox_mode != "bubblewrap":
+            raise ValueError("private inbox requires the OpenCode bubblewrap sandbox")
+        if (
+            private_inbox.own_inbox != workdir / "messages"
+            or private_inbox.own_inbox.is_symlink()
+            or not private_inbox.own_inbox.is_dir()
+        ):
+            raise ValueError("OpenCode private inbox is not rooted in its rollout workspace")
+        sibling_workdirs: list[Path] = []
+        sibling_inboxes: list[Path] = []
+        for inbox in private_inbox.recipient_inboxes.values():
+            if (
+                inbox.name != "messages"
+                or not inbox.is_absolute()
+                or inbox.is_symlink()
+                or not inbox.is_dir()
+            ):
+                raise ValueError("OpenCode recipient inbox path is invalid")
+            sibling_workdir = inbox.parent
+            if (
+                sibling_workdir == workdir
+                or sibling_workdir.is_symlink()
+                or not sibling_workdir.is_dir()
+            ):
+                raise ValueError("OpenCode sibling rollout workspace is invalid")
+            sibling_workdirs.append(sibling_workdir)
+            sibling_inboxes.append(inbox)
+        visible_roots = (
+            workdir,
+            *sandbox_read_only_roots,
+            *sandbox_writable_roots,
+            *sibling_workdirs,
+        )
+        for protected in (
+            control_dir,
+            worker_state_dir,
+            private_inbox.state_path,
+            *private_inbox.protected_read_paths,
+            *((continuation_context_path,) if continuation_context_path is not None else ()),
+            *((auth_file,) if auth_file is not None else ()),
+        ):
+            resolved_protected = protected.resolve()
+            if any(
+                resolved_protected == root.resolve()
+                or resolved_protected.is_relative_to(root.resolve())
+                for root in visible_roots
+            ):
+                raise ValueError("OpenCode protected private-inbox state overlaps a sandbox root")
+        sandbox_read_only_roots = (
+            *sandbox_read_only_roots,
+            private_inbox.own_inbox,
+            *sibling_workdirs,
+        )
+        sandbox_masked_directories = (
+            *sandbox_masked_directories,
+            *sibling_inboxes,
+        )
     runtime_root = _private_runtime_root(worker_state_dir)
     if sandbox_mode == "bubblewrap":
         resolved_bubblewrap = resolve_bubblewrap_bin(bubblewrap_bin)
@@ -894,6 +967,10 @@ def run_opencode_rollout(
                     )
                 )
             ],
+            "masked_directories": [
+                str(path.expanduser().resolve())
+                for path in dict.fromkeys(sandbox_masked_directories)
+            ],
         },
     }
     if test_provider_config is not None:
@@ -907,6 +984,14 @@ def run_opencode_rollout(
             "--child-tool-handler",
             str(continuation_context_path),
         ]
+    if private_inbox is not None:
+        if continuation_context_path is None:
+            raise ValueError("private inbox requires the central dynamic-tool callback")
+        request["private_inbox"] = {
+            "capability_identity": private_inbox.capability_identity,
+            "sender": private_inbox.sender,
+            "recipients": list(private_inbox.recipient_inboxes),
+        }
     if auth_file is not None:
         request["auth_file"] = str(auth_file.resolve())
     if agent:
@@ -924,6 +1009,20 @@ def run_opencode_rollout(
         "final_text": "",
         "thread_id": "",
         "session_id": "",
+        "turn_count": 0,
+        "tool_call_count": 0,
+        "spawn_child_tool_call_count": 0,
+        "send_message_tool_call_count": 0,
+        "turn_completed": False,
+        "provider_step_count": 0,
+        "usage_input_tokens": 0,
+        "usage_output_tokens": 0,
+        "usage_reasoning_tokens": 0,
+        "usage_cache_read_tokens": 0,
+        "usage_cache_write_tokens": 0,
+        "usage_cost": 0.0,
+        "patch_count": 0,
+        "patched_files": set(),
         "error_code": "",
         "error_message": "",
         "runtime_version": "",
@@ -1023,6 +1122,20 @@ def run_opencode_rollout(
         "request_path": str(request_path),
         "stderr_path": str(stderr_path),
         "events_path": str(events_path),
+        "turn_count": state["turn_count"],
+        "tool_call_count": state["tool_call_count"],
+        "spawn_child_tool_call_count": state["spawn_child_tool_call_count"],
+        "send_message_tool_call_count": state["send_message_tool_call_count"],
+        "turn_completed": state["turn_completed"],
+        "provider_step_count": state["provider_step_count"],
+        "usage_input_tokens": state["usage_input_tokens"],
+        "usage_output_tokens": state["usage_output_tokens"],
+        "usage_reasoning_tokens": state["usage_reasoning_tokens"],
+        "usage_cache_read_tokens": state["usage_cache_read_tokens"],
+        "usage_cache_write_tokens": state["usage_cache_write_tokens"],
+        "usage_cost": state["usage_cost"],
+        "patch_count": state["patch_count"],
+        "patched_files": sorted(state["patched_files"]),
         "isolated_state_cleaned": not runtime_root.exists(),
         "mcp_process_pids": list(state["mcp_process_pids"]),
     }
@@ -1110,10 +1223,42 @@ def _handle_runner_line(
     elif name == "thread_started":
         state["thread_id"] = str(event.get("thread_id") or "")
         state["session_id"] = str(event.get("session_id") or "")
+    elif name == "turn_started":
+        state["turn_count"] += 1
+    elif name == "tool_begin":
+        state["tool_call_count"] += 1
+        if event.get("tool") == "spawn_child":
+            state["spawn_child_tool_call_count"] += 1
+        elif event.get("tool") == "send_message":
+            state["send_message_tool_call_count"] += 1
+    elif name == "turn_usage":
+        state["provider_step_count"] += 1
+        for key in (
+            "usage_input_tokens",
+            "usage_output_tokens",
+            "usage_reasoning_tokens",
+            "usage_cache_read_tokens",
+            "usage_cache_write_tokens",
+        ):
+            value = event.get(key)
+            if isinstance(value, int) and value >= 0:
+                state[key] += value
+        cost = event.get("usage_cost")
+        if isinstance(cost, (int, float)) and cost >= 0:
+            state["usage_cost"] += cost
+    elif name == "patch":
+        state["patch_count"] += 1
+        files = event.get("files")
+        if isinstance(files, list):
+            state["patched_files"].update(
+                path for path in files if isinstance(path, str)
+            )
     elif name in {"agent_message", "turn_complete"}:
         text = str(event.get("final_text") or event.get("text") or "")
         if text:
             state["final_text"] = text
+        if name == "turn_complete":
+            state["turn_completed"] = True
     elif name == "error":
         state["error_code"] = str(event.get("error_code") or "")
         state["error_message"] = str(event.get("error_message") or "")
@@ -1128,18 +1273,44 @@ def _handle_runner_line(
             )
         elif name == "turn_started":
             progress_callback("worker_turn_started", backend="opencode")
-        elif name == "tool_begin":
+        elif name == "tool_begin" and event.get("tool") != "send_message":
             progress_callback(
                 "worker_tool_started",
                 tool=event.get("tool"),
                 call_id=event.get("call_id"),
+                command=event.get("command"),
             )
-        elif name == "tool_end":
+        elif name == "tool_end" and event.get("tool") != "send_message":
             progress_callback(
                 "worker_tool_completed",
                 tool=event.get("tool"),
                 call_id=event.get("call_id"),
                 status=event.get("status"),
+                duration_ms=event.get("duration_ms"),
+            )
+        elif name == "turn_usage":
+            progress_callback(
+                "worker_turn_usage",
+                reason=event.get("reason"),
+                usage_input_tokens=event.get("usage_input_tokens"),
+                usage_output_tokens=event.get("usage_output_tokens"),
+                usage_reasoning_tokens=event.get("usage_reasoning_tokens"),
+                usage_cache_read_tokens=event.get("usage_cache_read_tokens"),
+                usage_cache_write_tokens=event.get("usage_cache_write_tokens"),
+                usage_cost=event.get("usage_cost"),
+            )
+        elif name == "patch":
+            progress_callback(
+                "worker_patch",
+                files=event.get("files"),
+                file_count=event.get("file_count"),
+            )
+        elif name == "warning":
+            progress_callback(
+                "worker_warning",
+                warning_code=event.get("warning_code"),
+                attempt=event.get("attempt"),
+                next_retry_at_ms=event.get("next_retry_at_ms"),
             )
         elif name == "turn_complete":
             progress_callback("worker_turn_completed", response_status="completed")

@@ -1,4 +1,4 @@
-"""Supervisor-owned private inbox support for Codex open-ended rollouts."""
+"""Supervisor-owned private inbox support for open-ended managed rollouts."""
 
 from __future__ import annotations
 
@@ -58,7 +58,7 @@ def private_inbox_enabled(
     benchmark: str,
     worker_backend: str,
 ) -> bool:
-    return benchmark == "open-ended" and worker_backend == "codex"
+    return benchmark == "open-ended" and worker_backend in {"codex", "opencode"}
 
 
 def initialize_private_inboxes(

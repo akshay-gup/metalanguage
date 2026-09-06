@@ -1437,7 +1437,11 @@ def _validate_benchmark_backend(benchmark: str, worker_backend: str) -> None:
 def _validate_opencode_containment(
     benchmark: str, sandbox_mode: str, network_mode: str
 ) -> None:
-    if sandbox_mode == "unsafe-none" and benchmark != "open-ended":
+    if sandbox_mode == "unsafe-none" and benchmark == "open-ended":
+        raise RuntimeError(
+            "OpenCode open-ended workers require bubblewrap for private-inbox privacy"
+        )
+    if sandbox_mode == "unsafe-none":
         raise RuntimeError(
             "OpenCode benchmark workers require --opencode-sandbox-mode=bubblewrap"
         )
@@ -1586,6 +1590,12 @@ def _validate_private_inbox_partial_resume(
         getattr(args, "worker_backend", ""),
     ):
         return
+    capability_field = (
+        "codex_capability_identity"
+        if args.worker_backend == "codex"
+        else "opencode_capability_identity"
+    )
+    backend_label = "Codex" if args.worker_backend == "codex" else "OpenCode"
     by_task: dict[int, dict[int, dict[str, Any]]] = {}
     for record in records:
         task_index = record.get("task_index")
@@ -1610,15 +1620,23 @@ def _validate_private_inbox_partial_resume(
         if len(per_task) >= expected_count:
             continue
         if any(
-            record.get("codex_capability_identity")
+            record.get(capability_field)
             != PRIVATE_INBOX_CAPABILITY_IDENTITY
             for record in per_task.values()
         ):
             raise SystemExit(
-                "error: incomplete Codex open-ended task "
-                f"{task_index} predates the v3.7 private-inbox capability; "
+                f"error: incomplete {backend_label} open-ended task "
+                f"{task_index} predates this backend's private-inbox capability; "
                 "the partial batch cannot be resumed safely"
             )
+
+
+def _private_inbox_capability_record(worker_backend: str) -> dict[str, str]:
+    if worker_backend == "codex":
+        return {"codex_capability_identity": PRIVATE_INBOX_CAPABILITY_IDENTITY}
+    if worker_backend == "opencode":
+        return {"opencode_capability_identity": PRIVATE_INBOX_CAPABILITY_IDENTITY}
+    return {}
 
 
 def _ensure_runtime_bootstrap_seed(bootstrap_seed_dir: Path) -> None:
@@ -2330,6 +2348,7 @@ def run_opencode_worker(
     sandbox_writable_roots: tuple[Path, ...] = (),
     sandbox_masked_paths: tuple[Path, ...] = (),
     progress_callback: Any = None,
+    private_inbox: PrivateInboxConfig | None = None,
 ) -> WorkerResult:
     """Run one rollout through the Metalanguage-owned TypeScript/Bun worker."""
 
@@ -2364,6 +2383,7 @@ def run_opencode_worker(
         sandbox_writable_roots=sandbox_writable_roots,
         sandbox_masked_paths=sandbox_masked_paths,
         progress_callback=progress_callback,
+        private_inbox=private_inbox,
     )
     metadata = {
         key: result.get(key)
@@ -2374,6 +2394,20 @@ def run_opencode_worker(
             "request_path",
             "stderr_path",
             "events_path",
+            "turn_count",
+            "tool_call_count",
+            "spawn_child_tool_call_count",
+            "send_message_tool_call_count",
+            "turn_completed",
+            "provider_step_count",
+            "usage_input_tokens",
+            "usage_output_tokens",
+            "usage_reasoning_tokens",
+            "usage_cache_read_tokens",
+            "usage_cache_write_tokens",
+            "usage_cost",
+            "patch_count",
+            "patched_files",
             "isolated_state_cleaned",
             "mcp_process_pids",
         ]
@@ -2835,7 +2869,7 @@ def parse_args() -> argparse.Namespace:
         "--opencode-sandbox-mode",
         choices=["bubblewrap", "unsafe-none"],
         default="bubblewrap",
-        help="OpenCode containment mode. Benchmarks require bubblewrap; unsafe-none is open-ended only.",
+        help="OpenCode containment mode. Current benchmark contracts require bubblewrap; unsafe-none fails closed.",
     )
     parser.add_argument(
         "--opencode-network-mode",
@@ -2887,11 +2921,21 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
     if private_inbox_enabled(args.benchmark, args.worker_backend):
         if args.num_rollouts > len(ROLLOUT_HUMAN_NAMES):
             raise SystemExit(
-                "error: Codex open-ended private inbox supports rollout indices 0 through 7"
+                "error: open-ended private inbox supports rollout indices 0 through 7"
             )
-        if args.codex_sandbox_mode == "danger-full-access":
+        if (
+            args.worker_backend == "codex"
+            and args.codex_sandbox_mode == "danger-full-access"
+        ):
             raise SystemExit(
                 "error: Codex open-ended private inbox requires read-only or workspace-write sandboxing"
+            )
+        if (
+            args.worker_backend == "opencode"
+            and args.opencode_sandbox_mode != "bubblewrap"
+        ):
+            raise SystemExit(
+                "error: OpenCode open-ended private inbox requires bubblewrap sandboxing"
             )
 
     _validate_benchmark_backend(args.benchmark, args.worker_backend)
@@ -2975,6 +3019,22 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             raise ValueError("--opencode-allowed-versions must contain at least one version")
         if not opencode_allowed_bun_versions:
             raise ValueError("--opencode-allowed-bun-versions must contain at least one version")
+        unsupported_opencode_versions = sorted(
+            set(opencode_allowed_versions) - set(SOURCE_AUDITED_OPENCODE_VERSIONS)
+        )
+        if unsupported_opencode_versions:
+            raise ValueError(
+                "--opencode-allowed-versions includes versions not audited by this source: "
+                + ", ".join(unsupported_opencode_versions)
+            )
+        unsupported_bun_versions = sorted(
+            set(opencode_allowed_bun_versions) - set(SOURCE_AUDITED_BUN_VERSIONS)
+        )
+        if unsupported_bun_versions:
+            raise ValueError(
+                "--opencode-allowed-bun-versions includes versions not audited by this source: "
+                + ", ".join(unsupported_bun_versions)
+            )
         opencode_worker_script = resolve_opencode_worker_script(
             Path(args.opencode_worker_script) if args.opencode_worker_script else None,
         )
@@ -3751,17 +3811,11 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                             ),
                             sandbox_network=args.opencode_network_mode,
                             bubblewrap_bin=opencode_bubblewrap_bin,
-                            sandbox_read_only_roots=tuple(
-                                path
-                                for path in (
-                                    seed_output_dir,
-                                )
-                                if path.exists()
-                            ),
                             sandbox_read_only_mounts=opencode_credential_mounts,
                             sandbox_writable_roots=tuple(
                                 path
                                 for path in (
+                                    seed_output_dir,
                                     shared_archives_root,
                                     shared_workspace_dir,
                                 )
@@ -3771,6 +3825,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                                 (DEFAULT_ENV_PATH,) if DEFAULT_ENV_PATH.is_file() else ()
                             ),
                             progress_callback=_progress,
+                            private_inbox=private_inbox,
                         )
                     else:
                         if api_key is None:
@@ -3970,9 +4025,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 "worker_error_message": worker_result.error_message,
                 "worker_backend": args.worker_backend,
                 **(
-                    {
-                        "codex_capability_identity": PRIVATE_INBOX_CAPABILITY_IDENTITY,
-                    }
+                    _private_inbox_capability_record(args.worker_backend)
                     if private_inbox is not None
                     else {}
                 ),
@@ -4239,9 +4292,9 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                                         "worker_error_message": str(exc),
                                         "worker_backend": args.worker_backend,
                                         **(
-                                            {
-                                                "codex_capability_identity": PRIVATE_INBOX_CAPABILITY_IDENTITY,
-                                            }
+                                            _private_inbox_capability_record(
+                                                args.worker_backend
+                                            )
                                             if private_inbox_enabled(
                                                 args.benchmark,
                                                 args.worker_backend,
