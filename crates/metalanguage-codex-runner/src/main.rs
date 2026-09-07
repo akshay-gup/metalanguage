@@ -49,6 +49,7 @@ use codex_core_api::empty_extension_registry;
 use codex_core_api::init_state_db;
 use codex_core_api::item_event_to_server_notification;
 use codex_core_api::local_agent_graph_store_from_state_db;
+use codex_core_api::passthrough_image_store;
 use codex_core_api::resolve_installation_id;
 use codex_core_api::set_default_originator;
 use codex_core_api::thread_store_from_config;
@@ -351,6 +352,7 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
         empty_extension_registry(),
         user_instructions_provider,
         /*analytics_events_client*/ None,
+        passthrough_image_store(),
         Arc::clone(&thread_store),
         agent_graph_store,
         installation_id,
