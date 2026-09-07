@@ -410,10 +410,11 @@ async function stopHostMcpBridges(bridges: HostMcpBridge[], hostRoot?: string): 
   if (hostRoot) await rm(hostRoot, { recursive: true, force: true })
 }
 
-function opencodeConfig(request: RunnerRequest, translated: TranslatedMcp): Record<string, unknown> {
+export function opencodeConfig(request: RunnerRequest, translated: TranslatedMcp): Record<string, unknown> {
   const config: Record<string, unknown> = {
     autoupdate: false,
     share: "disabled",
+    compaction: { auto: false, prune: false },
     permission: { "*": "allow", question: "deny", task: "deny" },
     mcp: translated.config,
   }
@@ -983,6 +984,10 @@ async function runSession(
         error_message: "OpenCode session failed",
       }
       throw new RunnerError(diagnostic.error_code, diagnostic.error_message, { diagnostic })
+    }
+    if (terminal === "context_exhausted") {
+      completed = true
+      return
     }
     const messages = await api.json<SessionMessagesResponse>(
       "GET",

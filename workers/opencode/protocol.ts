@@ -384,7 +384,7 @@ export class SseDecoder {
   }
 }
 
-export type Terminal = "continue" | "idle" | "error"
+export type Terminal = "continue" | "idle" | "context_exhausted" | "error"
 
 export type SafeErrorDiagnostic = {
   error_code: string
@@ -455,8 +455,33 @@ export class EventNormalizer {
       const error = isRecord(properties.error) ? properties.error : {}
       const code = providerErrorCode(error.name)
       const diagnostic = safeProviderErrorDiagnostic(code, error, this.sensitiveValues)
+      if (error.name === "ContextOverflowError") {
+        output.push({
+          event: "context_exhausted",
+          stop_reason: "context_exhausted",
+          boundary_source: "provider_context_window_exceeded",
+          final_text: this.finalText(),
+          context_provider_error_code: diagnostic.error_code,
+          context_provider_error_message: diagnostic.error_message,
+          ...(diagnostic.error_http_status === undefined
+            ? {}
+            : { context_provider_error_http_status: diagnostic.error_http_status }),
+          ...(diagnostic.error_retryable === undefined
+            ? {}
+            : { context_provider_error_retryable: diagnostic.error_retryable }),
+        })
+        return { events: output, terminal: "context_exhausted" }
+      }
       this.error = diagnostic
       output.push({ event: "error", ...diagnostic })
+      return { events: output, terminal: "error" }
+    }
+
+    if (eventType === "session.compacted") {
+      if (properties.sessionID !== this.sessionId) return { events: output, terminal: "continue" }
+      const message = "OpenCode compacted context despite compaction being disabled"
+      this.error = { error_code: "unexpected_compaction", error_message: message }
+      output.push({ event: "error", ...this.error })
       return { events: output, terminal: "error" }
     }
 
@@ -487,6 +512,13 @@ export class EventNormalizer {
     const part = isRecord(properties.part) ? properties.part : undefined
     if (!part || part.sessionID !== this.sessionId) return { events: output, terminal: "continue" }
     const partId = typeof part.id === "string" ? part.id : ""
+
+    if (part.type === "compaction") {
+      const message = "OpenCode emitted a compaction part despite compaction being disabled"
+      this.error = { error_code: "unexpected_compaction", error_message: message }
+      output.push({ event: "error", ...this.error })
+      return { events: output, terminal: "error" }
+    }
 
     if (part.type === "step-start") {
       output.push({ event: "provider_step_started", step_id: partId })
@@ -597,6 +629,7 @@ export class EventNormalizer {
 function providerErrorCode(value: unknown): string {
   if (
     value === "ProviderAuthError" ||
+    value === "ContextOverflowError" ||
     value === "UnknownError" ||
     value === "MessageOutputLengthError" ||
     value === "MessageAbortedError" ||

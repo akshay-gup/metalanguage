@@ -2397,6 +2397,10 @@ def run_codex_worker(
             "spawn_child_tool_call_count",
             "send_message_tool_call_count",
             "turn_completed",
+            "context_boundary_source",
+            "context_diagnostic_code",
+            "context_turn_abort_reason",
+            "automatic_compaction_limit_cap_fraction",
         ]
         if result.get(key) is not None
     }
@@ -2503,6 +2507,11 @@ def run_opencode_worker(
             "patched_files",
             "isolated_state_cleaned",
             "mcp_process_pids",
+            "context_boundary_source",
+            "context_provider_error_code",
+            "context_provider_error_message",
+            "context_provider_error_http_status",
+            "context_provider_error_retryable",
         ]
         if result.get(key) is not None
     }

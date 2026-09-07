@@ -84,6 +84,7 @@ MAX_CREDENTIAL_DEPTH = 16
 MAX_ERROR_MESSAGE_CHARACTERS = 512
 _DURABLE_ERROR_CODES = {
     "APIError",
+    "ContextOverflowError",
     "MessageAbortedError",
     "MessageOutputLengthError",
     "ProviderAuthError",
@@ -123,6 +124,7 @@ _DURABLE_ERROR_CODES = {
     "unsupported_bun_version",
     "unsupported_opencode_version",
     "unsupported_sandbox_network_mode",
+    "unexpected_compaction",
     "worker_cancelled",
     "worker_timeout",
 }
@@ -773,6 +775,33 @@ def _durable_event(event: dict[str, Any]) -> dict[str, Any]:
         if retryable is not None:
             durable["error_retryable"] = retryable
         return durable
+    if name == "context_exhausted":
+        code = normalize_error_code(event.get("context_provider_error_code"))
+        durable = {
+            "event": "context_exhausted",
+            "stop_reason": "context_exhausted",
+            "boundary_source": "provider_context_window_exceeded",
+            "final_text": (
+                event.get("final_text")
+                if isinstance(event.get("final_text"), str)
+                else ""
+            ),
+            "context_provider_error_code": code,
+            "context_provider_error_message": _sanitize_error_message(
+                event.get("context_provider_error_message"), code
+            ),
+        }
+        status = _normalize_error_http_status(
+            event.get("context_provider_error_http_status")
+        )
+        if status is not None:
+            durable["context_provider_error_http_status"] = status
+        retryable = _normalize_error_retryable(
+            event.get("context_provider_error_retryable")
+        )
+        if retryable is not None:
+            durable["context_provider_error_retryable"] = retryable
+        return durable
     if name in {"agent_message", "turn_complete"}:
         return _scrub_durable_value(event, preserve_text=True)
     return _scrub_durable_value(event)
@@ -1077,6 +1106,12 @@ def run_opencode_rollout(
         "spawn_child_tool_call_count": 0,
         "send_message_tool_call_count": 0,
         "turn_completed": False,
+        "context_exhausted": False,
+        "context_boundary_source": "",
+        "context_provider_error_code": "",
+        "context_provider_error_message": "",
+        "context_provider_error_http_status": None,
+        "context_provider_error_retryable": None,
         "provider_step_count": 0,
         "usage_input_tokens": 0,
         "usage_output_tokens": 0,
@@ -1203,6 +1238,17 @@ def run_opencode_rollout(
         "patched_files": sorted(state["patched_files"]),
         "isolated_state_cleaned": not runtime_root.exists(),
         "mcp_process_pids": list(state["mcp_process_pids"]),
+        "context_boundary_source": state["context_boundary_source"] or None,
+        "context_provider_error_code": state["context_provider_error_code"] or None,
+        "context_provider_error_message": (
+            state["context_provider_error_message"] or None
+        ),
+        "context_provider_error_http_status": state[
+            "context_provider_error_http_status"
+        ],
+        "context_provider_error_retryable": state[
+            "context_provider_error_retryable"
+        ],
     }
     if timed_out:
         return {
@@ -1243,7 +1289,9 @@ def run_opencode_rollout(
     return {
         "final_text": state["final_text"],
         "status": "completed",
-        "stop_reason": "final_message",
+        "stop_reason": (
+            "context_exhausted" if state["context_exhausted"] else "final_message"
+        ),
         "error_code": None,
         "error_message": None,
         "error_http_status": None,
@@ -1332,6 +1380,27 @@ def _handle_runner_line(
             state["final_text"] = text
         if name == "turn_complete":
             state["turn_completed"] = True
+    elif name == "context_exhausted":
+        text = str(event.get("final_text") or "")
+        if text:
+            state["final_text"] = text
+        state["context_exhausted"] = True
+        state["turn_completed"] = True
+        state["context_boundary_source"] = str(
+            event.get("boundary_source") or ""
+        )
+        state["context_provider_error_code"] = str(
+            event.get("context_provider_error_code") or ""
+        )
+        state["context_provider_error_message"] = str(
+            event.get("context_provider_error_message") or ""
+        )
+        state["context_provider_error_http_status"] = event.get(
+            "context_provider_error_http_status"
+        )
+        state["context_provider_error_retryable"] = event.get(
+            "context_provider_error_retryable"
+        )
     elif name == "error":
         state["error_code"] = str(event.get("error_code") or "")
         state["error_message"] = str(event.get("error_message") or "")
@@ -1389,6 +1458,13 @@ def _handle_runner_line(
             )
         elif name == "turn_complete":
             progress_callback("worker_turn_completed", response_status="completed")
+        elif name == "context_exhausted":
+            progress_callback(
+                "worker_turn_completed",
+                response_status="context_exhausted",
+                stop_reason="context_exhausted",
+                boundary_source=event.get("boundary_source"),
+            )
         elif name == "error":
             progress_callback(
                 "worker_error",

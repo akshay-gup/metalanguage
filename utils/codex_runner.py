@@ -309,6 +309,11 @@ def run_codex_rollout(
         "spawn_child_tool_call_count": 0,
         "send_message_tool_call_count": 0,
         "turn_completed": False,
+        "context_exhausted": False,
+        "context_boundary_source": "",
+        "context_diagnostic_code": "",
+        "context_turn_abort_reason": "",
+        "automatic_compaction_limit_cap_fraction": None,
     }
     request_path.write_text(json.dumps(request, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     os.chmod(request_path, 0o600)
@@ -407,6 +412,12 @@ def run_codex_rollout(
         "spawn_child_tool_call_count": state["spawn_child_tool_call_count"],
         "send_message_tool_call_count": state["send_message_tool_call_count"],
         "turn_completed": state["turn_completed"],
+        "context_boundary_source": state["context_boundary_source"] or None,
+        "context_diagnostic_code": state["context_diagnostic_code"] or None,
+        "context_turn_abort_reason": state["context_turn_abort_reason"] or None,
+        "automatic_compaction_limit_cap_fraction": state[
+            "automatic_compaction_limit_cap_fraction"
+        ],
     }
 
     if timed_out:
@@ -441,7 +452,9 @@ def run_codex_rollout(
     return {
         "final_text": final_text,
         "status": "completed",
-        "stop_reason": "final_message",
+        "stop_reason": (
+            "context_exhausted" if state["context_exhausted"] else "final_message"
+        ),
         "error_code": None,
         "error_message": None,
         "thread_id": thread_id,
@@ -494,6 +507,25 @@ def _handle_runner_line(
             state["final_text"] = text
         if name == "turn_complete":
             state["turn_completed"] = True
+    elif name == "context_exhausted":
+        text = str(event.get("final_text") or "")
+        if text:
+            state["final_text"] = text
+        state["context_exhausted"] = True
+        state["turn_completed"] = True
+        state["context_boundary_source"] = str(
+            event.get("boundary_source") or ""
+        )
+        state["context_diagnostic_code"] = str(
+            event.get("diagnostic_code") or ""
+        )
+        state["context_turn_abort_reason"] = str(
+            event.get("turn_abort_reason") or ""
+        )
+        fraction = event.get("automatic_compaction_limit_cap_fraction")
+        state["automatic_compaction_limit_cap_fraction"] = (
+            fraction if isinstance(fraction, (int, float)) else None
+        )
     elif name == "error":
         state["error_code"] = str(event.get("error_code") or "")
         state["error_message"] = str(event.get("error_message") or "")
@@ -533,6 +565,15 @@ def _handle_runner_line(
                 turn_id=event.get("turn_id"),
                 tool_call_count=None,
                 response_status="completed",
+            )
+        elif name == "context_exhausted":
+            progress_callback(
+                "worker_turn_completed",
+                turn_id=event.get("turn_id"),
+                tool_call_count=None,
+                response_status="context_exhausted",
+                stop_reason="context_exhausted",
+                boundary_source=event.get("boundary_source"),
             )
         elif name == "error":
             progress_callback(

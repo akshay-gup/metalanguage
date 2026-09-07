@@ -18,7 +18,11 @@ use std::time::UNIX_EPOCH;
 use anyhow::Context;
 use anyhow::anyhow;
 use anyhow::bail;
+use codex_config::HookHandlerConfig;
+use codex_config::HookStateToml;
+use codex_config::MatcherGroup;
 use codex_config::TomlValue;
+use codex_config::version_for_toml;
 use codex_core::config::ConfigBuilder;
 use codex_core::config::ConfigOverrides;
 use codex_core_api::AbsolutePathBuf;
@@ -62,13 +66,28 @@ use codex_protocol::permissions::FileSystemPath;
 use codex_protocol::permissions::FileSystemSandboxEntry;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::ExecOutputStream;
+use codex_protocol::protocol::HookCompletedEvent;
+use codex_protocol::protocol::HookEventName;
+use codex_protocol::protocol::HookExecutionMode;
+use codex_protocol::protocol::HookHandlerType;
+use codex_protocol::protocol::HookOutputEntryKind;
+use codex_protocol::protocol::HookRunStatus;
+use codex_protocol::protocol::HookSource;
 use codex_protocol::protocol::PatchApplyStatus;
 use serde::Deserialize;
+use serde::Serialize;
 use serde_json::Value;
 use serde_json::json;
 
 const PRIVATE_INBOX_CAPABILITY_IDENTITY: &str =
     "metalanguage-v3.7-codex-open-ended-private-inbox-v1";
+const MANAGED_CONTEXT_STOP_REASON: &str = "metalanguage_context_exhausted";
+const MANAGED_PRE_COMPACT_STATUS: &str = "Stopping at the Metalanguage context boundary";
+const MANAGED_PRE_COMPACT_COMMAND: &str = concat!(
+    "printf '%s\\n' '",
+    r#"{"continue":false,"stopReason":"metalanguage_context_exhausted"}"#,
+    "'"
+);
 const HUMAN_ROSTER: [&str; 8] = [
     "Daniel",
     "Noah",
@@ -253,12 +272,12 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
         })
         .transpose()?
         .unwrap_or_default();
+    let mut cli_overrides = mcp_cli_overrides;
+    cli_overrides.extend(managed_pre_compact_cli_overrides()?);
     let mut config_builder = ConfigBuilder::default()
         .codex_home(codex_home.clone())
         .harness_overrides(overrides);
-    if !mcp_cli_overrides.is_empty() {
-        config_builder = config_builder.cli_overrides(mcp_cli_overrides);
-    }
+    config_builder = config_builder.cli_overrides(cli_overrides);
     let mut config = config_builder.build().await.context("load Codex config")?;
     let mcp_servers = request
         .mcp_servers
@@ -450,6 +469,8 @@ async fn run_turn(
 
     let mut current_turn_id: Option<String> = None;
     let mut final_text = String::new();
+    let mut managed_pre_compact_stopped = false;
+    let mut provider_context_exhausted = false;
     loop {
         let event = thread.next_event().await.context("read Codex event")?;
         match &event.msg {
@@ -482,6 +503,20 @@ async fn run_turn(
                     "event": "warning",
                     "message": event.message,
                 }))?;
+            }
+            EventMsg::HookCompleted(event) => {
+                if is_managed_pre_compact_stop(event) {
+                    managed_pre_compact_stopped = true;
+                }
+            }
+            EventMsg::ContextCompacted(_) => {
+                let message = "Codex compacted context despite the managed PreCompact stop hook";
+                emit(json!({
+                    "event": "error",
+                    "error_code": "unexpected_compaction",
+                    "error_message": message,
+                }))?;
+                bail!(message);
             }
             EventMsg::ExecCommandBegin(event) => {
                 emit(json!({
@@ -571,12 +606,11 @@ async fn run_turn(
                         "text": text,
                     }))?;
                 } else if let Some(notification) = mapped_item_notification(
-                        &EventMsg::ItemCompleted(event.clone()),
-                        thread_id,
-                        current_turn_id.as_deref(),
-                        &sensitive_tools,
-                    )?
-                {
+                    &EventMsg::ItemCompleted(event.clone()),
+                    thread_id,
+                    current_turn_id.as_deref(),
+                    &sensitive_tools,
+                )? {
                     emit(json!({
                         "event": "codex_item",
                         "notification": notification,
@@ -584,7 +618,21 @@ async fn run_turn(
                 }
             }
             EventMsg::TurnComplete(event) => {
+                let text = event
+                    .last_agent_message
+                    .clone()
+                    .unwrap_or_else(|| final_text.clone());
                 if let Some(error) = &event.error {
+                    if is_context_window_exceeded(error.codex_error_info.as_ref()) {
+                        emit_context_exhausted(
+                            &text,
+                            "provider_context_window_exceeded",
+                            Some("context_window_exceeded"),
+                            Some(&event.turn_id),
+                            None,
+                        )?;
+                        return Ok(());
+                    }
                     let error_code = codex_error_code(error.codex_error_info.as_ref());
                     emit(json!({
                         "event": "error",
@@ -595,10 +643,16 @@ async fn run_turn(
                     }))?;
                     bail!("Codex turn failed ({error_code}): {}", error.message);
                 }
-                let text = event
-                    .last_agent_message
-                    .clone()
-                    .unwrap_or_else(|| final_text.clone());
+                if provider_context_exhausted {
+                    emit_context_exhausted(
+                        &text,
+                        "provider_context_window_exceeded",
+                        Some("context_window_exceeded"),
+                        Some(&event.turn_id),
+                        None,
+                    )?;
+                    return Ok(());
+                }
                 emit(json!({
                     "event": "turn_complete",
                     "turn_id": event.turn_id,
@@ -608,6 +662,10 @@ async fn run_turn(
                 return Ok(());
             }
             EventMsg::Error(event) => {
+                if is_context_window_exceeded(event.codex_error_info.as_ref()) {
+                    provider_context_exhausted = true;
+                    continue;
+                }
                 let error_code = codex_error_code(event.codex_error_info.as_ref());
                 emit(json!({
                     "event": "error",
@@ -618,6 +676,16 @@ async fn run_turn(
                 bail!("Codex error ({error_code}): {}", event.message);
             }
             EventMsg::TurnAborted(event) => {
+                if managed_pre_compact_stopped {
+                    emit_context_exhausted(
+                        &final_text,
+                        "managed_pre_compact_hook",
+                        None,
+                        event.turn_id.as_deref(),
+                        Some(&format!("{:?}", event.reason)),
+                    )?;
+                    return Ok(());
+                }
                 emit(json!({
                     "event": "error",
                     "error_code": "turn_aborted",
@@ -678,6 +746,98 @@ async fn run_turn(
             _ => {}
         }
     }
+}
+
+#[derive(Serialize)]
+struct HookTrustIdentity {
+    event_name: &'static str,
+    #[serde(flatten)]
+    group: MatcherGroup,
+}
+
+fn managed_pre_compact_cli_overrides() -> anyhow::Result<Vec<(String, TomlValue)>> {
+    let handler = HookHandlerConfig::Command {
+        command: MANAGED_PRE_COMPACT_COMMAND.to_string(),
+        command_windows: None,
+        timeout_sec: Some(5),
+        r#async: false,
+        status_message: Some(MANAGED_PRE_COMPACT_STATUS.to_string()),
+        additional_context_limit: None,
+    };
+    let group = MatcherGroup {
+        matcher: Some("auto".to_string()),
+        hooks: vec![handler],
+    };
+    let identity = HookTrustIdentity {
+        event_name: "pre_compact",
+        group: group.clone(),
+    };
+    let identity_toml = TomlValue::try_from(identity).context("serialize managed hook identity")?;
+    let trusted_hash = version_for_toml(&identity_toml);
+    #[cfg(windows)]
+    let session_flags_path =
+        AbsolutePathBuf::resolve_path_against_base("<session-flags>/config.toml", r"C:\");
+    #[cfg(not(windows))]
+    let session_flags_path =
+        AbsolutePathBuf::resolve_path_against_base("<session-flags>/config.toml", "/");
+    let state_key = format!("{}:pre_compact:0:0", session_flags_path.display());
+    let hook_groups = TomlValue::try_from(vec![group]).context("serialize managed hook")?;
+    let hook_state = TomlValue::try_from(HashMap::from([(
+        state_key,
+        HookStateToml {
+            enabled: Some(true),
+            trusted_hash: Some(trusted_hash),
+        },
+    )]))
+    .context("serialize managed hook trust")?;
+    Ok(vec![
+        ("hooks.PreCompact".to_string(), hook_groups),
+        ("hooks.state".to_string(), hook_state),
+    ])
+}
+
+fn is_managed_pre_compact_stop(event: &HookCompletedEvent) -> bool {
+    event.run.event_name == HookEventName::PreCompact
+        && event.run.handler_type == HookHandlerType::Command
+        && event.run.execution_mode == HookExecutionMode::Sync
+        && event.run.source == HookSource::SessionFlags
+        && event.run.status == HookRunStatus::Stopped
+        && event.run.status_message.as_deref() == Some(MANAGED_PRE_COMPACT_STATUS)
+        && event.run.entries.iter().any(|entry| {
+            entry.kind == HookOutputEntryKind::Stop && entry.text == MANAGED_CONTEXT_STOP_REASON
+        })
+}
+
+fn is_context_window_exceeded(
+    error_info: Option<&codex_protocol::protocol::CodexErrorInfo>,
+) -> bool {
+    matches!(
+        error_info,
+        Some(codex_protocol::protocol::CodexErrorInfo::ContextWindowExceeded)
+    )
+}
+
+fn emit_context_exhausted(
+    final_text: &str,
+    boundary_source: &str,
+    diagnostic_code: Option<&str>,
+    turn_id: Option<&str>,
+    turn_abort_reason: Option<&str>,
+) -> anyhow::Result<()> {
+    emit(json!({
+        "event": "context_exhausted",
+        "stop_reason": "context_exhausted",
+        "boundary_source": boundary_source,
+        "final_text": final_text,
+        "turn_id": turn_id,
+        "diagnostic_code": diagnostic_code,
+        "turn_abort_reason": turn_abort_reason,
+        "automatic_compaction_limit_cap_fraction": if boundary_source == "managed_pre_compact_hook" {
+            Some(0.9)
+        } else {
+            None
+        },
+    }))
 }
 
 fn codex_error_code(error_info: Option<&codex_protocol::protocol::CodexErrorInfo>) -> String {
@@ -1217,6 +1377,9 @@ mod tests {
     use codex_protocol::items::McpToolCallItem;
     use codex_protocol::items::McpToolCallStatus;
     use codex_protocol::mcp::CallToolResult;
+    use codex_protocol::protocol::HookOutputEntry;
+    use codex_protocol::protocol::HookRunSummary;
+    use codex_protocol::protocol::HookScope;
     use codex_protocol::protocol::ItemCompletedEvent;
     use codex_protocol::protocol::ItemStartedEvent;
     use codex_protocol::protocol::McpInvocation;
@@ -1310,6 +1473,62 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(names, vec!["spawn_child"]);
         assert!(!names.contains(&"submit_solution".to_string()));
+    }
+
+    #[test]
+    fn managed_context_stop_match_is_exact() {
+        let mut event = HookCompletedEvent {
+            turn_id: Some("turn".to_string()),
+            run: HookRunSummary {
+                id: "managed-context-stop".to_string(),
+                event_name: HookEventName::PreCompact,
+                handler_type: HookHandlerType::Command,
+                execution_mode: HookExecutionMode::Sync,
+                scope: HookScope::Turn,
+                source_path: AbsolutePathBuf::resolve_path_against_base(
+                    "<session-flags>/config.toml",
+                    "/",
+                ),
+                source: HookSource::SessionFlags,
+                display_order: 0,
+                status: HookRunStatus::Stopped,
+                status_message: Some(MANAGED_PRE_COMPACT_STATUS.to_string()),
+                started_at: 0,
+                completed_at: Some(1),
+                duration_ms: Some(1),
+                entries: vec![HookOutputEntry {
+                    kind: HookOutputEntryKind::Stop,
+                    text: MANAGED_CONTEXT_STOP_REASON.to_string(),
+                }],
+            },
+        };
+        assert!(is_managed_pre_compact_stop(&event));
+
+        event.run.source = HookSource::User;
+        assert!(!is_managed_pre_compact_stop(&event));
+        event.run.source = HookSource::SessionFlags;
+        event.run.entries[0].text = "unrelated turn abort".to_string();
+        assert!(!is_managed_pre_compact_stop(&event));
+    }
+
+    #[test]
+    fn managed_context_hook_is_auto_sync_and_locally_trusted() {
+        let overrides = managed_pre_compact_cli_overrides().expect("managed hook overrides");
+        assert_eq!(overrides.len(), 2);
+        assert_eq!(overrides[0].0, "hooks.PreCompact");
+        assert_eq!(overrides[1].0, "hooks.state");
+        let hooks = serde_json::to_value(&overrides[0].1).expect("serialize hook override");
+        assert_eq!(hooks[0]["matcher"], "auto");
+        assert_eq!(hooks[0]["hooks"][0]["async"], false);
+        assert_eq!(hooks[0]["hooks"][0]["command"], MANAGED_PRE_COMPACT_COMMAND);
+        let state = serde_json::to_value(&overrides[1].1).expect("serialize hook state");
+        let trusted = state
+            .as_object()
+            .and_then(|state| state.values().next())
+            .and_then(|value| value.get("trusted_hash"))
+            .and_then(Value::as_str)
+            .expect("trusted hook hash");
+        assert!(trusted.starts_with("sha256:"));
     }
 
     #[test]
