@@ -12,7 +12,7 @@ import {
   type McpServerInput,
   type RunnerRequest,
 } from "./protocol.ts"
-import { finalAssistantText, sandboxedServerCommand, startSpawnCallback } from "./worker.ts"
+import { finalAssistantText, opencodeConfig, sandboxedServerCommand, startSpawnCallback } from "./worker.ts"
 import { runHandler, sendMessageToolSource, SYSTEM_PLUGIN_SOURCE, TOOL_SOURCE } from "./spawn_bridge.ts"
 
 function mcpServer(): McpServerInput {
@@ -490,6 +490,99 @@ describe("OpenCode native protocol adapter", () => {
         properties: { sessionID: "ses_test", status: { type: "idle" } },
       }).terminal,
     ).toBe("idle")
+  })
+
+  test("disables history compaction for the managed runner", () => {
+    const config = opencodeConfig(
+      {
+        opencode_bin: "/usr/bin/true",
+        model: "fixture/model",
+        cwd: "/workspace",
+        state_root: "/state",
+      },
+      translateMcp({}, []),
+    )
+    expect(config.compaction).toEqual({ auto: false, prune: false })
+  })
+
+  test("treats only provider context overflow as a normal context boundary", () => {
+    const normalizer = new EventNormalizer("ses_test", new Set(), ["PRIVATE_CONTEXT_VALUE"])
+    normalizer.handle({
+      type: "message.updated",
+      properties: { info: { id: "assistant", sessionID: "ses_test", role: "assistant" } },
+    })
+    normalizer.handle({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "text",
+          messageID: "assistant",
+          sessionID: "ses_test",
+          type: "text",
+          text: "useful partial answer",
+        },
+      },
+    })
+    const exhausted = normalizer.handle({
+      type: "session.error",
+      properties: {
+        sessionID: "ses_test",
+        error: {
+          name: "ContextOverflowError",
+          data: {
+            message: "context limit reached PRIVATE_CONTEXT_VALUE",
+            statusCode: 413,
+            isRetryable: false,
+          },
+        },
+      },
+    })
+    expect(exhausted.terminal).toBe("context_exhausted")
+    expect(exhausted.events).toEqual([
+      {
+        event: "context_exhausted",
+        stop_reason: "context_exhausted",
+        boundary_source: "provider_context_window_exceeded",
+        final_text: "useful partial answer",
+        context_provider_error_code: "ContextOverflowError",
+        context_provider_error_message: "context limit reached [REDACTED]",
+        context_provider_error_http_status: 413,
+        context_provider_error_retryable: false,
+      },
+    ])
+    expect(normalizer.error).toBeUndefined()
+
+    const unrelated = new EventNormalizer("ses_test", new Set()).handle({
+      type: "session.error",
+      properties: {
+        sessionID: "ses_test",
+        error: { name: "APIError", data: { message: "provider unavailable" } },
+      },
+    })
+    expect(unrelated.terminal).toBe("error")
+    expect(unrelated.events[0]?.event).toBe("error")
+  })
+
+  test("fails closed on an unexpected compaction event", () => {
+    const compacted = new EventNormalizer("ses_test", new Set()).handle({
+      type: "session.compacted",
+      properties: { sessionID: "ses_test" },
+    })
+    expect(compacted).toEqual({
+      events: [{
+        event: "error",
+        error_code: "unexpected_compaction",
+        error_message: "OpenCode compacted context despite compaction being disabled",
+      }],
+      terminal: "error",
+    })
+
+    const part = new EventNormalizer("ses_test", new Set()).handle({
+      type: "message.part.updated",
+      properties: { part: { id: "compact", sessionID: "ses_test", type: "compaction" } },
+    })
+    expect(part.terminal).toBe("error")
+    expect(part.events[0]?.error_code).toBe("unexpected_compaction")
   })
 
   test("normalizes provider errors and redacts image payloads", () => {
