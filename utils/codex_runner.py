@@ -19,6 +19,13 @@ from utils.private_inbox import PRIVATE_INBOX_CAPABILITY_IDENTITY, PrivateInboxC
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUNNER_CRATE_DIR = PROJECT_ROOT / "crates" / "metalanguage-codex-runner"
 RUNNER_MANIFEST = RUNNER_CRATE_DIR / "Cargo.toml"
+DEFAULT_RUNNER_TARGET_DIR = RUNNER_CRATE_DIR / "target"
+CODEX_ROOT = PROJECT_ROOT / "third_party" / "codex"
+CODEX_RS_MANIFEST = CODEX_ROOT / "codex-rs" / "Cargo.toml"
+CODEX_PACKAGE_SCRIPTS = CODEX_ROOT / "scripts"
+CODE_MODE_HOST_FILENAME = (
+    "codex-code-mode-host.exe" if os.name == "nt" else "codex-code-mode-host"
+)
 ProgressCallback = Callable[[str, Any], None]
 
 
@@ -67,15 +74,130 @@ def _codex_private_state_read_denials(codex_home: Path) -> list[Path]:
 
 def runner_binary_path(*, release: bool = False) -> Path:
     profile = "release" if release else "debug"
-    return RUNNER_CRATE_DIR / "target" / profile / "metalanguage-codex-runner"
+    return _runner_target_dir() / profile / "metalanguage-codex-runner"
+
+
+def code_mode_host_binary_path(*, release: bool = False) -> Path:
+    profile = "release" if release else "debug"
+    return _runner_target_dir() / profile / CODE_MODE_HOST_FILENAME
+
+
+def _runner_target_dir() -> Path:
+    configured = os.environ.get("CARGO_TARGET_DIR")
+    if configured is None:
+        return DEFAULT_RUNNER_TARGET_DIR
+    path = Path(configured).expanduser()
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    return path.resolve()
+
+
+def _rustc_host_target() -> str:
+    try:
+        completed = subprocess.run(
+            ["rustc", "-vV"],
+            cwd=PROJECT_ROOT,
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError("Failed to determine the Rust host target") from exc
+
+    for line in completed.stdout.splitlines():
+        label, separator, value = line.partition(":")
+        if separator and label.strip() == "host" and value.strip():
+            return value.strip()
+    raise RuntimeError("rustc -vV did not report a host target")
+
+
+def _official_codex_v8_cargo_env() -> dict[str, str]:
+    target = _rustc_host_target()
+    helper = (
+        "import json, sys\n"
+        "from codex_package.targets import TARGET_SPECS\n"
+        "from codex_package.v8 import resolve_codex_v8_cargo_env\n"
+        "target = sys.argv[1]\n"
+        "if target not in TARGET_SPECS:\n"
+        "    raise SystemExit(f'Unsupported Codex package target: {target}')\n"
+        "print(json.dumps(resolve_codex_v8_cargo_env(TARGET_SPECS[target]), sort_keys=True))\n"
+    )
+    helper_env = os.environ.copy()
+    helper_env["CODEX_REPO_ROOT"] = str(CODEX_ROOT)
+    existing_pythonpath = helper_env.get("PYTHONPATH")
+    helper_env["PYTHONPATH"] = str(CODEX_PACKAGE_SCRIPTS)
+    if existing_pythonpath:
+        helper_env["PYTHONPATH"] += os.pathsep + existing_pythonpath
+
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-c", helper, target],
+            cwd=CODEX_ROOT,
+            env=helper_env,
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            check=True,
+        )
+        payload = json.loads(completed.stdout)
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            "Failed to resolve official checksum-verified Codex V8 artifacts"
+        ) from exc
+
+    expected_keys = {"RUSTY_V8_ARCHIVE", "RUSTY_V8_SRC_BINDING_PATH"}
+    if not isinstance(payload, dict) or set(payload) not in (set(), expected_keys):
+        raise RuntimeError("Codex V8 artifact resolver returned an invalid environment")
+    if any(not isinstance(value, str) or not value for value in payload.values()):
+        raise RuntimeError("Codex V8 artifact resolver returned an invalid path")
+    return payload
+
+
+def _require_adjacent_code_mode_host(runner_bin: Path) -> None:
+    host_bin = runner_bin.with_name(CODE_MODE_HOST_FILENAME)
+    if not host_bin.is_file() or not os.access(host_bin, os.X_OK):
+        raise RuntimeError(
+            "Codex runner requires an adjacent executable code-mode host: "
+            f"{host_bin}. Rebuild the matching bundle with --codex-build-runner."
+        )
 
 
 def ensure_codex_runner_built(*, release: bool = False) -> Path:
-    cmd = ["cargo", "build", "--manifest-path", str(RUNNER_MANIFEST)]
-    if release:
-        cmd.append("--release")
-    subprocess.run(cmd, cwd=PROJECT_ROOT, check=True)
-    return runner_binary_path(release=release)
+    profile_args = ["--release"] if release else []
+    target_dir = _runner_target_dir()
+    build_env = os.environ.copy()
+    build_env["CARGO_TARGET_DIR"] = str(target_dir)
+    runner_cmd = [
+        "cargo",
+        "build",
+        "--locked",
+        "--manifest-path",
+        str(RUNNER_MANIFEST),
+        *profile_args,
+    ]
+    subprocess.run(runner_cmd, cwd=PROJECT_ROOT, env=build_env, check=True)
+
+    host_env = {**build_env, **_official_codex_v8_cargo_env()}
+    host_cmd = [
+        "cargo",
+        "build",
+        "--locked",
+        "--manifest-path",
+        str(CODEX_RS_MANIFEST),
+        "--package",
+        "codex-code-mode-host",
+        "--bin",
+        "codex-code-mode-host",
+        *profile_args,
+    ]
+    subprocess.run(host_cmd, cwd=CODEX_ROOT, env=host_env, check=True)
+
+    runner_bin = runner_binary_path(release=release)
+    if not runner_bin.is_file() or not os.access(runner_bin, os.X_OK):
+        raise RuntimeError(f"Cargo did not produce an executable Codex runner: {runner_bin}")
+    _require_adjacent_code_mode_host(runner_bin)
+    return runner_bin
 
 
 def _codex_runner_source_inputs() -> list[Path]:
@@ -119,8 +241,7 @@ def _assert_managed_codex_runner_fresh(path: Path, *, release: bool = False) -> 
     raise RuntimeError(
         "Codex runner binary is older than its source inputs: "
         f"{path} is older than {newest_path}. Rebuild it with "
-        f"`cargo build --manifest-path {RUNNER_MANIFEST}` "
-        "or pass --codex-build-runner."
+        "--codex-build-runner so the matching code-mode host is rebuilt too."
     )
 
 
@@ -138,11 +259,10 @@ def resolve_codex_runner_bin(
     if not path.exists():
         raise FileNotFoundError(
             "Codex runner binary does not exist: "
-            f"{path}. Build it separately with "
-            f"`cargo build --manifest-path {RUNNER_MANIFEST}` "
-            "or pass --codex-build-runner."
+            f"{path}. Build the matching runner/host bundle with --codex-build-runner."
         )
     _assert_managed_codex_runner_fresh(path, release=release)
+    _require_adjacent_code_mode_host(path)
     return path
 
 
