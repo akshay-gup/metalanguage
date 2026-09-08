@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from main_loop import (
+    READ_README_TASK_INSTRUCTIONS,
     _validate_opencode_containment,
     _create_benchmark_driver,
     _format_runtime_markdown,
@@ -19,6 +20,8 @@ from main_loop import (
     _worker_backend_resume_compatible,
     WorkerResult,
     parse_args,
+    resolve_codex_base_instructions,
+    resolve_opencode_system_instructions,
 )
 from utils.open_ended_benchmark import (
     OpenEndedBenchmarkDriver,
@@ -29,6 +32,13 @@ from utils.opencode_runner import custom_provider_configuration, custom_provider
 
 
 class OpenEndedBenchmarkTests(unittest.TestCase):
+    def _assert_bootstrap_readme_copy(self, workdir: object) -> None:
+        copied = Path(str(workdir)) / "README.md"
+        bundled = Path(__file__).resolve().parents[1] / "seeds/bootstrap/README.md"
+        self.assertTrue(copied.is_file())
+        self.assertFalse(copied.is_symlink())
+        self.assertEqual(copied.read_bytes(), bundled.read_bytes())
+
     def test_cli_accepts_open_ended_task_file(self) -> None:
         with patch(
             "sys.argv",
@@ -60,7 +70,18 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
         ):
             args = parse_args()
         self.assertEqual(args.worker_backend, "opencode")
+        self.assertEqual(args.codex_initial_prompt, "Begin.")
+        self.assertEqual(args.opencode_initial_prompt, "Begin.")
+        self.assertEqual(args.codex_base_instructions_mode, "read-readme")
         self.assertEqual(args.opencode_base_instructions_mode, "read-readme")
+        self.assertEqual(
+            resolve_codex_base_instructions(args.codex_base_instructions_mode),
+            "Read README.md.",
+        )
+        self.assertEqual(
+            resolve_opencode_system_instructions(args.opencode_base_instructions_mode),
+            "Read README.md.",
+        )
         self.assertEqual(args.opencode_allowed_versions, "1.18.29")
         self.assertEqual(args.opencode_allowed_bun_versions, "1.3.14")
         self.assertEqual(args.opencode_sandbox_mode, "bubblewrap")
@@ -147,6 +168,9 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
             ):
                 _run_main([])
             self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0]["initial_user_text"], READ_README_TASK_INSTRUCTIONS)
+            self.assertEqual(calls[0]["system_instructions"], "Read README.md.")
+            self._assert_bootstrap_readme_copy(calls[0]["workdir"])
             configuration = calls[0]["custom_provider"]
             self.assertEqual(configuration["provider_id"], "fixture")
             self.assertEqual(configuration["model_id"], "model-one")
@@ -198,8 +222,11 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                     openrouter_calls.append(kwargs)
                     return WorkerResult("offline", "completed", "final_message")
 
-                with patch.dict("os.environ", {"OPENROUTER_API_KEY": "test-only-key"}), patch(
-                    "sys.argv", argv
+                with patch.dict(
+                    "os.environ", {"OPENROUTER_API_KEY": "test-only-key"}
+                ), patch("sys.argv", argv), patch(
+                    "main_loop.resolve_codex_runner_bin",
+                    return_value=Path("/bin/true"),
                 ), patch("main_loop.run_codex_worker", side_effect=codex_worker), patch(
                     "main_loop.run_worker", side_effect=openrouter_worker
                 ), patch(
@@ -209,6 +236,14 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                     _run_main([])
                 self.assertEqual(len(codex_calls), 1 if backend == "codex" else 0)
                 self.assertEqual(len(openrouter_calls), 1 if backend == "openrouter" else 0)
+                calls = codex_calls if backend == "codex" else openrouter_calls
+                self.assertEqual(calls[0]["initial_user_text"], READ_README_TASK_INSTRUCTIONS)
+                self._assert_bootstrap_readme_copy(calls[0]["workdir"])
+                if backend == "codex":
+                    self.assertEqual(calls[0]["base_instructions"], "Read README.md.")
+                else:
+                    self.assertNotIn("base_instructions", calls[0])
+                    self.assertNotIn("system_instructions", calls[0])
 
     def test_opencode_resume_requires_matching_backend_configuration(self) -> None:
         custom_provider = custom_provider_configuration(
@@ -481,6 +516,9 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                     "INHERITED CHILD PROMPT",
                 ],
             )
+            self.assertTrue(
+                all(call["system_instructions"] == "Read README.md." for call in calls)
+            )
             self.assertNotIn(
                 str(runtime / "logs/rollout_control"),
                 [str(path) for path in calls[0]["sandbox_writable_roots"]],
@@ -534,7 +572,10 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                 records[1]["opencode_effective_initial_prompt_sha256"],
                 records[2]["opencode_effective_initial_prompt_sha256"],
             )
-            self.assertTrue(records[0]["opencode_system_instructions_sha256"])
+            self.assertEqual(
+                records[0]["opencode_system_instructions_sha256"],
+                hashlib.sha256(b"Read README.md.").hexdigest(),
+            )
             self.assertTrue(records[0]["opencode_python_sha256"])
             self.assertTrue(records[0]["opencode_bubblewrap_sha256"])
 

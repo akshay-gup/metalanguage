@@ -48,16 +48,16 @@ def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProc
 
 
 class HistoricalV1Tests(unittest.TestCase):
-    def test_exact_preserved_prompt_static_readme_notice_and_task_bytes(self) -> None:
+    def test_exact_preserved_prompt_and_task_bytes(self) -> None:
         self.assertEqual(
             READ_README_TASK_INSTRUCTIONS,
-            "This rollout has no assigned task. README.md describes its environment.",
+            "Begin.",
         )
-        self.assertEqual(CODEX_READ_README_BASE_INSTRUCTIONS, READ_README_TASK_INSTRUCTIONS)
-        self.assertEqual(len(READ_README_TASK_INSTRUCTIONS.encode("utf-8")), 71)
+        self.assertEqual(CODEX_READ_README_BASE_INSTRUCTIONS, "Read README.md.")
+        self.assertEqual(len(READ_README_TASK_INSTRUCTIONS.encode("utf-8")), 6)
         self.assertEqual(
             hashlib.sha256(READ_README_TASK_INSTRUCTIONS.encode("utf-8")).hexdigest(),
-            "ae48d75abfdaedb43a7b650b7430c0eaefc9338fa92cc62f99d55493aa132063",
+            "1b1bf47bfc927515211fab6442c68571345eb571e06c330e35b77281fb638f43",
         )
         readme = (PROJECT_ROOT / "seeds/bootstrap/README.md").read_text()
         self.assertEqual(
@@ -145,7 +145,7 @@ class HistoricalV1Tests(unittest.TestCase):
                     "workspace_roots",
                 }
                 self.assertEqual(set(request), expected_keys)
-                self.assertEqual(request["base_instructions"], READ_README_TASK_INSTRUCTIONS)
+                self.assertEqual(request["base_instructions"], "Read README.md.")
                 self.assertEqual(request["initial_user_text"], READ_README_TASK_INSTRUCTIONS)
                 self.assertEqual(
                     request["workspace_roots"],
@@ -199,7 +199,7 @@ class HistoricalV1Tests(unittest.TestCase):
                 workdir = Path(str(kwargs["workdir"]))
                 archive = Path(str(kwargs["archive_repo_dir"]))
                 try:
-                    self.assertEqual(kwargs["base_instructions"], READ_README_TASK_INSTRUCTIONS)
+                    self.assertEqual(kwargs["base_instructions"], "Read README.md.")
                     expected_readme = (
                         (PROJECT_ROOT / "seeds/bootstrap/README.md").read_text()
                         if task_index == 0
