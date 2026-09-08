@@ -155,10 +155,9 @@ SHARED_ARCHIVES_WORKSPACE_PATH = "archives"
 SHARED_ARCHIVES_CLEANUP_POLICY = "direct-child-git-head-v1"
 ARCHIVE_CLEANUP_STATE_FILENAME = "archive_cleanup_state.json"
 STABLE_SEED_FILENAMES = ("README.md",)
-READ_README_TASK_INSTRUCTIONS = (
-    "This rollout has no assigned task. README.md describes its environment."
-)
-CODEX_READ_README_BASE_INSTRUCTIONS = READ_README_TASK_INSTRUCTIONS
+READ_README_TASK_INSTRUCTIONS = "Begin."
+PROVIDER_READ_README_INSTRUCTIONS = "Read README.md."
+CODEX_READ_README_BASE_INSTRUCTIONS = PROVIDER_READ_README_INSTRUCTIONS
 BENCHMARK_README_FILENAME = "BENCHMARK.md"
 ORDERED_ROLLOUT_MODE = "ordered-backend-model-v1"
 ORDERED_ROLLOUT_BACKENDS = frozenset({"codex", "opencode"})
@@ -2541,7 +2540,7 @@ def resolve_opencode_system_instructions(mode: str) -> str | None:
     if mode == "opencode":
         return None
     if mode == "read-readme":
-        return READ_README_TASK_INSTRUCTIONS
+        return PROVIDER_READ_README_INSTRUCTIONS
     raise ValueError(f"Unknown OpenCode system instructions mode: {mode}")
 
 
