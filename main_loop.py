@@ -40,6 +40,11 @@ from utils.benchmark_driver import (
     active_benchmark_item,
 )
 from utils.codex_runner import resolve_codex_runner_bin, run_codex_rollout
+from utils.directory_agents import (
+    DirectoryAgentsWatcher,
+    ensure_directory_agents_file,
+    ensure_directory_tree_agents_files,
+)
 from utils.opencode_runner import (
     SOURCE_AUDITED_BUN_VERSIONS,
     SOURCE_AUDITED_OPENCODE_VERSIONS,
@@ -625,6 +630,7 @@ def _record_spawned_child(
     lock_path = slots_path.with_suffix(slots_path.suffix + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     slots_dir.mkdir(parents=True, exist_ok=True)
+    ensure_directory_agents_file(slots_dir)
 
     initial_state = _read_json_file(slots_path, {})
     initial_slots = initial_state.get("slots") if isinstance(initial_state, dict) else None
@@ -641,12 +647,14 @@ def _record_spawned_child(
     child_workspace_dir = slot_dir / "workspace"
     try:
         slot_dir.mkdir(parents=True, exist_ok=False)
+        ensure_directory_agents_file(slot_dir)
         child_workspace_dir.mkdir(parents=True, exist_ok=False)
         copy_seed_workspace(
             source_workspace_dir,
             child_workspace_dir,
             exclude_names=("messages",) if "private_inbox" in context else (),
         )
+        ensure_directory_tree_agents_files(child_workspace_dir)
         copied_readme = child_workspace_dir / "README.md"
         if copied_readme.is_symlink() or not copied_readme.is_file():
             raise RuntimeError("copied child workspace is missing a regular README.md")
@@ -4499,7 +4507,11 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 rollout_initial_prompt_chars=len(rollout_initial_prompt),
             )
 
+            directory_agents = DirectoryAgentsWatcher(
+                (temp_dir, shared_archives_root, shared_workspace_dir)
+            )
             try:
+                directory_agents.start()
                 try:
                     if worker_backend == "codex":
                         if codex_runner_bin is None:
@@ -4628,6 +4640,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                         error_code=None,
                         error_message=str(exc),
                     )
+                directory_agents.stop()
             except BaseException as exc:
                 worker_result = WorkerResult(
                     final_text="",
