@@ -114,6 +114,7 @@ struct RunnerRequest {
     additional_writable_roots: Option<Vec<PathBuf>>,
     shared_archives_root: PathBuf,
     spawn_child_handler_command: Option<Vec<String>>,
+    directory_agents_hook_command: Option<String>,
     mcp_servers: Option<HashMap<String, Value>>,
     sensitive_mcp_tools: Option<Vec<McpToolSelector>>,
     persist_session: Option<bool>,
@@ -274,7 +275,9 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
         .transpose()?
         .unwrap_or_default();
     let mut cli_overrides = mcp_cli_overrides;
-    cli_overrides.extend(managed_pre_compact_cli_overrides()?);
+    cli_overrides.extend(managed_hook_cli_overrides(
+        request.directory_agents_hook_command.as_deref(),
+    )?);
     let mut config_builder = ConfigBuilder::default()
         .codex_home(codex_home.clone())
         .harness_overrides(overrides);
@@ -757,7 +760,9 @@ struct HookTrustIdentity {
     group: MatcherGroup,
 }
 
-fn managed_pre_compact_cli_overrides() -> anyhow::Result<Vec<(String, TomlValue)>> {
+fn managed_hook_cli_overrides(
+    directory_agents_hook_command: Option<&str>,
+) -> anyhow::Result<Vec<(String, TomlValue)>> {
     let handler = HookHandlerConfig::Command {
         command: MANAGED_PRE_COMPACT_COMMAND.to_string(),
         command_windows: None,
@@ -784,18 +789,52 @@ fn managed_pre_compact_cli_overrides() -> anyhow::Result<Vec<(String, TomlValue)
         AbsolutePathBuf::resolve_path_against_base("<session-flags>/config.toml", "/");
     let state_key = format!("{}:pre_compact:0:0", session_flags_path.display());
     let hook_groups = TomlValue::try_from(vec![group]).context("serialize managed hook")?;
-    let hook_state = TomlValue::try_from(HashMap::from([(
+    let mut states = HashMap::from([(
         state_key,
         HookStateToml {
             enabled: Some(true),
             trusted_hash: Some(trusted_hash),
         },
-    )]))
-    .context("serialize managed hook trust")?;
-    Ok(vec![
-        ("hooks.PreCompact".to_string(), hook_groups),
-        ("hooks.state".to_string(), hook_state),
-    ])
+    )]);
+    let mut overrides = vec![("hooks.PreCompact".to_string(), hook_groups)];
+
+    if let Some(command) = directory_agents_hook_command.filter(|value| !value.trim().is_empty()) {
+        let post_group = MatcherGroup {
+            matcher: Some("*".to_string()),
+            hooks: vec![HookHandlerConfig::Command {
+                command: command.to_string(),
+                command_windows: None,
+                timeout_sec: Some(5),
+                r#async: false,
+                status_message: None,
+                additional_context_limit: Some(10_000),
+            }],
+        };
+        let post_identity = HookTrustIdentity {
+            event_name: "post_tool_use",
+            group: post_group.clone(),
+        };
+        let post_identity_toml =
+            TomlValue::try_from(post_identity).context("serialize AGENTS hook identity")?;
+        let post_state_key = format!("{}:post_tool_use:0:0", session_flags_path.display());
+        states.insert(
+            post_state_key,
+            HookStateToml {
+                enabled: Some(true),
+                trusted_hash: Some(version_for_toml(&post_identity_toml)),
+            },
+        );
+        overrides.push((
+            "hooks.PostToolUse".to_string(),
+            TomlValue::try_from(vec![post_group]).context("serialize AGENTS hook")?,
+        ));
+    }
+
+    overrides.push((
+        "hooks.state".to_string(),
+        TomlValue::try_from(states).context("serialize managed hook trust")?,
+    ));
+    Ok(overrides)
 }
 
 fn is_managed_pre_compact_stop(event: &HookCompletedEvent) -> bool {
@@ -1515,7 +1554,7 @@ mod tests {
 
     #[test]
     fn managed_context_hook_is_auto_sync_and_locally_trusted() {
-        let overrides = managed_pre_compact_cli_overrides().expect("managed hook overrides");
+        let overrides = managed_hook_cli_overrides(None).expect("managed hook overrides");
         assert_eq!(overrides.len(), 2);
         assert_eq!(overrides[0].0, "hooks.PreCompact");
         assert_eq!(overrides[1].0, "hooks.state");

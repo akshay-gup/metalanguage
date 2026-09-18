@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import select
+import shlex
 import signal
 import subprocess
 import sys
@@ -376,6 +377,13 @@ def run_codex_rollout(
             "--child-tool-handler",
             str(spawn_child_handler_context_path),
         ]
+        request["directory_agents_hook_command"] = shlex.join(
+            [
+                sys.executable,
+                str(PROJECT_ROOT / "utils" / "directory_agents_hook.py"),
+                str(spawn_child_handler_context_path),
+            ]
+        )
     if private_inbox is not None:
         if spawn_child_handler_context_path is None:
             raise ValueError("private inbox requires the central dynamic-tool callback")
