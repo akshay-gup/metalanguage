@@ -33,8 +33,8 @@ from utils.opencode_runner import custom_provider_configuration, custom_provider
 
 class OpenEndedBenchmarkTests(unittest.TestCase):
     def _assert_bootstrap_readme_copy(self, workdir: object) -> None:
-        copied = Path(str(workdir)) / "README.md"
-        bundled = Path(__file__).resolve().parents[1] / "seeds/bootstrap/README.md"
+        copied = Path(str(workdir)) / "AGENTS.md"
+        bundled = Path(__file__).resolve().parents[1] / "seeds/bootstrap/AGENTS.md"
         self.assertTrue(copied.is_file())
         self.assertFalse(copied.is_symlink())
         self.assertEqual(copied.read_bytes(), bundled.read_bytes())
@@ -72,15 +72,14 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
         self.assertEqual(args.worker_backend, "opencode")
         self.assertEqual(args.codex_initial_prompt, "Begin.")
         self.assertEqual(args.opencode_initial_prompt, "Begin.")
-        self.assertEqual(args.codex_base_instructions_mode, "read-readme")
+        self.assertEqual(args.codex_base_instructions_mode, "minimal")
         self.assertEqual(args.opencode_base_instructions_mode, "read-readme")
-        self.assertEqual(
-            resolve_codex_base_instructions(args.codex_base_instructions_mode),
-            "Read README.md.",
+        self.assertIsNone(
+            resolve_codex_base_instructions(args.codex_base_instructions_mode)
         )
         self.assertEqual(
             resolve_opencode_system_instructions(args.opencode_base_instructions_mode),
-            "Read README.md.",
+            "Read AGENTS.md.",
         )
         self.assertEqual(args.opencode_allowed_versions, "1.18.29")
         self.assertEqual(args.opencode_allowed_bun_versions, "1.3.14")
@@ -169,7 +168,7 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                 _run_main([])
             self.assertEqual(len(calls), 1)
             self.assertEqual(calls[0]["initial_user_text"], READ_README_TASK_INSTRUCTIONS)
-            self.assertEqual(calls[0]["system_instructions"], "Read README.md.")
+            self.assertEqual(calls[0]["system_instructions"], "Read AGENTS.md.")
             self._assert_bootstrap_readme_copy(calls[0]["workdir"])
             configuration = calls[0]["custom_provider"]
             self.assertEqual(configuration["provider_id"], "fixture")
@@ -240,7 +239,7 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                 self.assertEqual(calls[0]["initial_user_text"], READ_README_TASK_INSTRUCTIONS)
                 self._assert_bootstrap_readme_copy(calls[0]["workdir"])
                 if backend == "codex":
-                    self.assertEqual(calls[0]["base_instructions"], "Read README.md.")
+                    self.assertIsNone(calls[0]["base_instructions"])
                 else:
                     self.assertNotIn("base_instructions", calls[0])
                     self.assertNotIn("system_instructions", calls[0])
@@ -488,7 +487,7 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                     workdir = Path(str(kwargs["workdir"]))
                     seed = workdir / "child-seed"
                     seed.mkdir()
-                    (seed / "README.md").write_text("# Inherited child\n")
+                    (seed / "AGENTS.md").write_text("# Inherited child\n")
                     context = json.loads(
                         Path(str(kwargs["continuation_context_path"])).read_text()
                     )
@@ -517,7 +516,7 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                 ],
             )
             self.assertTrue(
-                all(call["system_instructions"] == "Read README.md." for call in calls)
+                all(call["system_instructions"] == "Read AGENTS.md." for call in calls)
             )
             self.assertNotIn(
                 str(runtime / "logs/rollout_control"),
@@ -574,7 +573,7 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
             )
             self.assertEqual(
                 records[0]["opencode_system_instructions_sha256"],
-                hashlib.sha256(b"Read README.md.").hexdigest(),
+                hashlib.sha256(b"Read AGENTS.md.").hexdigest(),
             )
             self.assertTrue(records[0]["opencode_python_sha256"])
             self.assertTrue(records[0]["opencode_bubblewrap_sha256"])
@@ -698,7 +697,7 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
             self.assertNotIn("problem_pool", runtime_text)
             self.assertNotIn("Benchmark Pool Semantics", runtime_text)
             bootstrap = (
-                Path(__file__).resolve().parents[1] / "seeds/bootstrap/README.md"
+                Path(__file__).resolve().parents[1] / "seeds/bootstrap/AGENTS.md"
             ).read_text(encoding="utf-8")
             bootstrap_words = " ".join(bootstrap.split())
             self.assertIn("current human-authored task", bootstrap)

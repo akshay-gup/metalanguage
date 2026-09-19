@@ -237,7 +237,7 @@ spawn_child_tool: dict[str, Any] = {
     "description": (
         "Spawn this rollout's one possible next-iteration child. The child receives "
         "the supplied initial prompt and a copied workspace-local directory whose "
-        "root contains a regular, non-symlinked, readable, non-blank UTF-8 README.md. "
+        "root contains a regular, non-symlinked, readable, non-blank UTF-8 AGENTS.md. "
         "Invalid or failed attempts can be corrected and retried. After one successful "
         "spawn, later calls from this rollout fail. Every call returns feedback and the "
         "parent rollout continues normally."
@@ -252,7 +252,7 @@ spawn_child_tool: dict[str, Any] = {
             },
             "workspace_dir": {
                 "type": "string",
-                "description": "Required workspace-local directory copied for the child. Its root must contain a regular, non-symlinked, readable, non-blank UTF-8 README.md. Additional files are optional. The source is consumed after the parent rollout finishes only when spawning succeeds.",
+                "description": "Required workspace-local directory copied for the child. Its root must contain a regular, non-symlinked, readable, non-blank UTF-8 AGENTS.md. Additional files are optional. The source is consumed after the parent rollout finishes only when spawning succeeds.",
             },
         },
         "required": ["prompt", "workspace_dir"],

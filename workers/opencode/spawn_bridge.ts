@@ -4,7 +4,7 @@ export const TOOL_SOURCE = `export default {
   description: "Spawn at most one child rollout from a prepared workspace. Validation failures are retryable and the parent rollout continues after the tool result.",
   args: {
     prompt: { type: "string", minLength: 1, description: "Task prompt for the child rollout." },
-    workspace_dir: { type: "string", minLength: 1, description: "Prepared workspace directory containing a non-empty README.md." },
+    workspace_dir: { type: "string", minLength: 1, description: "Prepared workspace directory containing a non-empty AGENTS.md." },
   },
   async execute(args, context) {
     const endpoint = process.env.METALANGUAGE_SPAWN_CHILD_ENDPOINT

@@ -14,7 +14,6 @@ from unittest.mock import patch
 import main_loop
 from main_loop import (
     ArchiveConflictResolver,
-    CODEX_READ_README_BASE_INSTRUCTIONS,
     READ_README_TASK_INSTRUCTIONS,
     WorkerResult,
     _run_main,
@@ -53,13 +52,12 @@ class HistoricalV1Tests(unittest.TestCase):
             READ_README_TASK_INSTRUCTIONS,
             "Begin.",
         )
-        self.assertEqual(CODEX_READ_README_BASE_INSTRUCTIONS, "Read README.md.")
         self.assertEqual(len(READ_README_TASK_INSTRUCTIONS.encode("utf-8")), 6)
         self.assertEqual(
             hashlib.sha256(READ_README_TASK_INSTRUCTIONS.encode("utf-8")).hexdigest(),
             "1b1bf47bfc927515211fab6442c68571345eb571e06c330e35b77281fb638f43",
         )
-        readme = (PROJECT_ROOT / "seeds/bootstrap/README.md").read_text()
+        readme = (PROJECT_ROOT / "seeds/bootstrap/AGENTS.md").read_text()
         self.assertEqual(
             readme.count(
                 "If `runtime.md` lists human names, `messages/` is this program's private,\n"
@@ -128,13 +126,12 @@ class HistoricalV1Tests(unittest.TestCase):
                         timeout_seconds=60,
                         sandbox_mode="workspace-write",
                         initial_user_text=READ_README_TASK_INSTRUCTIONS,
-                        base_instructions=CODEX_READ_README_BASE_INSTRUCTIONS,
+                        base_instructions=None,
                         spawn_child_handler_context_path=continuation,
                     )
                 request = json.loads((control / "codex_runner.request.json").read_text())
                 expected_keys = {
                     "additional_writable_roots",
-                    "base_instructions",
                     "codex_home",
                     "cwd",
                     "initial_user_text",
@@ -145,7 +142,6 @@ class HistoricalV1Tests(unittest.TestCase):
                     "workspace_roots",
                 }
                 self.assertEqual(set(request), expected_keys)
-                self.assertEqual(request["base_instructions"], "Read README.md.")
                 self.assertEqual(request["initial_user_text"], READ_README_TASK_INSTRUCTIONS)
                 self.assertEqual(
                     request["workspace_roots"],
@@ -199,14 +195,14 @@ class HistoricalV1Tests(unittest.TestCase):
                 workdir = Path(str(kwargs["workdir"]))
                 archive = Path(str(kwargs["archive_repo_dir"]))
                 try:
-                    self.assertEqual(kwargs["base_instructions"], "Read README.md.")
+                    self.assertIsNone(kwargs["base_instructions"])
                     expected_readme = (
-                        (PROJECT_ROOT / "seeds/bootstrap/README.md").read_text()
+                        (PROJECT_ROOT / "seeds/bootstrap/AGENTS.md").read_text()
                         if task_index == 0
                         else f"# Child {rollout_index}\n"
                     )
                     self.assertEqual(
-                        (workdir / "README.md").read_text(),
+                        (workdir / "AGENTS.md").read_text(),
                         expected_readme,
                     )
                     private_inbox = kwargs["private_inbox"]
@@ -244,7 +240,7 @@ class HistoricalV1Tests(unittest.TestCase):
                     if task_index == 0:
                         child = workdir / "child"
                         child.mkdir()
-                        (child / "README.md").write_text(
+                        (child / "AGENTS.md").write_text(
                             f"# Child {rollout_index}\n", encoding="utf-8"
                         )
                         (child / "lineage.txt").write_text(

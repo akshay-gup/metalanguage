@@ -935,7 +935,7 @@ async function runSession(
   const body: SessionPromptBody = {
     messageID: messageId(),
     model: { providerID: providerId, modelID: modelId },
-    parts: [{ type: "text", text: request.initial_user_text ?? "Read README.md." }],
+    parts: [{ type: "text", text: request.initial_user_text ?? "Read AGENTS.md." }],
     ...(request.system_instructions?.trim() ? { system: request.system_instructions } : {}),
     ...(request.agent ? { agent: request.agent } : {}),
     ...(request.variant ? { variant: request.variant } : {}),

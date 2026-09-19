@@ -159,10 +159,9 @@ SHARED_ARCHIVES_ROOT_NAME = "archives"
 SHARED_ARCHIVES_WORKSPACE_PATH = "archives"
 SHARED_ARCHIVES_CLEANUP_POLICY = "direct-child-git-head-v1"
 ARCHIVE_CLEANUP_STATE_FILENAME = "archive_cleanup_state.json"
-STABLE_SEED_FILENAMES = ("README.md",)
+STABLE_SEED_FILENAMES = ("AGENTS.md",)
 READ_README_TASK_INSTRUCTIONS = "Begin."
-PROVIDER_READ_README_INSTRUCTIONS = "Read README.md."
-CODEX_READ_README_BASE_INSTRUCTIONS = PROVIDER_READ_README_INSTRUCTIONS
+PROVIDER_READ_README_INSTRUCTIONS = "Read AGENTS.md."
 BENCHMARK_README_FILENAME = "BENCHMARK.md"
 ORDERED_ROLLOUT_MODE = "ordered-backend-model-v1"
 ORDERED_ROLLOUT_BACKENDS = frozenset({"codex", "opencode"})
@@ -419,7 +418,7 @@ def _parse_spawn_child_arguments(args: dict[str, Any]) -> tuple[str | None, str 
 
 def _resolve_spawn_workspace_dir(context: dict[str, Any], workspace_dir: str | None) -> tuple[Path | None, str | None]:
     if workspace_dir is None:
-        return None, "spawn_child requires a workspace_dir containing README.md"
+        return None, "spawn_child requires a workspace_dir containing AGENTS.md"
     workdir = Path(str(context["workdir"])).resolve()
     raw_path = Path(workspace_dir).expanduser()
     candidate = raw_path.resolve() if raw_path.is_absolute() else (workdir / raw_path).resolve()
@@ -427,15 +426,15 @@ def _resolve_spawn_workspace_dir(context: dict[str, Any], workspace_dir: str | N
         return None, "workspace_dir must be a workspace-local directory, not the rollout workspace root"
     if not candidate.is_dir():
         return None, f"workspace_dir is not a directory: {workspace_dir}"
-    readme = candidate / "README.md"
-    if readme.is_symlink() or not readme.is_file():
-        return None, "workspace_dir must contain a regular README.md at its root"
+    agents_file = candidate / "AGENTS.md"
+    if agents_file.is_symlink() or not agents_file.is_file():
+        return None, "workspace_dir must contain a regular AGENTS.md at its root"
     try:
-        readme_text = readme.read_text(encoding="utf-8")
+        agents_text = agents_file.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
-        return None, "workspace_dir/README.md must be readable UTF-8 text"
-    if not readme_text.strip():
-        return None, "workspace_dir/README.md must contain non-blank text"
+        return None, "workspace_dir/AGENTS.md must be readable UTF-8 text"
+    if not agents_text.strip():
+        return None, "workspace_dir/AGENTS.md must contain non-blank text"
     return candidate, None
 
 
@@ -655,15 +654,15 @@ def _record_spawned_child(
             exclude_names=("messages",) if "private_inbox" in context else (),
         )
         ensure_directory_tree_agents_files(child_workspace_dir)
-        copied_readme = child_workspace_dir / "README.md"
-        if copied_readme.is_symlink() or not copied_readme.is_file():
-            raise RuntimeError("copied child workspace is missing a regular README.md")
+        copied_agents = child_workspace_dir / "AGENTS.md"
+        if copied_agents.is_symlink() or not copied_agents.is_file():
+            raise RuntimeError("copied child workspace is missing a regular AGENTS.md")
         try:
-            copied_readme_text = copied_readme.read_text(encoding="utf-8")
+            copied_agents_text = copied_agents.read_text(encoding="utf-8")
         except (OSError, UnicodeError) as exc:
-            raise RuntimeError("copied child README.md is not readable UTF-8 text") from exc
-        if not copied_readme_text.strip():
-            raise RuntimeError("copied child README.md contains no non-blank text")
+            raise RuntimeError("copied child AGENTS.md is not readable UTF-8 text") from exc
+        if not copied_agents_text.strip():
+            raise RuntimeError("copied child AGENTS.md contains no non-blank text")
     except BaseException:
         shutil.rmtree(slot_dir, ignore_errors=True)
         raise
@@ -1556,7 +1555,7 @@ def _worker_backend_resume_compatible(
     if record.get("worker_backend", "openrouter") != args.worker_backend:
         return False
     if args.worker_backend == "codex":
-        return record.get("codex_base_instructions_mode", "codex") == (
+        return record.get("codex_base_instructions_mode", "minimal") == (
             args.codex_base_instructions_mode
         )
     if args.worker_backend == "opencode":
@@ -2535,11 +2534,9 @@ def run_opencode_worker(
 
 
 def resolve_codex_base_instructions(mode: str) -> str | None:
-    """Return fixed Codex base instructions, or None for Codex defaults."""
-    if mode == "codex":
+    """Let the managed runner install its one-character base placeholder."""
+    if mode == "minimal":
         return None
-    if mode == "read-readme":
-        return CODEX_READ_README_BASE_INSTRUCTIONS
     raise ValueError(f"Unknown Codex base instructions mode: {mode}")
 
 
@@ -3259,12 +3256,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--codex-base-instructions-mode",
-        choices=["codex", "read-readme"],
-        default="read-readme",
-        help=(
-            "Codex base-instructions mode. 'codex' uses the model catalog default; "
-            "'read-readme' uses the fixed scaffold task instruction."
-        ),
+        choices=["minimal"],
+        default="minimal",
+        help="Codex base-instructions mode. Metalanguage rollouts use the base text '.'.",
     )
     parser.add_argument(
         "--opencode-bin",

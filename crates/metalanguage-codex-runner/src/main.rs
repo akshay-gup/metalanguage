@@ -235,13 +235,17 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
         private_inbox.as_ref(),
         &private_read_denials,
     )?;
-    let base_instructions = request
+    if request
         .base_instructions
-        .filter(|value| !value.trim().is_empty());
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        bail!("Metalanguage Codex rollouts do not accept base instructions");
+    }
 
     let mut overrides = ConfigOverrides {
         model: request.model.filter(|value| !value.trim().is_empty()),
-        base_instructions,
+        base_instructions: Some(".".to_string()),
         cwd: Some(cwd.clone()),
         approval_policy: Some(AskForApproval::Never),
         sandbox_mode: sandbox_mode_override,
@@ -283,6 +287,8 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
         .harness_overrides(overrides);
     config_builder = config_builder.cli_overrides(cli_overrides);
     let mut config = config_builder.build().await.context("load Codex config")?;
+    config.base_instructions = Some(".".to_string());
+    config.project_doc_max_bytes = 0;
     let mcp_servers = request
         .mcp_servers
         .clone()
@@ -394,7 +400,7 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
     let spawn_child_handler_command = request.spawn_child_handler_command.clone();
     let prompt = request
         .initial_user_text
-        .unwrap_or_else(|| "Read README.md.".to_string());
+        .unwrap_or_else(|| "Begin.".to_string());
     let turn_result = run_turn(
         &thread,
         &thread_id.to_string(),
@@ -807,9 +813,29 @@ fn managed_hook_cli_overrides(
                 timeout_sec: Some(5),
                 r#async: false,
                 status_message: None,
-                additional_context_limit: Some(10_000),
+                additional_context_limit: Some(0),
             }],
         };
+        let prompt_group = post_group.clone();
+        let prompt_identity = HookTrustIdentity {
+            event_name: "user_prompt_submit",
+            group: prompt_group.clone(),
+        };
+        let prompt_identity_toml =
+            TomlValue::try_from(prompt_identity).context("serialize root AGENTS hook identity")?;
+        let prompt_state_key = format!("{}:user_prompt_submit:0:0", session_flags_path.display());
+        states.insert(
+            prompt_state_key,
+            HookStateToml {
+                enabled: Some(true),
+                trusted_hash: Some(version_for_toml(&prompt_identity_toml)),
+            },
+        );
+        overrides.push((
+            "hooks.UserPromptSubmit".to_string(),
+            TomlValue::try_from(vec![prompt_group]).context("serialize root AGENTS hook")?,
+        ));
+
         let post_identity = HookTrustIdentity {
             event_name: "post_tool_use",
             group: post_group.clone(),
@@ -914,7 +940,7 @@ fn metalanguage_dynamic_tools(
         description: concat!(
             "Spawn this rollout's one possible next-iteration child. The child receives ",
             "the supplied initial prompt and a copied workspace-local directory whose ",
-            "root contains a regular, non-symlinked, readable, non-blank UTF-8 README.md. ",
+            "root contains a regular, non-symlinked, readable, non-blank UTF-8 AGENTS.md. ",
             "Invalid or failed attempts can be corrected and retried. After one successful ",
             "spawn, later calls from this rollout fail. Every call returns feedback and the ",
             "parent rollout continues normally."
@@ -929,7 +955,7 @@ fn metalanguage_dynamic_tools(
                 },
                 "workspace_dir": {
                     "type": "string",
-                    "description": "Required workspace-local directory copied for the child. Its root must contain a regular, non-symlinked, readable, non-blank UTF-8 README.md. Additional files are optional. The source is consumed after the parent rollout finishes only when spawning succeeds."
+                    "description": "Required workspace-local directory copied for the child. Its root must contain a regular, non-symlinked, readable, non-blank UTF-8 AGENTS.md. Additional files are optional. The source is consumed after the parent rollout finishes only when spawning succeeds."
                 }
             },
             "required": ["prompt", "workspace_dir"],

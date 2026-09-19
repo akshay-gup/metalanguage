@@ -63,7 +63,7 @@ class BenchmarkDriverTests(unittest.TestCase):
             rows=ROWS,
         )
 
-    def test_spawn_child_requires_non_blank_root_readme(self) -> None:
+    def test_spawn_child_requires_non_blank_root_agents(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             context = {"workdir": str(root)}
@@ -74,38 +74,38 @@ class BenchmarkDriverTests(unittest.TestCase):
 
             workspace = root / "workspace"
             workspace.mkdir()
-            resolved, missing_readme_error = _resolve_spawn_workspace_dir(
+            resolved, missing_agents_error = _resolve_spawn_workspace_dir(
                 context, "workspace"
             )
             self.assertIsNone(resolved)
-            self.assertIn("README.md", missing_readme_error or "")
+            self.assertIn("AGENTS.md", missing_agents_error or "")
 
-            (workspace / "README.md").write_text("   \n")
-            resolved, blank_readme_error = _resolve_spawn_workspace_dir(
+            (workspace / "AGENTS.md").write_text("   \n")
+            resolved, blank_agents_error = _resolve_spawn_workspace_dir(
                 context, "workspace"
             )
             self.assertIsNone(resolved)
-            self.assertIn("non-blank", blank_readme_error or "")
+            self.assertIn("non-blank", blank_agents_error or "")
 
-            (workspace / "README.md").write_bytes(b"\xff")
+            (workspace / "AGENTS.md").write_bytes(b"\xff")
             resolved, invalid_utf8_error = _resolve_spawn_workspace_dir(
                 context, "workspace"
             )
             self.assertIsNone(resolved)
             self.assertIn("UTF-8", invalid_utf8_error or "")
 
-            outside_readme = root / "outside-README.md"
-            outside_readme.write_text("# Outside\n")
-            (workspace / "README.md").unlink()
-            (workspace / "README.md").symlink_to(outside_readme)
-            resolved, symlink_readme_error = _resolve_spawn_workspace_dir(
+            outside_agents = root / "outside-AGENTS.md"
+            outside_agents.write_text("# Outside\n")
+            (workspace / "AGENTS.md").unlink()
+            (workspace / "AGENTS.md").symlink_to(outside_agents)
+            resolved, symlink_agents_error = _resolve_spawn_workspace_dir(
                 context, "workspace"
             )
             self.assertIsNone(resolved)
-            self.assertIn("regular README.md", symlink_readme_error or "")
+            self.assertIn("regular AGENTS.md", symlink_agents_error or "")
 
-            (workspace / "README.md").unlink()
-            (workspace / "README.md").write_text("# Child\n")
+            (workspace / "AGENTS.md").unlink()
+            (workspace / "AGENTS.md").write_text("# Child\n")
             resolved, error = _resolve_spawn_workspace_dir(context, "workspace")
             self.assertEqual(resolved, workspace)
             self.assertIsNone(error)
@@ -139,7 +139,7 @@ class BenchmarkDriverTests(unittest.TestCase):
             self.assertFalse(invalid["child_spawned"])
             self.assertTrue(invalid["retryable"])
 
-            (first_workspace / "README.md").write_text("# First child\n")
+            (first_workspace / "AGENTS.md").write_text("# First child\n")
             with patch("main_loop.copy_seed_workspace", side_effect=RuntimeError("copy failed")):
                 copy_failed = _spawn_child_continuation(
                     context=context(0),
@@ -172,7 +172,7 @@ class BenchmarkDriverTests(unittest.TestCase):
 
             second_workspace = root / "second-child"
             second_workspace.mkdir()
-            (second_workspace / "README.md").write_text("# Second child\n")
+            (second_workspace / "AGENTS.md").write_text("# Second child\n")
             second = _spawn_child_continuation(
                 context=context(1),
                 args={"prompt": "second", "workspace_dir": "second-child"},
@@ -286,7 +286,7 @@ class BenchmarkDriverTests(unittest.TestCase):
             self.assertIn("submit_solution(uuid=", (open_root / "shared" / "problem_pool.md").read_text())
             self.assertNotIn("mcp__", (open_root / "shared" / "problem_pool.md").read_text())
             stable_readme = (
-                Path(__file__).resolve().parents[1] / "seeds/bootstrap/README.md"
+                Path(__file__).resolve().parents[1] / "seeds/bootstrap/AGENTS.md"
             ).read_text()
             stable_readme_words = " ".join(stable_readme.split())
             self.assertNotIn("SuperGPQA", stable_readme)
@@ -423,7 +423,7 @@ class BenchmarkDriverTests(unittest.TestCase):
             )
             child_workspace = root / "child-workspace"
             child_workspace.mkdir()
-            (child_workspace / "README.md").write_text("# Child\n")
+            (child_workspace / "AGENTS.md").write_text("# Child\n")
             spawned = _record_spawned_child(
                 context=future_context,
                 child_instance_uuid="future-child",

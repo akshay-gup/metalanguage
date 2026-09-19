@@ -1,4 +1,4 @@
-"""Codex hook: load AGENTS.md from the exact directory used by a tool call."""
+"""Codex hook: load root and exact-directory AGENTS.md as neutral context."""
 
 from __future__ import annotations
 
@@ -10,9 +10,6 @@ import stat
 import sys
 from pathlib import Path
 from typing import Any
-
-
-MAX_AGENTS_BYTES = 8 * 1024
 
 
 def _managed_roots(context: dict[str, Any]) -> tuple[Path, ...]:
@@ -55,11 +52,10 @@ def _read_agents(directory: Path) -> tuple[Path, str, str] | None:
             os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
         )
         metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_AGENTS_BYTES:
+        if not stat.S_ISREG(metadata.st_mode):
             return None
-        content_bytes = os.read(descriptor, MAX_AGENTS_BYTES + 1)
-        if len(content_bytes) > MAX_AGENTS_BYTES:
-            return None
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            content_bytes = handle.read()
         content = content_bytes.decode("utf-8")
         if not content.strip():
             return None
@@ -96,7 +92,13 @@ def main() -> None:
         roots = _managed_roots(context)
         if not roots:
             return
-        directory = _tool_directory(payload, roots[0])
+        event_name = payload.get("hook_event_name")
+        if event_name == "UserPromptSubmit":
+            directory = roots[0]
+        elif event_name == "PostToolUse":
+            directory = _tool_directory(payload, roots[0])
+        else:
+            return
         containing_roots = [root for root in roots if directory == root or root in directory.parents]
         if not containing_roots or ".git" in directory.parts:
             return
@@ -107,15 +109,12 @@ def main() -> None:
         key = f"{path}\t{digest}"
         if not _first_load(context_path.with_name("directory_agents_seen"), key):
             return
-        observation = (
-            f"# AGENTS.md instructions for {directory}\n\n"
-            f"<INSTRUCTIONS>\n{content.rstrip()}\n</INSTRUCTIONS>"
-        )
+        observation = f"<CONTEXT>\n{content.rstrip()}\n</CONTEXT>"
         print(
             json.dumps(
                 {
                     "hookSpecificOutput": {
-                        "hookEventName": "PostToolUse",
+                        "hookEventName": event_name,
                         "additionalContext": observation,
                     }
                 },

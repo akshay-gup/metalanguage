@@ -326,7 +326,7 @@ def run_codex_rollout(
     rollout_username: str | None,
     timeout_seconds: int,
     sandbox_mode: str = "workspace-write",
-    initial_user_text: str = "Read README.md.",
+    initial_user_text: str = "Begin.",
     base_instructions: str | None = None,
     spawn_child_handler_context_path: Path | None = None,
     benchmark_mcp_servers: dict[str, Any] | None = None,

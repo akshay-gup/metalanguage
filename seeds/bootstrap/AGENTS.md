@@ -51,7 +51,7 @@ make it an assignment.
 
 A workspace-local directory passed through `spawn_child` is copied for that
 rollout's possible child. A valid child workspace has a regular, non-symlinked,
-readable, non-blank UTF-8 `README.md` at its root. Additional files are optional.
+readable, non-blank UTF-8 `AGENTS.md` at its root. Additional files are optional.
 Generated runtime files, pool snapshots, transcripts, and other files are not
 inherited unless they are included in the supplied workspace.
 
@@ -73,7 +73,7 @@ After an iteration, population positions without a spawned child are
 reinitialized from the base bootstrap environment. They do not inherit the
 prompt or workspace of a rollout that did not spawn a child.
 
-For a spawned child, the inherited `README.md` should thematically replicate
+For a spawned child, the inherited `AGENTS.md` should thematically replicate
 this environment description: finite lifetime, no assigned objective, optional
 human tasks, batch-local shared state, shared durable archives, the private
 inbox, and child-slot mechanics. Exact wording is not required; the description
