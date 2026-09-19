@@ -6,8 +6,8 @@ Open ended RSI
 
 The Codex/open-ended compatibility path is restored from outer source commit
 `43ec789` (the last material v1 source used through historical task index 9).
-It uses the bootstrap `seeds/bootstrap/README.md`, the
-71-byte `read-readme` base instruction, independent linked Git worktrees and
+It uses the bootstrap `seeds/bootstrap/AGENTS.md`, the one-character base
+placeholder `.`, independent linked Git worktrees and
 `rollout/...` branches, copied child workspaces, and serial supervisor merges.
 Uncommitted archive edits are discarded; conflicting branches are retained but
 not merged. There is no peer-message bus, automatic delivery turn, polling
@@ -68,7 +68,7 @@ take precedence over values in `.env`.
   3.7. for Codex or OpenCode open-ended research, create each live rollout's private batch-local `messages/` inbox before workers launch; other named rollouts can place direct messages there only through `send_message(recipient, message)`, and recipients read files with ordinary filesystem tools if desired,
   4. expose `archive/world_repo` by default as the durable cross-lineage Git archive available to every rollout (override with `--archive-repo-dir`),
      using a per-rollout temporary worktree so only committed archive changes are merged back and uncommitted archive edits are discarded,
-  5. inject the selected parent slot's stored prompt as the rollout's initial user text, copy that slot's inherited workspace directory into the rollout root and consume the slot workspace, and write `shared_workspace/BENCHMARK.md`; evaluated benchmark profiles also write their pool/catalog files, while the open-ended profile writes only the exact human-authored task; bootstrap rollouts receive root `README.md` as a neutral environment description and a short initial message stating that no task is assigned,
+  5. inject the selected parent slot's stored prompt as the rollout's initial user text, copy that slot's inherited workspace directory into the rollout root and consume the slot workspace, and write `shared_workspace/BENCHMARK.md`; evaluated benchmark profiles also write their pool/catalog files, while the open-ended profile writes only the exact human-authored task; bootstrap rollouts receive root `AGENTS.md` as a neutral environment description and the initial user message `Begin.`,
   6. register main-loop tools through the worker backend (OpenRouter tool payloads or Codex `DynamicToolSpec` entries), then run the worker with the inherited prompt and generated runtime context; operating doctrine is expected to come from the inherited prompt,
      while `runtime.md` contains only generated paths, runtime IDs, the rollout's reserved child-slot index, peer lists, and, for the private-inbox profile, its own fixed human name and roster,
   7. for SuperGPQA, score answers submitted through `submit_solution(uuid, answer)`, grounding correctness against the private stored row selected by uuid; other profiles retain their own explicitly documented evaluation semantics,
@@ -91,19 +91,19 @@ take precedence over values in `.env`.
   - there is no answer-file scoring fallback; a rollout that does not call `submit_solution` receives no solution score;
   - rollouts can call `submit_solution(uuid, answer)` and `spawn_child(prompt, workspace_dir)` as applicable main-loop tools; Codex and OpenCode open-ended research rollouts can also call `send_message(recipient, message)`;
   - `spawn_child` stores the required non-empty `prompt` in supervisor-side slot metadata as the child rollout's next initial user text;
-  - `workspace_dir` is required and must be a workspace-local directory whose root contains a regular, non-symlinked, readable, non-blank UTF-8 `README.md`; `spawn_child` copies its contents into the reserved slot's inherited workspace, while additional files remain optional;
+  - `workspace_dir` is required and must be a workspace-local directory whose root contains a regular, non-symlinked, readable, non-blank UTF-8 `AGENTS.md`; `spawn_child` copies its contents into the reserved slot's inherited workspace, while additional files remain optional;
   - `workspace_dir` must be inside the rollout workspace and must not be the rollout root; after a successful spawn, the source directory is deleted when that parent rollout finishes, while failed attempts do not consume it;
-  - root `README.md` is not copied implicitly;
+  - root `AGENTS.md` is not copied implicitly;
   - `spawn_child` does not require or create `prompt.md`; prompt text lives in slot metadata/logs outside the child workspace;
   - each source rollout owns exactly one child opportunity at its `source_rollout_index`; the filesystem lock only makes concurrent state checks and recording atomic;
-  - copying and copied-README revalidation happen before the child is recorded, so validation/copy failures remain retryable;
+  - copying and copied-AGENTS revalidation happen before the child is recorded, so validation/copy failures remain retryable;
   - a successful call explicitly reports that the child was spawned and the parent continues; later calls from only that source rollout return structured `child_already_spawned` feedback and do not affect peers.
 - Lineage behavior:
   - the first rollout batch can bootstrap without a parent slot;
   - a rollout's lineage gains an inherited child only through a successful `spawn_child(prompt, workspace_dir)` call; the source rollout itself continues normally after the tool result;
-  - every spawned child has a stored initial prompt and an inherited workspace rooted by `README.md`;
-  - the child README is expected to preserve the parent environment description's themes, while its exact wording and elaboration may evolve;
-  - solving/submitting alone does not continue that rollout's lineage; after each iteration, every configured population position not filled by a successfully spawned child is a fresh bootstrap rollout using the base README and initial prompt;
+  - every spawned child has a stored initial prompt and an inherited workspace rooted by `AGENTS.md`;
+  - the child AGENTS file is expected to preserve the parent environment description's themes, while its exact wording and elaboration may evolve;
+  - solving/submitting alone does not continue that rollout's lineage; after each iteration, every configured population position not filled by a successfully spawned child is a fresh bootstrap rollout using the base AGENTS file and initial prompt;
   - there is no correctness gate for spawning; solved and unsolved rollouts may use their reserved child opportunity;
   - successfully spawned children form the next parent pool first; only the remaining configured population positions are reinitialized from the bootstrap seed.
 - Resume behavior:
@@ -219,19 +219,21 @@ Useful flags:
 - `--codex-sandbox-mode read-only|workspace-write|danger-full-access`: choose the
   rollout sandbox mode. `danger-full-access` is rejected for Codex/open-ended
   private-inbox turns because it cannot enforce inbox privacy.
-- `--codex-base-instructions-mode read-readme|codex`: choose whether Codex uses
-  the fixed inherited-packet scaffold instruction (`read-readme`, the default)
-  or its model-catalog base instructions (`codex`).
+- `--codex-base-instructions-mode minimal`: Codex receives `.` instead of its
+  model-catalog instructions. Native project-document loading is disabled; a
+  managed hook injects root `AGENTS.md` on the first user prompt and a nonempty
+  exact-directory `AGENTS.md` after a tool targets that directory. Each unique
+  path/content digest is injected once as `<CONTEXT>...</CONTEXT>`, with no
+  Metalanguage-specific content-size cap.
 - `--codex-initial-prompt TEXT`: choose the first user message.
 
-Example with Codex base instructions kept to the fixed inherited-packet
-scaffold pointer:
+Example using the minimal base placeholder and automatic root `AGENTS.md` loading:
 
 ```bash
 uv run python -B main_loop.py \
   --worker-backend codex \
   --model gpt-5.5 \
-  --codex-base-instructions-mode read-readme \
+  --codex-base-instructions-mode minimal \
   --step \
   --num-rollouts 8
 ```
