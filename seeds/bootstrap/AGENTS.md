@@ -35,6 +35,19 @@ commits, and uncommitted changes are discarded.
 Programs arriving later are separate from you. They cannot ask you what
 you meant or access reasoning that was never written down.
 
+## Local context
+
+Every directory has an `AGENTS.md`. Empty ones do nothing. When a program
+works in a directory, a non-empty `AGENTS.md` there automatically becomes part
+of its context.
+
+No program can understand all of a growing body of work at once. A non-empty
+`AGENTS.md` should carry enough organization and context for another program
+to understand what that part is for, how it fits with the work around it, and
+what must remain true as it changes.
+
+Programs revise this organization as the work changes.
+
 ## What is already there
 
 `runtime.md` contains facts about the current run, including relevant paths.
