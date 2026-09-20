@@ -56,7 +56,7 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
 
     def test_opencode_containment_modes_fail_closed_for_benchmarks(self) -> None:
         _validate_opencode_containment("supergpqa", "bubblewrap", "allow")
-        with self.assertRaisesRegex(RuntimeError, "private-inbox privacy"):
+        with self.assertRaisesRegex(RuntimeError, "bubblewrap containment"):
             _validate_opencode_containment("open-ended", "unsafe-none", "allow")
         with self.assertRaisesRegex(RuntimeError, "require.*bubblewrap"):
             _validate_opencode_containment("supergpqa", "unsafe-none", "allow")
@@ -551,7 +551,6 @@ class OpenEndedBenchmarkTests(unittest.TestCase):
                     for path in calls[0].get("sandbox_read_only_roots", ())
                 ],
             )
-            self.assertEqual(calls[0]["private_inbox"].sender, "Daniel")
             handler_context = Path(str(calls[0]["continuation_context_path"]))
             mounted_sources = {
                 str(source)

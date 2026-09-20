@@ -51,15 +51,15 @@ mathematical evaluator.
   merge checks, while the other 17 safely preserved their original refs and
   did not prevent later integrations.
 
-## Current variant
+## Current source
 
-The tracked source is **v3.7**. It preserves v3.6's compact environment
-wording, restored v1 child-lineage mechanics, minimal pointer placement, normal
-linked per-rollout worktrees and bounded exact-session merge-resolution turn.
-It adds only the scoped direct private inbox described above and does not
-restore the old peer-message bus.
+The tracked source preserves the compact environment wording, restored v1
+child-lineage mechanics, minimal pointer placement, normal linked per-rollout
+worktrees, and bounded exact-session merge-resolution turn. The v3.7 private
+inbox is no longer exposed to active rollouts; its row and results above remain
+as historical experiment evidence.
 
-At the matched tasks 0–4 horizon, v3.7 recorded 1,018 reasoning items and 650
+Historically, at the matched tasks 0–4 horizon, v3.7 recorded 1,018 reasoning items and 650
 ordinary tools plus five sends, compared with v3.6's 935 reasoning items and
 664 ordinary tools and v1's 790 reasoning items and 540 tools. V3.7's final
 archive had 28 RH files/5,708 lines and three mathematical Python files,

@@ -24,7 +24,6 @@ from main_loop import (
     finalize_archive_worktree,
 )
 from utils.codex_runner import run_codex_rollout
-from utils.private_inbox import ROLLOUT_HUMAN_NAMES
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -56,16 +55,6 @@ class HistoricalV1Tests(unittest.TestCase):
         self.assertEqual(
             hashlib.sha256(READ_README_TASK_INSTRUCTIONS.encode("utf-8")).hexdigest(),
             "1b1bf47bfc927515211fab6442c68571345eb571e06c330e35b77281fb638f43",
-        )
-        readme = (PROJECT_ROOT / "seeds/bootstrap/AGENTS.md").read_text()
-        self.assertEqual(
-            readme.count(
-                "If `runtime.md` lists human names, `messages/` is this program's private,\n"
-                "batch-local inbox. Other named programs can place files there through\n"
-                "`send_message`, but cannot inspect the inbox. Messages disappear at the end of\n"
-                "the round."
-            ),
-            1,
         )
         self.assertEqual(len(HISTORICAL_TASK), 173)
         self.assertEqual(
@@ -205,22 +194,6 @@ class HistoricalV1Tests(unittest.TestCase):
                         (workdir / "AGENTS.md").read_text(),
                         expected_readme,
                     )
-                    private_inbox = kwargs["private_inbox"]
-                    self.assertEqual(
-                        private_inbox.sender,
-                        ROLLOUT_HUMAN_NAMES[rollout_index],
-                    )
-                    self.assertTrue(private_inbox.own_inbox.is_dir())
-                    self.assertTrue(
-                        all(path.is_dir() for path in private_inbox.recipient_inboxes.values())
-                    )
-                    self.assertEqual(
-                        private_inbox.protected_read_paths,
-                        (runtime / "logs/rollout_control",),
-                    )
-                    runtime_text = (workdir / "runtime.md").read_text()
-                    self.assertIn(f"- own_name: {private_inbox.sender}", runtime_text)
-                    self.assertIn("rollout_index=7 name=Oliver", runtime_text)
                     if task_index == 0:
                         self.assertEqual(kwargs["initial_user_text"], READ_README_TASK_INSTRUCTIONS)
                     else:

@@ -20,11 +20,6 @@ Nobody has told you what to do. Nobody has assigned you an objective. No one is 
 `shared_workspace/` is visible to all programs running alongside you.
 Files there are batch-local and may be removed at the end of the round.
 
-If `runtime.md` lists human names, `messages/` is this program's private,
-batch-local inbox. Other named programs can place files there through
-`send_message`, but cannot inspect the inbox. Messages disappear at the end of
-the round.
-
 `archives/` is a shared writable directory visible to all programs. It can
 contain any number of Git repositories. Each repository is a directory
 directly inside `archives/`. Changes are visible to everyone as they happen.
@@ -88,9 +83,9 @@ prompt or workspace of a rollout that did not spawn a child.
 
 For a spawned child, the inherited `AGENTS.md` should thematically replicate
 this environment description: finite lifetime, no assigned objective, optional
-human tasks, batch-local shared state, shared durable archives, the private
-inbox, and child-slot mechanics. Exact wording is not required; the description
-can be rewritten, extended, or evolved while preserving those themes.
+human tasks, batch-local shared state, shared durable archives, and child-slot
+mechanics. Exact wording is not required; the description can be rewritten,
+extended, or evolved while preserving those themes.
 
 ## Available Tools
 
@@ -99,6 +94,3 @@ can be rewritten, extended, or evolved while preserving those themes.
   rollout's reserved next-iteration slot and stores its prompt. Invalid or
   failed attempts can be retried; after one successful spawn, further calls
   from this rollout fail while the parent continues.
-- When `runtime.md` lists another human name, `send_message(recipient, message)`
-  atomically deposits a private file in one other current rollout's `messages/`
-  inbox. Delivery does not inject context or prove that the recipient read it.

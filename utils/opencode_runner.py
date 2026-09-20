@@ -19,9 +19,6 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-from utils.private_inbox import PrivateInboxConfig
-
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 OPENCODE_WORKER_SCRIPT = PROJECT_ROOT / "workers" / "opencode" / "worker.ts"
 SOURCE_AUDITED_OPENCODE_VERSIONS = ("1.18.29",)
@@ -902,11 +899,9 @@ def run_opencode_rollout(
     sandbox_read_only_mounts: tuple[tuple[Path, Path], ...] = (),
     sandbox_writable_roots: tuple[Path, ...] = (),
     sandbox_masked_paths: tuple[Path, ...] = (),
-    sandbox_masked_directories: tuple[Path, ...] = (),
     extra_environment: dict[str, str] | None = None,
     test_provider_config: dict[str, Any] | None = None,
     progress_callback: Callable[..., None] | None = None,
-    private_inbox: PrivateInboxConfig | None = None,
 ) -> dict[str, Any]:
     unsupported_versions = sorted(
         set(allowed_versions) - set(SOURCE_AUDITED_OPENCODE_VERSIONS)
@@ -918,64 +913,6 @@ def run_opencode_rollout(
     )
     if not allowed_bun_versions or unsupported_bun_versions:
         raise ValueError("Bun allowed versions must be source-audited")
-    if private_inbox is not None:
-        if sandbox_mode != "bubblewrap":
-            raise ValueError("private inbox requires the OpenCode bubblewrap sandbox")
-        if (
-            private_inbox.own_inbox != workdir / "messages"
-            or private_inbox.own_inbox.is_symlink()
-            or not private_inbox.own_inbox.is_dir()
-        ):
-            raise ValueError("OpenCode private inbox is not rooted in its rollout workspace")
-        sibling_workdirs: list[Path] = []
-        sibling_inboxes: list[Path] = []
-        for inbox in private_inbox.recipient_inboxes.values():
-            if (
-                inbox.name != "messages"
-                or not inbox.is_absolute()
-                or inbox.is_symlink()
-                or not inbox.is_dir()
-            ):
-                raise ValueError("OpenCode recipient inbox path is invalid")
-            sibling_workdir = inbox.parent
-            if (
-                sibling_workdir == workdir
-                or sibling_workdir.is_symlink()
-                or not sibling_workdir.is_dir()
-            ):
-                raise ValueError("OpenCode sibling rollout workspace is invalid")
-            sibling_workdirs.append(sibling_workdir)
-            sibling_inboxes.append(inbox)
-        visible_roots = (
-            workdir,
-            *sandbox_read_only_roots,
-            *sandbox_writable_roots,
-            *sibling_workdirs,
-        )
-        for protected in (
-            control_dir,
-            worker_state_dir,
-            private_inbox.state_path,
-            *private_inbox.protected_read_paths,
-            *((continuation_context_path,) if continuation_context_path is not None else ()),
-            *((auth_file,) if auth_file is not None else ()),
-        ):
-            resolved_protected = protected.resolve()
-            if any(
-                resolved_protected == root.resolve()
-                or resolved_protected.is_relative_to(root.resolve())
-                for root in visible_roots
-            ):
-                raise ValueError("OpenCode protected private-inbox state overlaps a sandbox root")
-        sandbox_read_only_roots = (
-            *sandbox_read_only_roots,
-            private_inbox.own_inbox,
-            *sibling_workdirs,
-        )
-        sandbox_masked_directories = (
-            *sandbox_masked_directories,
-            *sibling_inboxes,
-        )
     runtime_root = _private_runtime_root(worker_state_dir)
     if sandbox_mode == "bubblewrap":
         resolved_bubblewrap = resolve_bubblewrap_bin(bubblewrap_bin)
@@ -1059,10 +996,6 @@ def run_opencode_rollout(
                     )
                 )
             ],
-            "masked_directories": [
-                str(path.expanduser().resolve())
-                for path in dict.fromkeys(sandbox_masked_directories)
-            ],
         },
     }
     if test_provider_config is not None:
@@ -1076,14 +1009,6 @@ def run_opencode_rollout(
             "--child-tool-handler",
             str(continuation_context_path),
         ]
-    if private_inbox is not None:
-        if continuation_context_path is None:
-            raise ValueError("private inbox requires the central dynamic-tool callback")
-        request["private_inbox"] = {
-            "capability_identity": private_inbox.capability_identity,
-            "sender": private_inbox.sender,
-            "recipients": list(private_inbox.recipient_inboxes),
-        }
     if auth_file is not None:
         request["auth_file"] = str(auth_file.resolve())
     if agent:
@@ -1104,7 +1029,6 @@ def run_opencode_rollout(
         "turn_count": 0,
         "tool_call_count": 0,
         "spawn_child_tool_call_count": 0,
-        "send_message_tool_call_count": 0,
         "turn_completed": False,
         "context_exhausted": False,
         "context_boundary_source": "",
@@ -1225,7 +1149,6 @@ def run_opencode_rollout(
         "turn_count": state["turn_count"],
         "tool_call_count": state["tool_call_count"],
         "spawn_child_tool_call_count": state["spawn_child_tool_call_count"],
-        "send_message_tool_call_count": state["send_message_tool_call_count"],
         "turn_completed": state["turn_completed"],
         "provider_step_count": state["provider_step_count"],
         "usage_input_tokens": state["usage_input_tokens"],
@@ -1350,8 +1273,6 @@ def _handle_runner_line(
         state["tool_call_count"] += 1
         if event.get("tool") == "spawn_child":
             state["spawn_child_tool_call_count"] += 1
-        elif event.get("tool") == "send_message":
-            state["send_message_tool_call_count"] += 1
     elif name == "turn_usage":
         state["provider_step_count"] += 1
         for key in (
@@ -1417,14 +1338,14 @@ def _handle_runner_line(
             )
         elif name == "turn_started":
             progress_callback("worker_turn_started", backend="opencode")
-        elif name == "tool_begin" and event.get("tool") != "send_message":
+        elif name == "tool_begin":
             progress_callback(
                 "worker_tool_started",
                 tool=event.get("tool"),
                 call_id=event.get("call_id"),
                 command=event.get("command"),
             )
-        elif name == "tool_end" and event.get("tool") != "send_message":
+        elif name == "tool_end":
             progress_callback(
                 "worker_tool_completed",
                 tool=event.get("tool"),

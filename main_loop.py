@@ -79,15 +79,6 @@ from utils.open_ended_benchmark import (
     OpenEndedTask,
     resolve_open_ended_task,
 )
-from utils.private_inbox import (
-    PRIVATE_INBOX_CAPABILITY_IDENTITY,
-    ROLLOUT_HUMAN_NAMES,
-    PrivateInboxConfig,
-    cleanup_private_inboxes,
-    deliver_private_message,
-    initialize_private_inboxes,
-    private_inbox_enabled,
-)
 from utils.supergpqa_benchmark import SuperGpqaBenchmarkDriver, SuperGpqaConfig
 
 
@@ -311,8 +302,6 @@ def _format_runtime_markdown(
     live_peer_instances: list[dict[str, Any]] | None = None,
     parent_instance_uuid: str | None = None,
     has_problem_pool: bool = True,
-    human_name: str | None = None,
-    human_roster: tuple[str, ...] = (),
 ) -> str:
     lines = [
         "# Runtime",
@@ -323,8 +312,6 @@ def _format_runtime_markdown(
         "- archives: archives/",
         "- shared_workspace: shared_workspace/",
     ]
-    if human_name is not None:
-        lines.append("- messages: messages/")
     if has_problem_pool:
         lines.extend(
             [
@@ -372,20 +359,6 @@ def _format_runtime_markdown(
                 "",
                 "- evaluation: unconfigured",
                 "- this profile has no evaluator, score, reward, solved status, or ranking.",
-            ]
-        )
-    if human_name is not None:
-        lines.extend(
-            [
-                "",
-                "## Names",
-                "",
-                f"- own_name: {human_name}",
-                "- roster:",
-                *[
-                    f"  - rollout_index={index} name={name}"
-                    for index, name in enumerate(human_roster)
-                ],
             ]
         )
     if live_peer_instances:
@@ -482,7 +455,6 @@ def _make_continuation_context(
     codex_initial_prompt: str,
     codex_base_instructions: str | None,
     parent_instance_uuid: str | None = None,
-    private_inbox: PrivateInboxConfig | None = None,
 ) -> dict[str, Any]:
     context = {
         "worker_backend": worker_backend,
@@ -514,8 +486,6 @@ def _make_continuation_context(
         "codex_initial_prompt": codex_initial_prompt,
         "codex_base_instructions": codex_base_instructions,
     }
-    if private_inbox is not None:
-        context["private_inbox"] = private_inbox.to_context()
     return context
 
 
@@ -651,7 +621,6 @@ def _record_spawned_child(
         copy_seed_workspace(
             source_workspace_dir,
             child_workspace_dir,
-            exclude_names=("messages",) if "private_inbox" in context else (),
         )
         ensure_directory_tree_agents_files(child_workspace_dir)
         copied_agents = child_workspace_dir / "AGENTS.md"
@@ -1532,7 +1501,7 @@ def _validate_opencode_containment(
 ) -> None:
     if sandbox_mode == "unsafe-none" and benchmark == "open-ended":
         raise RuntimeError(
-            "OpenCode open-ended workers require bubblewrap for private-inbox privacy"
+            "OpenCode open-ended workers require bubblewrap containment"
         )
     if sandbox_mode == "unsafe-none":
         raise RuntimeError(
@@ -1672,70 +1641,6 @@ def _worker_backend_resume_compatible(
             and prompt_identity_matches
         )
     return True
-
-
-def _validate_private_inbox_partial_resume(
-    records: list[dict[str, Any]],
-    args: argparse.Namespace,
-) -> None:
-    if not any(
-        private_inbox_enabled(
-            getattr(args, "benchmark", ""), str(record.get("worker_backend", ""))
-        )
-        for record in records
-    ):
-        return
-    by_task: dict[int, dict[int, dict[str, Any]]] = {}
-    for record in records:
-        task_index = record.get("task_index")
-        rollout_index = record.get("rollout_index")
-        if isinstance(task_index, int) and isinstance(rollout_index, int):
-            by_task.setdefault(task_index, {}).setdefault(rollout_index, record)
-    for task_index, per_task in by_task.items():
-        expected_counts: list[int] = []
-        for record in per_task.values():
-            try:
-                expected_counts.append(
-                    int(
-                        record.get(
-                            "task_rollout_count",
-                            record.get("scheduled_rollout_count", args.num_rollouts),
-                        )
-                    )
-                )
-            except (TypeError, ValueError):
-                continue
-        expected_count = max(expected_counts) if expected_counts else args.num_rollouts
-        if len(per_task) >= expected_count:
-            continue
-        for rollout_index, record in per_task.items():
-            worker_backend = str(record.get("worker_backend", ""))
-            if not private_inbox_enabled(
-                getattr(args, "benchmark", ""), worker_backend
-            ):
-                continue
-            capability_field = (
-                "codex_capability_identity"
-                if worker_backend == "codex"
-                else "opencode_capability_identity"
-            )
-            if record.get(capability_field) != PRIVATE_INBOX_CAPABILITY_IDENTITY:
-                backend_label = (
-                    "Codex" if worker_backend == "codex" else "OpenCode"
-                )
-                raise SystemExit(
-                    f"error: incomplete {backend_label} open-ended task "
-                    f"{task_index} predates this backend's private-inbox capability; "
-                    "the partial batch cannot be resumed safely"
-                )
-
-
-def _private_inbox_capability_record(worker_backend: str) -> dict[str, str]:
-    if worker_backend == "codex":
-        return {"codex_capability_identity": PRIVATE_INBOX_CAPABILITY_IDENTITY}
-    if worker_backend == "opencode":
-        return {"opencode_capability_identity": PRIVATE_INBOX_CAPABILITY_IDENTITY}
-    return {}
 
 
 def _ensure_runtime_bootstrap_seed(bootstrap_seed_dir: Path) -> None:
@@ -2363,7 +2268,6 @@ def run_codex_worker(
     sensitive_mcp_tools: tuple[tuple[str, str], ...] = (),
     progress_callback: Any = None,
     persist_session: bool = False,
-    private_inbox: PrivateInboxConfig | None = None,
 ) -> WorkerResult:
     """Run one rollout through the Metalanguage-owned Codex runner."""
 
@@ -2387,7 +2291,6 @@ def run_codex_worker(
         sensitive_mcp_tools=sensitive_mcp_tools,
         progress_callback=progress_callback,
         persist_session=persist_session,
-        private_inbox=private_inbox,
     )
     metadata = {
         key: result.get(key)
@@ -2401,7 +2304,6 @@ def run_codex_worker(
             "turn_count",
             "tool_call_count",
             "spawn_child_tool_call_count",
-            "send_message_tool_call_count",
             "turn_completed",
             "context_boundary_source",
             "context_diagnostic_code",
@@ -2451,7 +2353,6 @@ def run_opencode_worker(
     sandbox_writable_roots: tuple[Path, ...] = (),
     sandbox_masked_paths: tuple[Path, ...] = (),
     progress_callback: Any = None,
-    private_inbox: PrivateInboxConfig | None = None,
 ) -> WorkerResult:
     """Run one rollout through the Metalanguage-owned TypeScript/Bun worker."""
 
@@ -2486,7 +2387,6 @@ def run_opencode_worker(
         sandbox_writable_roots=sandbox_writable_roots,
         sandbox_masked_paths=sandbox_masked_paths,
         progress_callback=progress_callback,
-        private_inbox=private_inbox,
     )
     metadata = {
         key: result.get(key)
@@ -2500,7 +2400,6 @@ def run_opencode_worker(
             "turn_count",
             "tool_call_count",
             "spawn_child_tool_call_count",
-            "send_message_tool_call_count",
             "turn_completed",
             "provider_step_count",
             "usage_input_tokens",
@@ -3449,29 +3348,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
         raise SystemExit(
             "error: --problem-pool-size is not valid with --benchmark open-ended"
         )
-    if any(
-        private_inbox_enabled(args.benchmark, slot.worker_backend)
-        for slot in rollout_slots
-    ):
-        if args.num_rollouts > len(ROLLOUT_HUMAN_NAMES):
-            raise SystemExit(
-                "error: open-ended private inbox supports rollout indices 0 through 7"
-            )
-        if (
-            "codex" in required_backends
-            and args.codex_sandbox_mode == "danger-full-access"
-        ):
-            raise SystemExit(
-                "error: Codex open-ended private inbox requires read-only or workspace-write sandboxing"
-            )
-        if (
-            "opencode" in required_backends
-            and args.opencode_sandbox_mode != "bubblewrap"
-        ):
-            raise SystemExit(
-                "error: OpenCode open-ended private inbox requires bubblewrap sandboxing"
-            )
-
     for worker_backend in required_backends:
         _validate_benchmark_backend(args.benchmark, worker_backend)
     runtime_root = _resolve_runtime_root(args.runtime_root)
@@ -3913,8 +3789,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
 
         existing_records = [rec for rec in all_records if _matches_run(rec)]
 
-    _validate_private_inbox_partial_resume(existing_records, args)
-
     if not args.no_resume and existing_records:
         parent_pool = load_parent_pool(parent_pool_path)
         preliminary_by_task: dict[int, dict[int, dict[str, Any]]] = {}
@@ -4169,31 +4043,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             for rollout_index in range(task_rollout_count)
             if rollout_index not in existing_task_records
         ]
-        private_inbox_configs: dict[int, PrivateInboxConfig] = {}
-        private_inbox_rollout_indices = [
-            rollout_index
-            for rollout_index in missing_rollout_indices
-            if private_inbox_enabled(
-                args.benchmark, task_rollout_slots[rollout_index].worker_backend
-            )
-        ]
-        if private_inbox_rollout_indices:
-            rollout_workdirs: dict[int, Path] = {}
-            for rollout_index in private_inbox_rollout_indices:
-                rollout_workdir = (
-                    fixed_temp_dir
-                    / f"{task_index:06d}"
-                    / f"rollout_{rollout_index:03d}"
-                )
-                shutil.rmtree(rollout_workdir, ignore_errors=True)
-                rollout_workdir.mkdir(parents=True, exist_ok=True)
-                rollout_workdirs[rollout_index] = rollout_workdir
-            private_inbox_configs = initialize_private_inboxes(
-                rollout_workdirs,
-                state_path=rollout_root
-                / f"{task_index:06d}_{_sanitize_for_path(task_id)}_private_inbox_state.json",
-                protected_read_paths=(runtime_root / "logs" / "rollout_control",),
-            )
 
         def _run_one_rollout(rollout_index: int) -> RolloutResult:
             existing = existing_task_records.get(rollout_index)
@@ -4215,7 +4064,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 else ""
             )
             rollout_username = _rollout_username(rollout_index)
-            private_inbox = private_inbox_configs.get(rollout_index)
             sampled_parent: dict[str, Any] | None = (
                 parent_pool[rollout_index] if rollout_index < len(parent_pool) else None
             )
@@ -4277,15 +4125,8 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 bootstrap_reinitialized=bootstrap_reinitialized,
             )
             temp_dir = fixed_temp_dir / f"{task_index:06d}" / f"rollout_{rollout_index:03d}"
-            if private_inbox is None:
-                shutil.rmtree(temp_dir, ignore_errors=True)
-                temp_dir.mkdir(parents=True, exist_ok=True)
-            elif (
-                not temp_dir.is_dir()
-                or private_inbox.own_inbox != temp_dir / "messages"
-                or not private_inbox.own_inbox.is_dir()
-            ):
-                raise RuntimeError("private inbox workspace was not prepared before launch")
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            temp_dir.mkdir(parents=True, exist_ok=True)
             bootstrap_seed_used = sampled_parent is None or bootstrap_reinitialized
             rollout_initial_prompt = (
                 args.opencode_initial_prompt
@@ -4307,7 +4148,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                     copy_seed_workspace(
                         parent_workspace_dir,
                         temp_dir,
-                        exclude_names=("messages",) if private_inbox is not None else (),
                         consume=True,
                     )
                     _progress(
@@ -4320,7 +4160,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 copy_seed_workspace(
                     bootstrap_seed_dir,
                     temp_dir,
-                    exclude_names=("messages",) if private_inbox is not None else (),
                 )
                 if worker_backend != "opencode":
                     rollout_initial_prompt = _format_bootstrap_seed_prompt(
@@ -4377,7 +4216,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 codex_initial_prompt=args.codex_initial_prompt,
                 codex_base_instructions=codex_base_instructions,
                 shared_archives_root=shared_archives_root,
-                private_inbox=private_inbox,
             )
             continuation_context.update(task_rollout_metadata)
             planned_context_path = (
@@ -4423,10 +4261,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                     problem_pool_count=problem_pool_count,
                     live_peer_instances=rollout_live_peer_instances,
                     has_problem_pool=has_problem_pool,
-                    human_name=(private_inbox.sender if private_inbox is not None else None),
-                    human_roster=(
-                        ROLLOUT_HUMAN_NAMES if private_inbox is not None else ()
-                    ),
                 ),
                 encoding="utf-8",
             )
@@ -4530,7 +4364,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                             sensitive_mcp_tools=rollout_benchmark.sensitive_mcp_tools,
                             progress_callback=_progress,
                             persist_session=(args.benchmark == "open-ended"),
-                            private_inbox=private_inbox,
                         )
                     elif worker_backend == "opencode":
                         if (
@@ -4599,7 +4432,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                                 (DEFAULT_ENV_PATH,) if DEFAULT_ENV_PATH.is_file() else ()
                             ),
                             progress_callback=_progress,
-                            private_inbox=private_inbox,
                         )
                     else:
                         if api_key is None:
@@ -4722,7 +4554,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 temp_dir,
                 outputs_dir,
                 f"{record_task_id or 'unassigned'}_rollout_{rollout_index:03d}",
-                exclude_names=("messages",) if private_inbox is not None else (),
             )
             _progress("episode_persisted", output_path=str(output_dir))
 
@@ -4815,11 +4646,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                     else {}
                 ),
                 "worker_backend": worker_backend,
-                **(
-                    _private_inbox_capability_record(worker_backend)
-                    if private_inbox is not None
-                    else {}
-                ),
                 **task_rollout_metadata,
                 "worker_metadata": worker_result.metadata,
                 "research_turn_count": int(
@@ -5111,16 +4937,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                                         "worker_error_code": None,
                                         "worker_error_message": str(exc),
                                         "worker_backend": worker_backend,
-                                        **(
-                                            _private_inbox_capability_record(
-                                                worker_backend
-                                            )
-                                            if private_inbox_enabled(
-                                                args.benchmark,
-                                                worker_backend,
-                                            )
-                                            else {}
-                                        ),
                                         **task_rollout_metadata,
                                         "worker_metadata": None,
                                         **(
@@ -5318,9 +5134,6 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                                     error=str(exc),
                                 )
                             )
-        if private_inbox_configs:
-            cleanup_private_inboxes(private_inbox_configs)
-
         cleanup_round_metadata = {
             "benchmark": args.benchmark,
             "generation": args.generation,
@@ -5472,20 +5285,6 @@ def run_child_tool_handler(context_path: Path) -> None:
                 context=context,
                 args=args,
             )
-        elif tool == "send_message" and payload.get("namespace") is None:
-            result = deliver_private_message(
-                context=context,
-                args=args,
-                call_id=payload.get("call_id"),
-            )
-        elif tool == "send_message":
-            result = {
-                "success": False,
-                "status": "rejected",
-                "retryable": False,
-                "error_code": "unsupported_dynamic_tool_namespace",
-                "error": "message was not delivered",
-            }
         else:
             result = _spawn_failure(
                 f"unsupported dynamic tool: {tool}",
@@ -5493,20 +5292,11 @@ def run_child_tool_handler(context_path: Path) -> None:
                 retryable=True,
             )
     except BaseException as exc:
-        if isinstance(locals().get("payload"), dict) and payload.get("tool") == "send_message":
-            result = {
-                "success": False,
-                "status": "rejected",
-                "retryable": True,
-                "error_code": "send_message_handler_failed",
-                "error": "message was not delivered",
-            }
-        else:
-            result = _spawn_failure(
-                f"{type(exc).__name__}: {exc}",
-                error_code="spawn_child_handler_failed",
-                retryable=True,
-            )
+        result = _spawn_failure(
+            f"{type(exc).__name__}: {exc}",
+            error_code="spawn_child_handler_failed",
+            retryable=True,
+        )
 
     result = {
         **result,

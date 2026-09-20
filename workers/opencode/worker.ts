@@ -14,7 +14,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises"
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path"
+import { basename, dirname, isAbsolute, join, resolve } from "node:path"
 
 import {
   EventNormalizer,
@@ -40,7 +40,6 @@ import {
 import {
   runHandler,
   runSpawnBridgeFromStdio,
-  sendMessageToolSource,
   SYSTEM_PLUGIN_SOURCE,
   TOOL_SOURCE,
 } from "./spawn_bridge.ts"
@@ -212,7 +211,7 @@ class ApiClient {
   }
 }
 
-async function prepareStateRoot(path: string, recipients: string[] = []): Promise<string> {
+async function prepareStateRoot(path: string): Promise<string> {
   if (!path) throw new Error("state_root is empty")
   await mkdir(path, { recursive: true, mode: 0o700 })
   await chmod(path, 0o700)
@@ -226,7 +225,6 @@ async function prepareStateRoot(path: string, recipients: string[] = []): Promis
     "state",
     "cache",
     "tmp",
-    "masked-empty-directory",
   ]) {
     const directory = join(root, relative)
     await mkdir(directory, { recursive: true, mode: 0o700 })
@@ -237,17 +235,12 @@ async function prepareStateRoot(path: string, recipients: string[] = []): Promis
     if (entry.endsWith(".js")) await rm(join(toolDirectory, entry), { force: true })
   }
   const toolPath = join(root, "config/tool/spawn_child.js")
-  const sendMessageToolPath = join(root, "config/tool/send_message.js")
   const pluginPath = join(root, "config/plugin/metalanguage_system.js")
   const maskedFilePath = join(root, "masked-empty")
   await writeFile(toolPath, TOOL_SOURCE, { mode: 0o600 })
-  if (recipients.length) {
-    await writeFile(sendMessageToolPath, sendMessageToolSource(recipients), { mode: 0o600 })
-  }
   await writeFile(pluginPath, SYSTEM_PLUGIN_SOURCE, { mode: 0o600 })
   await writeFile(maskedFilePath, "", { mode: 0o600 })
   await chmod(toolPath, 0o600)
-  if (recipients.length) await chmod(sendMessageToolPath, 0o600)
   await chmod(pluginPath, 0o600)
   await chmod(maskedFilePath, 0o600)
   for (const configRoot of [join(root, "config"), join(root, "config/opencode")]) {
@@ -563,11 +556,6 @@ function addParentDirectories(command: string[], path: string): void {
   for (const directory of missing.reverse()) command.push("--dir", directory)
 }
 
-function isWithin(path: string, root: string): boolean {
-  const candidate = relative(root, path)
-  return candidate === "" || (!candidate.startsWith("..") && !isAbsolute(candidate))
-}
-
 export async function sandboxedServerCommand(
   request: RunnerRequest,
   root: string,
@@ -658,23 +646,6 @@ export async function sandboxedServerCommand(
   for (const path of sandbox.masked_paths ?? []) {
     const real = await realpath(path)
     command.push("--ro-bind", join(root, "masked-empty"), real)
-  }
-  if (sandbox.masked_directories?.length) {
-    command.push(
-      "--ro-bind",
-      join(root, "masked-empty-directory"),
-      join(root, "masked-empty-directory"),
-    )
-  }
-  for (const path of sandbox.masked_directories ?? []) {
-    const real = await realpath(path)
-    if (!orderedMounts.some(([mount, access]) => access === "read" && isWithin(real, mount))) {
-      throw new RunnerError(
-        "invalid_sandbox_mount",
-        "masked directory is not contained by a read-only sandbox root",
-      )
-    }
-    command.push("--ro-bind", join(root, "masked-empty-directory"), real)
   }
   command.push("--chdir", request.cwd, "--", ...base)
   return command
@@ -1073,26 +1044,7 @@ function parseRequest(value: unknown): RunnerRequest {
     if (typeof value[field] !== "string" || !value[field]) throw new Error(`runner request requires ${field}`)
   }
   const request = value as RunnerRequest
-  validatePrivateInbox(request)
   return request
-}
-
-function validatePrivateInbox(request: RunnerRequest): void {
-  if (request.private_inbox === undefined || request.private_inbox === null) return
-  const inbox = request.private_inbox
-  const roster = ["Daniel", "Noah", "Elizabeth", "George", "Eva", "Eleanor", "Zoe", "Oliver"]
-  if (
-    !isRecord(inbox) ||
-    inbox.capability_identity !== "metalanguage-v3.7-codex-open-ended-private-inbox-v1" ||
-    !roster.includes(inbox.sender) ||
-    !Array.isArray(inbox.recipients) ||
-    !inbox.recipients.every((recipient) => typeof recipient === "string" && roster.includes(recipient)) ||
-    inbox.recipients.includes(inbox.sender) ||
-    new Set(inbox.recipients).size !== inbox.recipients.length ||
-    !request.spawn_child_handler_command?.length
-  ) {
-    throw new Error("runner request private inbox is invalid")
-  }
 }
 
 export async function runRequest(request: RunnerRequest, cancelled: Promise<void>): Promise<void> {
@@ -1105,7 +1057,7 @@ export async function runRequest(request: RunnerRequest, cancelled: Promise<void
   }
   let root: string
   try {
-    root = await prepareStateRoot(request.state_root, request.private_inbox?.recipients ?? [])
+    root = await prepareStateRoot(request.state_root)
   } catch (error) {
     throw asRunnerError("state_isolation_failed", error)
   }

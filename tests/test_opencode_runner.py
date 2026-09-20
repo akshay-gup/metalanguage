@@ -474,7 +474,6 @@ class OpenCodeRunnerTests(unittest.TestCase):
             self.assertTrue((root / "workdir/fake_delete").is_file())
             state = json.loads((root / "workdir/fake_state.json").read_text())
             self.assertEqual(state["tool_files"], ["spawn_child.js"])
-            self.assertNotIn("send_message.js", state["tool_files"])
             self.assertTrue(state["system_plugin"])
             self.assertTrue(state["prepared_dependencies"])
             self.assertTrue(state["npm_offline"])

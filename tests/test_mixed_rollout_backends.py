@@ -10,7 +10,6 @@ from unittest.mock import patch
 
 from main_loop import (
     ORDERED_ROLLOUT_MODE,
-    PRIVATE_INBOX_CAPABILITY_IDENTITY,
     RUNTIME_ROLLOUT_IDENTITY_FILENAME,
     SHUFFLED_ROLLOUT_MODE,
     RolloutSlot,
@@ -615,8 +614,6 @@ class MixedRolloutBackendTests(unittest.TestCase):
                 {"ANTHROPIC_API_KEY"},
             )
             self.assertIsNone(openai_call["auth_file"])
-            self.assertIsNotNone(codex_calls[0]["private_inbox"])
-            self.assertIsNotNone(openai_call["private_inbox"])
             continuation = json.loads(
                 Path(str(openai_call["continuation_context_path"])).read_text()
             )
@@ -640,14 +637,6 @@ class MixedRolloutBackendTests(unittest.TestCase):
                 self.assertEqual((record["worker_backend"], record["model"]), (backend, model))
                 self.assertEqual(record["rollout_assignment_mode"], ORDERED_ROLLOUT_MODE)
                 self.assertEqual(len(record["rollout_slots"]), 3)
-                capability_key = (
-                    "codex_capability_identity"
-                    if backend == "codex"
-                    else "opencode_capability_identity"
-                )
-                self.assertEqual(
-                    record[capability_key], PRIVATE_INBOX_CAPABILITY_IDENTITY
-                )
             task_one = [record for record in records if record["task_index"] == 1]
             self.assertEqual(
                 [(record["worker_backend"], record["model"]) for record in task_one],

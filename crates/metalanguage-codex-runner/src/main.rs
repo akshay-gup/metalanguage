@@ -1,8 +1,6 @@
 #![recursion_limit = "256"]
 
 use std::collections::HashMap;
-use std::fs;
-use std::fs::OpenOptions;
 use std::io::IsTerminal;
 use std::io::Read;
 use std::io::Write;
@@ -12,8 +10,6 @@ use std::process::Command;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
 
 use anyhow::Context;
 use anyhow::anyhow;
@@ -80,8 +76,6 @@ use serde::Serialize;
 use serde_json::Value;
 use serde_json::json;
 
-const PRIVATE_INBOX_CAPABILITY_IDENTITY: &str =
-    "metalanguage-v3.7-codex-open-ended-private-inbox-v1";
 const MANAGED_CONTEXT_STOP_REASON: &str = "metalanguage_context_exhausted";
 const MANAGED_PRE_COMPACT_STATUS: &str = "Stopping at the Metalanguage context boundary";
 const MANAGED_PRE_COMPACT_COMMAND: &str = concat!(
@@ -89,17 +83,6 @@ const MANAGED_PRE_COMPACT_COMMAND: &str = concat!(
     r#"{"continue":false,"stopReason":"metalanguage_context_exhausted"}"#,
     "'"
 );
-const HUMAN_ROSTER: [&str; 8] = [
-    "Daniel",
-    "Noah",
-    "Elizabeth",
-    "George",
-    "Eva",
-    "Eleanor",
-    "Zoe",
-    "Oliver",
-];
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 struct RunnerRequest {
@@ -122,30 +105,6 @@ struct RunnerRequest {
     expected_thread_id: Option<String>,
     expected_session_id: Option<String>,
     resolution_phase: Option<bool>,
-    private_inbox: Option<PrivateInboxRequest>,
-    private_evidence_protection: Option<PrivateEvidenceProtectionRequest>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PrivateInboxRequest {
-    capability_identity: String,
-    sender: String,
-    own_inbox: PathBuf,
-    recipient_inboxes: HashMap<String, PathBuf>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PrivateEvidenceProtectionRequest {
-    capability_identity: String,
-    read_denied_paths: Vec<PathBuf>,
-}
-
-#[derive(Clone, Debug)]
-struct NormalizedPrivateInbox {
-    own_inbox: PathBuf,
-    recipient_inboxes: Vec<(String, PathBuf)>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq)]
@@ -160,7 +119,7 @@ fn main() -> anyhow::Result<()> {
         emit(json!({
             "protocol": "metalanguage-codex-runner",
             "version": 1,
-            "capabilities": [PRIVATE_INBOX_CAPABILITY_IDENTITY],
+            "capabilities": [],
         }))?;
         return Ok(());
     }
@@ -213,27 +172,11 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
             .context("resolve shared_archives_root")?,
     )
     .context("convert shared_archives_root")?;
-    let private_inbox = normalize_private_inbox(request.private_inbox.as_ref())?;
-    let private_read_denials = normalize_private_evidence_protection(
-        request.private_evidence_protection.as_ref(),
-        &codex_home,
-    )?;
-    if private_inbox.is_some() && private_read_denials.is_empty() {
-        bail!("private inbox requires private evidence protection");
-    }
-    if private_inbox.is_none() && !private_read_denials.is_empty() {
-        bail!("private evidence protection requires a private inbox in Metalanguage v3.9");
-    }
-    if private_inbox.is_some() && request.spawn_child_handler_command.is_none() {
-        bail!("private inbox requires the central dynamic-tool handler");
-    }
     let sandbox_mode = parse_sandbox_mode(request.sandbox_mode.as_deref())?;
     let (sandbox_mode_override, permission_profile_override) = sandbox_configuration(
         sandbox_mode,
         &additional_writable_root_overrides,
         &shared_archives_root,
-        private_inbox.as_ref(),
-        &private_read_denials,
     )?;
     if request
         .base_instructions
@@ -375,7 +318,7 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
         session_configured,
     } = {
         let mut start_options = StartThreadOptions::new(config);
-        start_options.dynamic_tools = metalanguage_dynamic_tools(private_inbox.as_ref());
+        start_options.dynamic_tools = metalanguage_dynamic_tools();
         thread_manager
             .start_thread(start_options)
             .await
@@ -407,7 +350,6 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
         prompt,
         spawn_child_handler_command,
         sensitive_tools,
-        private_inbox.is_some(),
     )
     .await;
     let persistence_result = if turn_result.is_ok() && persist_session {
@@ -419,11 +361,6 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
                     "thread_id": thread_id.to_string(),
                     "session_id": session_configured.session_id.to_string(),
                     "rollout_path": rollout_path.to_string_lossy(),
-                    "private_message_calls_redacted": if private_inbox.is_some() {
-                        redact_private_message_calls_in_rollout(&rollout_path)?
-                    } else {
-                        0
-                    },
                 })),
                 None => Err(anyhow!("Codex rollout path was not materialized")),
             },
@@ -459,7 +396,6 @@ async fn run_turn(
     prompt: String,
     spawn_child_handler_command: Option<Vec<String>>,
     sensitive_tools: Vec<McpToolSelector>,
-    private_inbox_enabled: bool,
 ) -> anyhow::Result<()> {
     let submission = thread
         .start_turn_if_idle(TurnInputRequest::user_input(vec![UserInput::Text {
@@ -720,23 +656,18 @@ async fn run_turn(
             EventMsg::RequestPermissions(_) => bail_with_event("permissions_requested")?,
             EventMsg::RequestUserInput(_) => bail_with_event("user_input_requested")?,
             EventMsg::DynamicToolCallRequest(request) => {
-                let mut payload = json!({
+                let payload = json!({
                     "event": "tool_begin",
                     "tool": request.tool,
                     "namespace": request.namespace,
                     "call_id": request.call_id,
                     "turn_id": request.turn_id,
+                    "arguments": request.arguments.clone(),
                 });
-                if request.tool != "send_message" {
-                    payload["arguments"] = request.arguments.clone();
-                } else {
-                    payload["arguments"] = json!({"redacted": true});
-                }
                 emit(payload)?;
                 let response = handle_metalanguage_dynamic_tool(
                     request,
                     spawn_child_handler_command.as_deref(),
-                    private_inbox_enabled,
                 );
                 emit(json!({
                     "event": "tool_end",
@@ -932,10 +863,8 @@ fn bail_with_event(code: &str) -> anyhow::Result<()> {
     Err(anyhow!(code.to_string()))
 }
 
-fn metalanguage_dynamic_tools(
-    private_inbox: Option<&NormalizedPrivateInbox>,
-) -> Vec<DynamicToolSpec> {
-    let mut tools = vec![DynamicToolSpec::Function(DynamicToolFunctionSpec {
+fn metalanguage_dynamic_tools() -> Vec<DynamicToolSpec> {
+    vec![DynamicToolSpec::Function(DynamicToolFunctionSpec {
         name: "spawn_child".to_string(),
         description: concat!(
             "Spawn this rollout's one possible next-iteration child. The child receives ",
@@ -962,44 +891,7 @@ fn metalanguage_dynamic_tools(
             "additionalProperties": false,
         }),
         defer_loading: false,
-    })];
-    if let Some(private_inbox) = private_inbox
-        && !private_inbox.recipient_inboxes.is_empty()
-    {
-        let recipients = private_inbox
-            .recipient_inboxes
-            .iter()
-            .map(|(recipient, _)| recipient.clone())
-            .collect::<Vec<_>>();
-        tools.push(DynamicToolSpec::Function(DynamicToolFunctionSpec {
-            name: "send_message".to_string(),
-            description: concat!(
-                "Place one direct message in another current rollout's private ",
-                "messages/ inbox. The recipient may read it with ordinary filesystem ",
-                "tools."
-            )
-            .to_string(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "recipient": {
-                        "type": "string",
-                        "enum": recipients,
-                        "description": "Exact human name of one other current rollout."
-                    },
-                    "message": {
-                        "type": "string",
-                        "minLength": 1,
-                        "description": "Non-empty UTF-8 message."
-                    }
-                },
-                "required": ["recipient", "message"],
-                "additionalProperties": false,
-            }),
-            defer_loading: false,
-        }));
-    }
-    tools
+    })]
 }
 
 #[cfg(test)]
@@ -1053,7 +945,6 @@ fn logged_mcp_tool_end_event(event: &codex_protocol::protocol::McpToolCallEndEve
 fn handle_metalanguage_dynamic_tool(
     request: &DynamicToolCallRequest,
     spawn_child_handler_command: Option<&[String]>,
-    private_inbox_enabled: bool,
 ) -> DynamicToolResponse {
     if request.namespace.is_some() {
         return dynamic_tool_json_response(
@@ -1072,9 +963,6 @@ fn handle_metalanguage_dynamic_tool(
 
     match request.tool.as_str() {
         "spawn_child" => handle_spawn_child_tool(request, spawn_child_handler_command),
-        "send_message" if private_inbox_enabled => {
-            handle_send_message_tool(request, spawn_child_handler_command)
-        }
         other => dynamic_tool_json_response(
             false,
             json!({"error": "unsupported dynamic tool", "tool": other}),
@@ -1127,66 +1015,6 @@ fn handle_spawn_child_tool(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     dynamic_tool_json_response(success, output)
-}
-
-fn handle_send_message_tool(
-    request: &DynamicToolCallRequest,
-    dynamic_tool_handler_command: Option<&[String]>,
-) -> DynamicToolResponse {
-    let Some(command) = dynamic_tool_handler_command else {
-        return dynamic_tool_json_response(
-            false,
-            private_message_failure(
-                "send_message_handler_unavailable",
-                "message was not delivered",
-                true,
-            ),
-        );
-    };
-    if command.is_empty() {
-        return dynamic_tool_json_response(
-            false,
-            private_message_failure(
-                "send_message_handler_unavailable",
-                "message was not delivered",
-                true,
-            ),
-        );
-    }
-    let handler_payload = json!({
-        "tool": request.tool,
-        "namespace": request.namespace,
-        "call_id": request.call_id,
-        "arguments": request.arguments,
-    });
-    let output = match run_dynamic_tool_handler(command, &handler_payload) {
-        Ok(value) => value,
-        Err(_) => {
-            return dynamic_tool_json_response(
-                false,
-                private_message_failure(
-                    "send_message_handler_failed",
-                    "message was not delivered",
-                    true,
-                ),
-            );
-        }
-    };
-    let success = output
-        .get("success")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    dynamic_tool_json_response(success, output)
-}
-
-fn private_message_failure(error_code: &str, error: &str, retryable: bool) -> Value {
-    json!({
-        "success": false,
-        "status": "rejected",
-        "retryable": retryable,
-        "error_code": error_code,
-        "error": error,
-    })
 }
 
 fn spawn_child_failure(error_code: &str, error: &str, retryable: bool) -> Value {
@@ -1282,27 +1110,13 @@ fn mapped_item_notification(
     let Some(turn_id) = current_turn_id else {
         return Ok(None);
     };
-    if item_event_contains_sensitive_mcp_call(msg, sensitive_tools)
-        || item_event_contains_private_message_call(msg)
-    {
+    if item_event_contains_sensitive_mcp_call(msg, sensitive_tools) {
         return Ok(None);
     }
     let notification = item_event_to_server_notification(msg.clone(), thread_id, turn_id);
     serde_json::to_value(notification)
         .map(Some)
         .context("serialize mapped Codex notification")
-}
-
-fn item_event_contains_private_message_call(msg: &EventMsg) -> bool {
-    let item = match msg {
-        EventMsg::ItemStarted(event) => &event.item,
-        EventMsg::ItemCompleted(event) => &event.item,
-        _ => return false,
-    };
-    matches!(
-        item,
-        TurnItem::DynamicToolCall(call) if call.tool == "send_message"
-    )
 }
 
 fn item_event_contains_sensitive_mcp_call(
@@ -1330,110 +1144,6 @@ fn agent_message_text(content: &[AgentMessageContent]) -> String {
         .collect::<String>()
 }
 
-fn unique_private_temp_path(parent: &Path, prefix: &str) -> anyhow::Result<PathBuf> {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("read system clock")?
-        .as_nanos();
-    Ok(parent.join(format!(".{prefix}.{}.{nonce}.tmp", std::process::id())))
-}
-
-fn write_private_file_new(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(path)
-        .with_context(|| format!("create private temporary file {}", path.display()))?;
-    file.write_all(bytes)
-        .context("write private temporary file")?;
-    file.sync_all().context("sync private temporary file")?;
-    Ok(())
-}
-
-fn redact_private_message_payload(value: &mut Value) -> usize {
-    if value.get("type") != Some(&json!("response_item")) {
-        return 0;
-    }
-    let Some(payload) = value.get_mut("payload").and_then(Value::as_object_mut) else {
-        return 0;
-    };
-    let is_tool_call = matches!(
-        payload.get("type").and_then(Value::as_str),
-        Some("custom_tool_call") | Some("function_call")
-    );
-    if is_tool_call {
-        let contains_private_call = payload.get("name").and_then(Value::as_str)
-            == Some("send_message")
-            || payload
-                .get("input")
-                .and_then(Value::as_str)
-                .is_some_and(|input| input.contains("send_message"))
-            || payload
-                .get("arguments")
-                .is_some_and(|arguments| arguments.to_string().contains("send_message"));
-        if contains_private_call {
-            if payload.contains_key("input") {
-                payload.insert(
-                    "input".to_string(),
-                    Value::String("// private send_message invocation redacted".to_string()),
-                );
-            }
-            if payload.contains_key("arguments") {
-                payload.insert("arguments".to_string(), json!({"redacted": true}));
-            }
-            return 1;
-        }
-    }
-    if payload.get("type").and_then(Value::as_str) == Some("custom_tool_call_output")
-        && payload
-            .get("output")
-            .is_some_and(|output| output.to_string().contains("send_message"))
-    {
-        payload.insert(
-            "output".to_string(),
-            json!([{
-                "type": "input_text",
-                "text": "private send_message execution redacted"
-            }]),
-        );
-        return 1;
-    }
-    0
-}
-
-fn redact_private_message_calls_in_rollout(path: &Path) -> anyhow::Result<usize> {
-    let contents = fs::read_to_string(path).context("read private-message rollout")?;
-    let mut output = String::with_capacity(contents.len());
-    let mut redacted = 0;
-    for raw_line in contents.lines() {
-        let mut value: Value =
-            serde_json::from_str(raw_line).context("parse private-message rollout line")?;
-        let line_redactions = redact_private_message_payload(&mut value);
-        redacted += line_redactions;
-        if line_redactions == 0 {
-            output.push_str(raw_line);
-        } else {
-            output.push_str(&serde_json::to_string(&value)?);
-        }
-        output.push('\n');
-    }
-    if redacted == 0 {
-        return Ok(0);
-    }
-    let parent = path
-        .parent()
-        .context("private-message rollout has no parent")?;
-    let temporary = unique_private_temp_path(parent, "redacted-rollout")?;
-    write_private_file_new(&temporary, output.as_bytes())?;
-    fs::rename(&temporary, path).context("atomically replace private-message rollout")?;
-    Ok(redacted)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1456,29 +1166,6 @@ mod tests {
     const ARGUMENT_SENTINEL: &str = "sensitive-argument-sentinel";
     const RESULT_SENTINEL: &str = "sensitive-result-sentinel";
     const ERROR_SENTINEL: &str = "sensitive-error-sentinel";
-    const PRIVATE_MESSAGE_SENTINEL: &str = "private-message-body-sentinel";
-
-    struct TestDirectory(PathBuf);
-
-    impl TestDirectory {
-        fn new(label: &str) -> Self {
-            let path = unique_private_temp_path(&std::env::temp_dir(), label)
-                .expect("make unique test directory path");
-            fs::create_dir(&path).expect("create test directory");
-            Self(path)
-        }
-
-        fn path(&self) -> &Path {
-            &self.0
-        }
-    }
-
-    impl Drop for TestDirectory {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
     fn sensitive_mcp_tools() -> Vec<McpToolSelector> {
         vec![McpToolSelector {
             server: "benchmark".to_string(),
@@ -1534,7 +1221,7 @@ mod tests {
 
     #[test]
     fn native_tools_never_include_submit_solution() {
-        let names = metalanguage_dynamic_tools(None)
+        let names = metalanguage_dynamic_tools()
             .into_iter()
             .map(|tool| dynamic_tool_name(&tool).to_string())
             .collect::<Vec<_>>();
@@ -1547,6 +1234,7 @@ mod tests {
         let mut event = HookCompletedEvent {
             turn_id: Some("turn".to_string()),
             run: HookRunSummary {
+                builtin: false,
                 id: "managed-context-stop".to_string(),
                 event_name: HookEventName::PreCompact,
                 handler_type: HookHandlerType::Command,
@@ -1599,8 +1287,45 @@ mod tests {
     }
 
     #[test]
+    fn directory_agents_hook_observes_prompts_and_completed_tools() {
+        let overrides =
+            managed_hook_cli_overrides(Some("python3 /private/directory_agents_hook.py"))
+                .expect("managed directory hook overrides");
+        let names = overrides
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec![
+                "hooks.PreCompact",
+                "hooks.UserPromptSubmit",
+                "hooks.PostToolUse",
+                "hooks.state",
+            ]
+        );
+        let value = overrides
+            .iter()
+            .find(|(key, _)| key == "hooks.PostToolUse")
+            .map(|(_, value)| value)
+            .expect("configured tool hook");
+        let hook = serde_json::to_value(value).expect("serialize configured tool hook");
+        assert_eq!(
+            hook[0]["hooks"][0]["command"],
+            "python3 /private/directory_agents_hook.py"
+        );
+        assert_eq!(hook[0]["hooks"][0]["async"], false);
+        let state = overrides
+            .iter()
+            .find(|(name, _)| name == "hooks.state")
+            .and_then(|(_, value)| serde_json::to_value(value).ok())
+            .expect("serialize managed hook state");
+        assert_eq!(state.as_object().map(|entries| entries.len()), Some(3));
+    }
+
+    #[test]
     fn spawn_child_schema_requires_prompt_and_workspace_dir() {
-        let mut tools = metalanguage_dynamic_tools(None);
+        let mut tools = metalanguage_dynamic_tools();
         let DynamicToolSpec::Function(function) = tools.remove(0) else {
             panic!("spawn_child must be a function tool");
         };
@@ -1609,178 +1334,6 @@ mod tests {
             json!(["prompt", "workspace_dir"])
         );
         assert!(function.description.contains("parent rollout continues"));
-    }
-
-    #[test]
-    fn send_message_schema_uses_only_supervisor_recipient_names() {
-        let private_inbox = NormalizedPrivateInbox {
-            own_inbox: PathBuf::from("/tmp/daniel/messages"),
-            recipient_inboxes: vec![
-                ("Noah".to_string(), PathBuf::from("/tmp/noah/messages")),
-                (
-                    "Elizabeth".to_string(),
-                    PathBuf::from("/tmp/elizabeth/messages"),
-                ),
-            ],
-        };
-        let tools = metalanguage_dynamic_tools(Some(&private_inbox));
-        let names = tools.iter().map(dynamic_tool_name).collect::<Vec<_>>();
-        assert_eq!(names, vec!["spawn_child", "send_message"]);
-        let DynamicToolSpec::Function(send_message) = &tools[1] else {
-            panic!("send_message must be a function tool");
-        };
-        assert_eq!(
-            send_message.input_schema["properties"]["recipient"]["enum"],
-            json!(["Noah", "Elizabeth"])
-        );
-        assert_eq!(
-            send_message.input_schema["required"],
-            json!(["recipient", "message"])
-        );
-        assert_eq!(send_message.input_schema["additionalProperties"], false);
-        assert!(
-            send_message.input_schema["properties"]["message"]
-                .get("maxLength")
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn private_message_items_are_omitted_from_runner_notifications() {
-        let item = item_completed(TurnItem::DynamicToolCall(DynamicToolCallItem {
-            id: "message-call".to_string(),
-            namespace: None,
-            tool: "send_message".to_string(),
-            arguments: json!({
-                "recipient": "Noah",
-                "message": PRIVATE_MESSAGE_SENTINEL,
-            }),
-            status: DynamicToolCallStatus::Completed,
-            content_items: None,
-            success: Some(true),
-            error: None,
-            duration: Some(Duration::from_millis(1)),
-        }));
-        let notification = mapped_item_notification(&item, "thread", Some("turn"), &[])
-            .expect("map item notification");
-        assert!(notification.is_none());
-    }
-
-    #[test]
-    fn persisted_private_calls_are_redacted() {
-        let directory = TestDirectory::new("private-rollout");
-        let rollout = directory.path().join("rollout.jsonl");
-        let original = [
-            json!({
-                "type": "session_meta",
-                "payload": {
-                    "dynamic_tools": [
-                        {"name": "spawn_child"},
-                        {"name": "send_message"},
-                    ]
-                }
-            }),
-            json!({
-                "type": "response_item",
-                "payload": {
-                    "type": "custom_tool_call",
-                    "name": "functions.exec",
-                    "input": format!(
-                        "await tools.send_message({{message: {:?}}})",
-                        PRIVATE_MESSAGE_SENTINEL
-                    )
-                }
-            }),
-            json!({
-                "type": "response_item",
-                "payload": {
-                    "type": "custom_tool_call_output",
-                    "output": [{
-                        "type": "input_text",
-                        "text": "send_message delivered"
-                    }]
-                }
-            }),
-        ]
-        .into_iter()
-        .map(|value| value.to_string())
-        .collect::<Vec<_>>()
-        .join("\n");
-        fs::write(&rollout, format!("{original}\n")).expect("write rollout");
-
-        assert_eq!(
-            redact_private_message_calls_in_rollout(&rollout).expect("redact rollout"),
-            2
-        );
-        let redacted = fs::read_to_string(&rollout).expect("read redacted rollout");
-        assert!(!redacted.contains(PRIVATE_MESSAGE_SENTINEL));
-
-        assert!(redacted.contains("send_message"));
-        assert_eq!(
-            fs::read_to_string(&rollout).expect("research rollout remains present"),
-            redacted
-        );
-    }
-
-    #[test]
-    fn private_inbox_policy_denies_sibling_inbox_but_allows_recipient_own_read() {
-        let directory = TestDirectory::new("private-policy");
-        let daniel = directory.path().join("daniel");
-        let noah = directory.path().join("noah");
-        let daniel_messages = daniel.join("messages");
-        let noah_messages = noah.join("messages");
-        fs::create_dir_all(&daniel_messages).expect("create Daniel inbox");
-        fs::create_dir_all(&noah_messages).expect("create Noah inbox");
-        let daniel_message = daniel_messages.join("000001_Noah.md");
-        let noah_message = noah_messages.join("000002_Daniel.md");
-        let noah_public = noah.join("public.txt");
-        fs::write(&daniel_message, "for Daniel").expect("write Daniel message");
-        fs::write(&noah_message, "for Noah").expect("write Noah message");
-        fs::write(&noah_public, "ordinary sibling data").expect("write sibling file");
-
-        let daniel_write_root =
-            AbsolutePathBuf::from_absolute_path(&daniel).expect("convert Daniel write root");
-        let daniel_private = NormalizedPrivateInbox {
-            own_inbox: daniel_messages.clone(),
-            recipient_inboxes: vec![("Noah".to_string(), noah_messages.clone())],
-        };
-        let (_, daniel_profile) = sandbox_configuration(
-            SandboxMode::WorkspaceWrite,
-            std::slice::from_ref(&daniel_write_root),
-            &daniel_write_root,
-            Some(&daniel_private),
-            &[],
-        )
-        .expect("build Daniel profile");
-        let daniel_policy = daniel_profile
-            .expect("Daniel profile")
-            .file_system_sandbox_policy();
-        assert!(daniel_policy.can_read_path_with_cwd(&daniel_message, &daniel));
-        assert!(!daniel_policy.can_write_path_with_cwd(&daniel_message, &daniel));
-        assert!(!daniel_policy.can_read_path_with_cwd(&noah_message, &daniel));
-        assert!(!daniel_policy.can_write_path_with_cwd(&noah_message, &daniel));
-        assert!(daniel_policy.can_read_path_with_cwd(&noah_public, &daniel));
-
-        let noah_write_root =
-            AbsolutePathBuf::from_absolute_path(&noah).expect("convert Noah write root");
-        let noah_private = NormalizedPrivateInbox {
-            own_inbox: noah_messages.clone(),
-            recipient_inboxes: vec![("Daniel".to_string(), daniel_messages.clone())],
-        };
-        let (_, noah_profile) = sandbox_configuration(
-            SandboxMode::WorkspaceWrite,
-            std::slice::from_ref(&noah_write_root),
-            &noah_write_root,
-            Some(&noah_private),
-            &[],
-        )
-        .expect("build Noah profile");
-        let noah_policy = noah_profile
-            .expect("Noah profile")
-            .file_system_sandbox_policy();
-        assert!(noah_policy.can_read_path_with_cwd(&noah_message, &noah));
-        assert!(!noah_policy.can_read_path_with_cwd(&daniel_message, &noah));
-        assert!(noah_policy.can_read_path_with_cwd(&noah_public, &noah));
     }
 
     #[test]
@@ -1929,188 +1482,39 @@ mod tests {
     }
 }
 
-fn normalize_private_inbox(
-    request: Option<&PrivateInboxRequest>,
-) -> anyhow::Result<Option<NormalizedPrivateInbox>> {
-    let Some(request) = request else {
-        return Ok(None);
-    };
-    if request.capability_identity != PRIVATE_INBOX_CAPABILITY_IDENTITY {
-        bail!("unsupported private-inbox capability identity");
-    }
-    if !HUMAN_ROSTER.contains(&request.sender.as_str()) {
-        bail!("private-inbox sender is not in the fixed roster");
-    }
-    if request.own_inbox.file_name().and_then(|name| name.to_str()) != Some("messages")
-        || request.own_inbox.is_symlink()
-        || !request.own_inbox.is_dir()
-    {
-        bail!("private-inbox own path is invalid");
-    }
-    let own_inbox =
-        normalize_existing_path(&request.own_inbox).context("normalize private-inbox own path")?;
-    let mut recipient_inboxes = Vec::new();
-    for name in HUMAN_ROSTER {
-        let Some(path) = request.recipient_inboxes.get(name) else {
-            continue;
-        };
-        if name == request.sender
-            || path.file_name().and_then(|value| value.to_str()) != Some("messages")
-            || path.is_symlink()
-            || !path.is_dir()
-        {
-            bail!("private-inbox recipient mapping is invalid");
-        }
-        let normalized =
-            normalize_existing_path(path).context("normalize private-inbox recipient path")?;
-        if normalized == own_inbox
-            || recipient_inboxes
-                .iter()
-                .any(|(_, existing): &(String, PathBuf)| existing == &normalized)
-        {
-            bail!("private-inbox paths must be unique");
-        }
-        recipient_inboxes.push((name.to_string(), normalized));
-    }
-    if recipient_inboxes.len() != request.recipient_inboxes.len() {
-        bail!("private-inbox recipient is not in the fixed roster");
-    }
-    Ok(Some(NormalizedPrivateInbox {
-        own_inbox,
-        recipient_inboxes,
-    }))
-}
-
-fn normalize_private_evidence_protection(
-    request: Option<&PrivateEvidenceProtectionRequest>,
-    codex_home: &Path,
-) -> anyhow::Result<Vec<PathBuf>> {
-    let Some(request) = request else {
-        return Ok(Vec::new());
-    };
-    if request.capability_identity != PRIVATE_INBOX_CAPABILITY_IDENTITY {
-        bail!("unsupported private-evidence capability identity");
-    }
-    let read_denied_paths = request
-        .read_denied_paths
-        .iter()
-        .map(|path| normalize_private_read_denial(path))
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    let sessions = normalize_existing_path(&codex_home.join("sessions"))
-        .context("normalize protected Codex sessions path")?;
-    if !read_denied_paths.iter().any(|path| path == &sessions) {
-        bail!("private evidence protection must deny the Codex sessions root");
-    }
-    Ok(read_denied_paths)
-}
-
-fn normalize_private_read_denial(path: &Path) -> anyhow::Result<PathBuf> {
-    if path.exists() {
-        return normalize_existing_path(path).context("normalize private read denial");
-    }
-    if path.is_symlink() || !path.is_absolute() {
-        bail!("private read-denial path must be absolute and not a symlink");
-    }
-    let parent = path
-        .parent()
-        .context("private read-denial path has no parent")?;
-    let name = path
-        .file_name()
-        .context("private read-denial path has no final component")?;
-    Ok(normalize_existing_path(parent)
-        .context("normalize private read-denial parent")?
-        .join(name))
-}
-
 fn sandbox_configuration(
     sandbox_mode: SandboxMode,
     additional_writable_roots: &[AbsolutePathBuf],
     shared_archives_root: &AbsolutePathBuf,
-    private_inbox: Option<&NormalizedPrivateInbox>,
-    protected_read_paths: &[PathBuf],
 ) -> anyhow::Result<(Option<SandboxMode>, Option<PermissionProfile>)> {
-    if private_inbox.is_none() && protected_read_paths.is_empty() {
-        return Ok(match sandbox_mode {
-            SandboxMode::WorkspaceWrite => (
-                None,
-                Some(PermissionProfile::workspace_write_with(
-                    additional_writable_roots,
-                    NetworkSandboxPolicy::Enabled,
-                    /*exclude_tmpdir_env_var*/ false,
-                    /*exclude_slash_tmp*/ false,
-                )),
-            ),
-            SandboxMode::ReadOnly => {
-                let base_profile = PermissionProfile::read_only();
-                let network = base_profile.network_sandbox_policy();
-                let mut file_system = base_profile.file_system_sandbox_policy();
-                file_system.entries.push(FileSystemSandboxEntry::new(
-                    FileSystemPath::from(shared_archives_root.clone()),
-                    FileSystemAccessMode::Write,
-                ));
-                (
-                    None,
-                    Some(PermissionProfile::from_runtime_permissions(
-                        &file_system,
-                        network,
-                    )),
-                )
-            }
-            SandboxMode::DangerFullAccess => (Some(sandbox_mode), None),
-        });
-    }
-    if matches!(sandbox_mode, SandboxMode::DangerFullAccess) {
-        bail!("private inbox requires a managed Codex sandbox");
-    }
-
-    let base_profile = match sandbox_mode {
-        SandboxMode::WorkspaceWrite => PermissionProfile::workspace_write_with(
-            additional_writable_roots,
-            NetworkSandboxPolicy::Enabled,
-            /*exclude_tmpdir_env_var*/ false,
-            /*exclude_slash_tmp*/ false,
+    Ok(match sandbox_mode {
+        SandboxMode::WorkspaceWrite => (
+            None,
+            Some(PermissionProfile::workspace_write_with(
+                additional_writable_roots,
+                NetworkSandboxPolicy::Enabled,
+                /*exclude_tmpdir_env_var*/ false,
+                /*exclude_slash_tmp*/ false,
+            )),
         ),
-        SandboxMode::ReadOnly => PermissionProfile::read_only(),
-        SandboxMode::DangerFullAccess => unreachable!("danger-full-access rejected above"),
-    };
-    let network = base_profile.network_sandbox_policy();
-    let mut file_system = base_profile.file_system_sandbox_policy();
-    if matches!(sandbox_mode, SandboxMode::ReadOnly) {
-        file_system.entries.push(FileSystemSandboxEntry::new(
-            FileSystemPath::from(shared_archives_root.clone()),
-            FileSystemAccessMode::Write,
-        ));
-    }
-    if let Some(private_inbox) = private_inbox {
-        file_system.entries.push(FileSystemSandboxEntry::new(
-            FileSystemPath::from(
-                AbsolutePathBuf::from_absolute_path(&private_inbox.own_inbox)
-                    .context("convert private-inbox own path")?,
-            ),
-            FileSystemAccessMode::Read,
-        ));
-    }
-    for path in private_inbox
-        .map(|private_inbox| private_inbox.recipient_inboxes.iter().map(|(_, path)| path))
-        .into_iter()
-        .flatten()
-        .chain(protected_read_paths.iter())
-    {
-        file_system.entries.push(FileSystemSandboxEntry::new(
-            FileSystemPath::from(
-                AbsolutePathBuf::from_absolute_path(path)
-                    .context("convert private-inbox deny path")?,
-            ),
-            FileSystemAccessMode::Deny,
-        ));
-    }
-    Ok((
-        None,
-        Some(PermissionProfile::from_runtime_permissions(
-            &file_system,
-            network,
-        )),
-    ))
+        SandboxMode::ReadOnly => {
+            let base_profile = PermissionProfile::read_only();
+            let network = base_profile.network_sandbox_policy();
+            let mut file_system = base_profile.file_system_sandbox_policy();
+            file_system.entries.push(FileSystemSandboxEntry::new(
+                FileSystemPath::from(shared_archives_root.clone()),
+                FileSystemAccessMode::Write,
+            ));
+            (
+                None,
+                Some(PermissionProfile::from_runtime_permissions(
+                    &file_system,
+                    network,
+                )),
+            )
+        }
+        SandboxMode::DangerFullAccess => (Some(sandbox_mode), None),
+    })
 }
 
 fn parse_sandbox_mode(value: Option<&str>) -> anyhow::Result<SandboxMode> {

@@ -82,11 +82,6 @@ export type RunnerRequest = {
   provider_env_names?: string[]
   custom_provider?: CustomProviderInput | null
   spawn_child_handler_command?: string[] | null
-  private_inbox?: {
-    capability_identity: string
-    sender: string
-    recipients: string[]
-  } | null
   mcp_servers?: Record<string, McpServerInput>
   sensitive_mcp_tools?: McpToolSelector[]
   sandbox?: {
@@ -97,7 +92,6 @@ export type RunnerRequest = {
     read_only_mounts?: Array<{ source: string; target: string }>
     writable_roots?: string[]
     masked_paths?: string[]
-    masked_directories?: string[]
   }
   test_provider_config?: Record<string, unknown>
 }
@@ -577,7 +571,7 @@ export class EventNormalizer {
       const previousStatus = this.toolStatus.get(partId)
       if (previousStatus === status) return { events: output, terminal: "continue" }
       this.toolStatus.set(partId, status)
-      const sensitive = tool === "send_message" || this.sensitiveToolIds.has(tool)
+      const sensitive = this.sensitiveToolIds.has(tool)
       const timing = isRecord(state.time) ? state.time : {}
       const startedAt = nonnegativeNumber(timing.start)
       const completedAt = nonnegativeNumber(timing.end)
