@@ -210,9 +210,13 @@ Useful flags:
 - `--codex-sandbox-mode read-only|workspace-write|danger-full-access`: choose the
   rollout sandbox mode.
 - `--codex-base-instructions-mode minimal`: Codex receives `.` instead of its
-  model-catalog instructions. Native project-document loading is disabled; the
-  managed hook injects and atomically marks the actual rollout-root `AGENTS.md`
-  on the first user prompt.
+  model-catalog instructions. Native project-document loading is disabled; a
+  shared loader validates, injects, and atomically marks the actual rollout-root
+  `AGENTS.md` while constructing the first backend request. The exact logical
+  user prompt remains `Begin.` in that same request: Codex uses developer
+  instructions, direct OpenRouter uses a developer input item, and OpenCode
+  uses its prompt-level system field. This applies equally to fresh bootstrap,
+  inherited-child, and bootstrap-reinitialized workspaces.
 
   Before each subsequent tool dispatch, the same loader resolves the tool's
   exact directory or explicit workdir. For shell tools it additionally resolves
@@ -251,13 +255,15 @@ Useful flags:
   becomes resolvable only after execution. It does not infer dynamic shell
   values or a final PWD.
 
-  Codex native tools and Code Mode nested tools use trusted `UserPromptSubmit`,
-  `PreToolUse`, and `PostToolUse` hooks. Direct OpenRouter gates at its dispatch
-  boundary. OpenCode's generated plugin gates native Bash and other native tools
-  through `tool.execute.before`, retains `tool.execute.after` fallback, and adds
-  newly activated context at its next system-transform boundary. OpenCode 1.18.29
-  Code Mode exposes only MCP calls inside its confined program, not native Bash;
-  those nested MCP calls traverse the same plugin callbacks.
+  Codex native tools and Code Mode nested tools use the trusted `PreToolUse` and
+  `PostToolUse` hooks; the redundant initial `UserPromptSubmit` hook is not
+  installed. Direct OpenRouter gates at its dispatch boundary.
+  OpenCode's generated plugin gates native Bash and other native tools through
+  `tool.execute.before`, then retains `tool.execute.after` fallback and injects
+  context at the next system-transform boundary. OpenCode 1.18.29 Code Mode
+  exposes only MCP calls inside its confined program, not native Bash; those
+  nested MCP calls do traverse the same plugin callbacks, while there is no
+  Code Mode native-shell boundary to intercept.
 - `--codex-initial-prompt TEXT`: choose the first user message.
 
 Example using the minimal base placeholder and automatic root `AGENTS.md` loading:

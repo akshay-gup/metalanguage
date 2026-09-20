@@ -281,6 +281,7 @@ def run_codex_rollout(
     timeout_seconds: int,
     sandbox_mode: str = "workspace-write",
     initial_user_text: str = "Begin.",
+    initial_developer_context: str | None = None,
     base_instructions: str | None = None,
     spawn_child_handler_context_path: Path | None = None,
     benchmark_mcp_servers: dict[str, Any] | None = None,
@@ -315,6 +316,8 @@ def run_codex_rollout(
         "workspace_roots": workspace_roots,
         "additional_writable_roots": additional_writable_roots,
     }
+    if initial_developer_context is not None and initial_developer_context.strip():
+        request["initial_developer_context"] = initial_developer_context
     if spawn_child_handler_context_path is not None:
         request["spawn_child_handler_command"] = [
             sys.executable,

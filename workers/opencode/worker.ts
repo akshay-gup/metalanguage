@@ -78,6 +78,13 @@ function seconds(value: number | null | undefined, fallback: number): number {
   return Math.max(1, Number.isFinite(value) ? Number(value) : fallback)
 }
 
+export function initialSystemInstructions(request: RunnerRequest): string | undefined {
+  const sections = [request.system_instructions, request.initial_system_context].filter(
+    (value): value is string => typeof value === "string" && Boolean(value.trim()),
+  )
+  return sections.length ? sections.join("\n\n") : undefined
+}
+
 function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds))
 }
@@ -483,8 +490,9 @@ async function isolatedEnvironment(
   if (request.sandbox?.masked_paths?.[0]) {
     env.METALANGUAGE_OPENCODE_MASKED_PATH = request.sandbox.masked_paths[0]
   }
-  if (request.system_instructions?.trim()) {
-    env.METALANGUAGE_OPENCODE_SYSTEM_INSTRUCTIONS = request.system_instructions
+  const initialSystem = initialSystemInstructions(request)
+  if (initialSystem !== undefined) {
+    env.METALANGUAGE_OPENCODE_SYSTEM_INSTRUCTIONS = initialSystem
   }
   if (request.auth_file) {
     const auth = await readFile(request.auth_file, "utf8")
@@ -906,11 +914,12 @@ async function runSession(
     cwd: api.directory,
   })
 
+  const initialSystem = initialSystemInstructions(request)
   const body: SessionPromptBody = {
     messageID: messageId(),
     model: { providerID: providerId, modelID: modelId },
     parts: [{ type: "text", text: request.initial_user_text ?? "Read AGENTS.md." }],
-    ...(request.system_instructions?.trim() ? { system: request.system_instructions } : {}),
+    ...(initialSystem !== undefined ? { system: initialSystem } : {}),
     ...(request.agent ? { agent: request.agent } : {}),
     ...(request.variant ? { variant: request.variant } : {}),
   }

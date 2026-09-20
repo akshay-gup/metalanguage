@@ -91,6 +91,7 @@ struct RunnerRequest {
     cwd: PathBuf,
     codex_home: Option<PathBuf>,
     initial_user_text: Option<String>,
+    initial_developer_context: Option<String>,
     timeout_seconds: Option<u64>,
     sandbox_mode: Option<String>,
     workspace_roots: Option<Vec<PathBuf>>,
@@ -189,6 +190,9 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
     let mut overrides = ConfigOverrides {
         model: request.model.filter(|value| !value.trim().is_empty()),
         base_instructions: Some(".".to_string()),
+        developer_instructions: request
+            .initial_developer_context
+            .filter(|value| !value.trim().is_empty()),
         cwd: Some(cwd.clone()),
         approval_policy: Some(AskForApproval::Never),
         sandbox_mode: sandbox_mode_override,
@@ -747,26 +751,6 @@ fn managed_hook_cli_overrides(
                 additional_context_limit: Some(0),
             }],
         };
-        let prompt_group = post_group.clone();
-        let prompt_identity = HookTrustIdentity {
-            event_name: "user_prompt_submit",
-            group: prompt_group.clone(),
-        };
-        let prompt_identity_toml =
-            TomlValue::try_from(prompt_identity).context("serialize root AGENTS hook identity")?;
-        let prompt_state_key = format!("{}:user_prompt_submit:0:0", session_flags_path.display());
-        states.insert(
-            prompt_state_key,
-            HookStateToml {
-                enabled: Some(true),
-                trusted_hash: Some(version_for_toml(&prompt_identity_toml)),
-            },
-        );
-        overrides.push((
-            "hooks.UserPromptSubmit".to_string(),
-            TomlValue::try_from(vec![prompt_group]).context("serialize root AGENTS hook")?,
-        ));
-
         let pre_group = post_group.clone();
         let pre_identity = HookTrustIdentity {
             event_name: "pre_tool_use",
@@ -1319,7 +1303,6 @@ mod tests {
             names,
             vec![
                 "hooks.PreCompact",
-                "hooks.UserPromptSubmit",
                 "hooks.PreToolUse",
                 "hooks.PostToolUse",
                 "hooks.state",
@@ -1353,7 +1336,24 @@ mod tests {
             .find(|(name, _)| name == "hooks.state")
             .and_then(|(_, value)| serde_json::to_value(value).ok())
             .expect("serialize managed hook state");
-        assert_eq!(state.as_object().map(|entries| entries.len()), Some(4));
+        assert_eq!(state.as_object().map(|entries| entries.len()), Some(3));
+    }
+
+    #[test]
+    fn initial_context_is_a_developer_field_alongside_exact_user_text() {
+        let request = serde_json::from_value::<RunnerRequest>(json!({
+            "cwd": "/workspace",
+            "shared_archives_root": "/archives",
+            "initial_user_text": "Begin.",
+            "initial_developer_context": "<CONTEXT>\nroot\n</CONTEXT>"
+        }))
+        .expect("deserialize initial request");
+
+        assert_eq!(request.initial_user_text.as_deref(), Some("Begin."));
+        assert_eq!(
+            request.initial_developer_context.as_deref(),
+            Some("<CONTEXT>\nroot\n</CONTEXT>")
+        );
     }
 
     #[test]

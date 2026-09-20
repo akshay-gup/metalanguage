@@ -9,8 +9,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from main_loop import run_worker
-from utils.directory_agents_hook import pre_tool_context_gate
+from main_loop import run_codex_worker, run_opencode_worker, run_worker
+from utils.directory_agents_hook import (
+    initial_context_activation,
+    pre_tool_context_gate,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -43,8 +46,11 @@ class DirectoryAgentsHookTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        initial = self._invoke({"hook_event_name": "UserPromptSubmit"})
-        self.assertIn("root context", initial)
+        initial = initial_context_activation(
+            json.loads(self.context_path.read_text(encoding="utf-8")),
+            self.control / "directory_agents_seen",
+        )
+        self.assertIn("root context", initial.additional_context)
 
     def _invoke_response(self, payload: dict[str, object]) -> dict[str, object]:
         completed = subprocess.run(
@@ -114,6 +120,9 @@ class DirectoryAgentsHookTests(unittest.TestCase):
             .splitlines()
         )
         self.assertEqual(records[-1].split("\t")[2], "pre_tool_gate")
+
+    def test_user_prompt_hook_is_disabled_after_direct_initial_delivery(self) -> None:
+        self.assertEqual(self._invoke({"hook_event_name": "UserPromptSubmit"}), "")
 
     def test_pre_tool_changed_digest_defers_again(self) -> None:
         self.assertIn("project context", self._pre("cd archives/project"))
@@ -378,6 +387,194 @@ class DirectoryAgentsHookTests(unittest.TestCase):
         )
 
 
+class InitialDirectoryContextBackendTests(unittest.TestCase):
+    def test_each_rollout_workspace_kind_claims_its_actual_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for lifecycle in ("fresh-bootstrap", "inherited-child", "bootstrap-reinitialized"):
+                with self.subTest(lifecycle=lifecycle):
+                    workdir = root / lifecycle / "work"
+                    state_path = root / lifecycle / "control" / "directory_agents_seen"
+                    workdir.mkdir(parents=True)
+                    content = f"{lifecycle} root\n"
+                    (workdir / "AGENTS.md").write_text(content, encoding="utf-8")
+                    context = {"workdir": str(workdir)}
+
+                    initial = initial_context_activation(context, state_path)
+
+                    self.assertEqual(
+                        initial.additional_context,
+                        f"<CONTEXT>\n{content.rstrip()}\n</CONTEXT>",
+                    )
+                    self.assertEqual(initial.activation, "initial")
+                    self.assertFalse(
+                        pre_tool_context_gate(
+                            context,
+                            {
+                                "hook_event_name": "PreToolUse",
+                                "tool_name": "bash",
+                                "tool_input": {"command": "pwd"},
+                                "cwd": str(workdir),
+                            },
+                            state_path,
+                        ).deferred
+                    )
+                    (workdir / "AGENTS.md").write_text(
+                        f"{lifecycle} revised\n",
+                        encoding="utf-8",
+                    )
+                    self.assertTrue(
+                        pre_tool_context_gate(
+                            context,
+                            {
+                                "hook_event_name": "PreToolUse",
+                                "tool_name": "bash",
+                                "tool_input": {"command": "pwd"},
+                                "cwd": str(workdir),
+                            },
+                            state_path,
+                        ).deferred
+                    )
+                    self.assertFalse(
+                        pre_tool_context_gate(
+                            context,
+                            {
+                                "hook_event_name": "PreToolUse",
+                                "tool_name": "bash",
+                                "tool_input": {"command": "pwd"},
+                                "cwd": str(workdir),
+                            },
+                            state_path,
+                        ).deferred
+                    )
+
+    def test_codex_initial_context_uses_developer_request_field(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            paths = {
+                name: root / name
+                for name in ("work", "control", "state", "codex", "seed", "archives", "shared")
+            }
+            for path in paths.values():
+                path.mkdir()
+            (paths["work"] / "AGENTS.md").write_text("codex root\n", encoding="utf-8")
+            context = {
+                "workdir": str(paths["work"]),
+                "shared_archives_root": str(paths["archives"]),
+                "shared_workspace_dir": str(paths["shared"]),
+            }
+            context_path = paths["control"] / "continuation_context.json"
+            context_path.write_text(json.dumps(context), encoding="utf-8")
+            events: list[tuple[str, dict[str, object]]] = []
+            completed = {
+                "final_text": "done",
+                "status": "completed",
+                "stop_reason": "final_message",
+                "error_code": None,
+                "error_message": None,
+            }
+
+            with patch("main_loop.run_codex_rollout", return_value=completed) as rollout:
+                run_codex_worker(
+                    runner_bin=root / "runner",
+                    model="gpt-5.6-sol",
+                    workdir=paths["work"],
+                    control_dir=paths["control"],
+                    worker_state_dir=paths["state"],
+                    codex_home=paths["codex"],
+                    seed_output_dir=paths["seed"],
+                    shared_archives_root=paths["archives"],
+                    shared_workspace_dir=paths["shared"],
+                    rollout_username="rollout",
+                    timeout_seconds=10,
+                    sandbox_mode="workspace-write",
+                    initial_user_text="Begin.",
+                    continuation_context=context,
+                    continuation_context_path=context_path,
+                    progress_callback=lambda event, **fields: events.append((event, fields)),
+                )
+
+            kwargs = rollout.call_args.kwargs
+            self.assertEqual(kwargs["initial_user_text"], "Begin.")
+            self.assertEqual(
+                kwargs["initial_developer_context"],
+                "<CONTEXT>\ncodex root\n</CONTEXT>",
+            )
+            self.assertEqual(events[0][1]["activation"], "initial")
+            record = context_path.with_name("directory_agents_seen").read_text(encoding="utf-8")
+            self.assertEqual(record.splitlines()[0].split("\t")[2], "initial")
+            self.assertFalse(
+                pre_tool_context_gate(
+                    context,
+                    {
+                        "hook_event_name": "PreToolUse",
+                        "tool_name": "exec_command",
+                        "tool_input": {"command": "pwd"},
+                        "cwd": str(paths["work"]),
+                    },
+                    context_path.with_name("directory_agents_seen"),
+                ).deferred
+            )
+
+    def test_opencode_initial_context_uses_system_request_field(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            paths = {name: root / name for name in ("work", "control", "state")}
+            for path in paths.values():
+                path.mkdir()
+            (paths["work"] / "AGENTS.md").write_text("opencode root\n", encoding="utf-8")
+            context = {"workdir": str(paths["work"])}
+            context_path = paths["control"] / "continuation_context.json"
+            context_path.write_text(json.dumps(context), encoding="utf-8")
+            completed = {
+                "final_text": "done",
+                "status": "completed",
+                "stop_reason": "final_message",
+                "error_code": None,
+                "error_message": None,
+                "error_http_status": None,
+                "error_retryable": None,
+            }
+
+            with patch("main_loop.run_opencode_rollout", return_value=completed) as rollout:
+                run_opencode_worker(
+                    worker_script=root / "worker.ts",
+                    bun_bin=root / "bun",
+                    opencode_bin=root / "opencode",
+                    model="openrouter/gpt-5.6-sol",
+                    workdir=paths["work"],
+                    control_dir=paths["control"],
+                    worker_state_dir=paths["state"],
+                    timeout_seconds=10,
+                    initial_user_text="Begin.",
+                    system_instructions=".",
+                    continuation_context=context,
+                    continuation_context_path=context_path,
+                )
+
+            kwargs = rollout.call_args.kwargs
+            self.assertEqual(kwargs["initial_user_text"], "Begin.")
+            self.assertEqual(kwargs["system_instructions"], ".")
+            self.assertEqual(
+                kwargs["initial_system_context"],
+                "<CONTEXT>\nopencode root\n</CONTEXT>",
+            )
+            record = context_path.with_name("directory_agents_seen").read_text(encoding="utf-8")
+            self.assertEqual(record.splitlines()[0].split("\t")[2], "initial")
+            self.assertFalse(
+                pre_tool_context_gate(
+                    context,
+                    {
+                        "hook_event_name": "PreToolUse",
+                        "tool_name": "bash",
+                        "tool_input": {"command": "pwd"},
+                        "cwd": str(paths["work"]),
+                    },
+                    context_path.with_name("directory_agents_seen"),
+                ).deferred
+            )
+
+
 class OpenRouterDirectoryAgentsTests(unittest.TestCase):
     def test_pre_gate_has_no_side_effect_and_repeat_preserves_tool_result(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -553,6 +750,69 @@ class OpenRouterDirectoryAgentsTests(unittest.TestCase):
             second_result = json.loads(second_outputs[-1]["output"])
             self.assertEqual(second_result["exit_code"], 0)
             self.assertEqual(second_result["stdout"], f"{workdir.resolve()}\n")
+
+    def test_root_context_is_injected_and_marked_before_first_inference(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workdir = root / "work"
+            archives = workdir / "archives"
+            seed_output = workdir / "seed_output"
+            shared = workdir / "shared_workspace"
+            state = root / "state"
+            for directory in (workdir, archives, seed_output, shared, state):
+                directory.mkdir(parents=True, exist_ok=True)
+            (workdir / "AGENTS.md").write_text("root managed context\n", encoding="utf-8")
+
+            captured: list[dict[str, object]] = []
+
+            def fake_call(**kwargs: object) -> dict[str, object]:
+                captured.extend(json.loads(json.dumps(kwargs["input_items"])))
+                return {
+                    "status": "completed",
+                    "output": [
+                        {
+                            "type": "message",
+                            "content": [{"type": "output_text", "text": "done"}],
+                        }
+                    ],
+                }
+
+            with patch("main_loop.call_openrouter_with_tools", side_effect=fake_call):
+                run_worker(
+                    api_key="test",
+                    model="test/model",
+                    workdir=workdir,
+                    seed_output_dir=seed_output,
+                    shared_archives_root=archives,
+                    shared_workspace_dir=shared,
+                    worker_state_dir=state,
+                    shared_workspace_write_log=root / "shared-writes.jsonl",
+                    task_index=0,
+                    task_id="test",
+                    rollout_index=0,
+                    rollout_username="test-user",
+                    timeout_seconds=10,
+                    bash_timeout_seconds=5,
+                    openrouter_max_retries=0,
+                    continuation_context={
+                        "workdir": str(workdir),
+                        "shared_archives_root": str(archives),
+                        "shared_workspace_dir": str(shared),
+                    },
+                    benchmark_driver=SimpleNamespace(handle_tool=lambda *_args: None),
+                    rollout_benchmark=SimpleNamespace(model_metadata={"tools": []}),
+                    initial_user_text="Begin.",
+                )
+
+            self.assertEqual(captured[0]["role"], "developer")
+            self.assertIn("root managed context", captured[0]["content"][0]["text"])
+            self.assertEqual(captured[1]["role"], "user")
+            record = (
+                (state / "directory_agents_seen")
+                .read_text(encoding="utf-8")
+                .splitlines()[0]
+            )
+            self.assertEqual(record.split("\t")[2], "initial")
 
 
 if __name__ == "__main__":

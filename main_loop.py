@@ -47,6 +47,7 @@ from utils.directory_agents import (
 )
 from utils.directory_agents_hook import (
     NEUTRAL_DEFER_RESULT,
+    initial_context_activation,
     post_tool_context_activation,
     pre_tool_context_gate,
 )
@@ -2010,7 +2011,32 @@ def run_worker(
     progress_callback: Any = None,
 ) -> WorkerResult:
     """Run a multi-turn tool-calling worker loop and return final assistant text."""
-    conversation: list[dict[str, Any]] = [
+    initial_activation = initial_context_activation(
+        {**continuation_context, "workdir": str(workdir)},
+        worker_state_dir / "directory_agents_seen",
+    )
+    if initial_activation.additional_context and progress_callback is not None:
+        progress_callback(
+            "directory_agents_activated",
+            elapsed_seconds=0.0,
+            turn_count=0,
+            activation=initial_activation.activation,
+            paths=[str(path) for path in initial_activation.paths],
+        )
+    conversation: list[dict[str, Any]] = []
+    if initial_activation.additional_context:
+        conversation.append(
+            {
+                "role": "developer",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": initial_activation.additional_context,
+                    }
+                ],
+            }
+        )
+    conversation.append(
         {
             "role": "user",
             "content": [
@@ -2020,7 +2046,7 @@ def run_worker(
                 }
             ],
         }
-    ]
+    )
 
     final_text = ""
     command_index = 0
@@ -2348,6 +2374,7 @@ def run_codex_worker(
     sandbox_mode: str,
     initial_user_text: str,
     base_instructions: str | None = None,
+    continuation_context: dict[str, Any] | None = None,
     continuation_context_path: Path | None = None,
     benchmark_mcp_servers: dict[str, Any] | None = None,
     sensitive_mcp_tools: tuple[tuple[str, str], ...] = (),
@@ -2355,6 +2382,28 @@ def run_codex_worker(
     persist_session: bool = False,
 ) -> WorkerResult:
     """Run one rollout through the Metalanguage-owned Codex runner."""
+
+    initial_activation = initial_context_activation(
+        {
+            "shared_archives_root": str(shared_archives_root),
+            "shared_workspace_dir": str(shared_workspace_dir),
+            **(continuation_context or {}),
+            "workdir": str(workdir),
+        },
+        (
+            continuation_context_path.with_name("directory_agents_seen")
+            if continuation_context_path is not None
+            else worker_state_dir / "directory_agents_seen"
+        ),
+    )
+    if initial_activation.additional_context and progress_callback is not None:
+        progress_callback(
+            "directory_agents_activated",
+            elapsed_seconds=0.0,
+            turn_count=0,
+            activation=initial_activation.activation,
+            paths=[str(path) for path in initial_activation.paths],
+        )
 
     result = run_codex_rollout(
         runner_bin=runner_bin,
@@ -2370,6 +2419,7 @@ def run_codex_worker(
         timeout_seconds=timeout_seconds,
         sandbox_mode=sandbox_mode,
         initial_user_text=initial_user_text,
+        initial_developer_context=initial_activation.additional_context,
         base_instructions=base_instructions,
         spawn_child_handler_context_path=continuation_context_path,
         benchmark_mcp_servers=benchmark_mcp_servers,
@@ -2418,6 +2468,7 @@ def run_opencode_worker(
     timeout_seconds: int,
     initial_user_text: str,
     system_instructions: str | None = None,
+    continuation_context: dict[str, Any] | None = None,
     continuation_context_path: Path | None = None,
     benchmark_mcp_servers: dict[str, Any] | None = None,
     sensitive_mcp_tools: tuple[tuple[str, str], ...] = (),
@@ -2441,6 +2492,23 @@ def run_opencode_worker(
 ) -> WorkerResult:
     """Run one rollout through the Metalanguage-owned TypeScript/Bun worker."""
 
+    initial_activation = initial_context_activation(
+        {**(continuation_context or {}), "workdir": str(workdir)},
+        (
+            continuation_context_path.with_name("directory_agents_seen")
+            if continuation_context_path is not None
+            else worker_state_dir / "directory_agents_seen"
+        ),
+    )
+    if initial_activation.additional_context and progress_callback is not None:
+        progress_callback(
+            "directory_agents_activated",
+            elapsed_seconds=0.0,
+            turn_count=0,
+            activation=initial_activation.activation,
+            paths=[str(path) for path in initial_activation.paths],
+        )
+
     result = run_opencode_rollout(
         worker_script=worker_script,
         bun_bin=bun_bin,
@@ -2452,6 +2520,7 @@ def run_opencode_worker(
         timeout_seconds=timeout_seconds,
         initial_user_text=initial_user_text,
         system_instructions=system_instructions,
+        initial_system_context=initial_activation.additional_context,
         continuation_context_path=continuation_context_path,
         benchmark_mcp_servers=benchmark_mcp_servers,
         sensitive_mcp_tools=sensitive_mcp_tools,
@@ -4444,6 +4513,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                             sandbox_mode=args.codex_sandbox_mode,
                             initial_user_text=rollout_initial_prompt,
                             base_instructions=codex_base_instructions,
+                            continuation_context=continuation_context,
                             continuation_context_path=continuation_context_path,
                             benchmark_mcp_servers=rollout_benchmark.mcp_servers,
                             sensitive_mcp_tools=rollout_benchmark.sensitive_mcp_tools,
@@ -4474,6 +4544,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                             timeout_seconds=args.worker_timeout_seconds,
                             initial_user_text=rollout_initial_prompt,
                             system_instructions=opencode_system_instructions,
+                            continuation_context=continuation_context,
                             continuation_context_path=continuation_context_path,
                             benchmark_mcp_servers=rollout_benchmark.mcp_servers,
                             sensitive_mcp_tools=rollout_benchmark.sensitive_mcp_tools,

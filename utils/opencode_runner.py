@@ -886,6 +886,7 @@ def run_opencode_rollout(
     timeout_seconds: int,
     initial_user_text: str,
     system_instructions: str | None = None,
+    initial_system_context: str | None = None,
     continuation_context_path: Path | None = None,
     benchmark_mcp_servers: dict[str, Any] | None = None,
     sensitive_mcp_tools: tuple[tuple[str, str], ...] = (),
@@ -1008,6 +1009,8 @@ def run_opencode_rollout(
         request["test_provider_config"] = test_provider_config
     if system_instructions is not None and system_instructions.strip():
         request["system_instructions"] = system_instructions
+    if initial_system_context is not None and initial_system_context.strip():
+        request["initial_system_context"] = initial_system_context
     if continuation_context_path is not None:
         request["spawn_child_handler_command"] = [
             sys.executable,

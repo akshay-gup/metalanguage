@@ -14,6 +14,7 @@ import {
 } from "./protocol.ts"
 import {
   finalAssistantText,
+  initialSystemInstructions,
   opencodeConfig,
   sandboxedServerCommand,
   startDirectoryAgentsCallback,
@@ -824,6 +825,22 @@ describe("OpenCode native protocol adapter", () => {
     expect(SYSTEM_PLUGIN_SOURCE).toContain('"shell.env"')
     expect(SYSTEM_PLUGIN_SOURCE).toContain("OPENCODE_AUTH_CONTENT")
   })
+
+  test("initial context shares the system field with an exact user prompt", () => {
+    const request: RunnerRequest = {
+      opencode_bin: "/usr/bin/true",
+      model: "fixture/model",
+      cwd: "/workspace",
+      state_root: "/state",
+      initial_user_text: "Begin.",
+      system_instructions: ".",
+      initial_system_context: "<CONTEXT>\nroot\n</CONTEXT>",
+    }
+    expect(request.initial_user_text).toBe("Begin.")
+    expect(initialSystemInstructions(request)).toBe(
+      ".\n\n<CONTEXT>\nroot\n</CONTEXT>",
+    )
+  })
 })
 
 describe("directory AGENTS supervisor bridge", () => {
@@ -836,6 +853,7 @@ describe("directory AGENTS supervisor bridge", () => {
     await mkdir(project, { recursive: true })
     await mkdir(other, { recursive: true })
     await mkdir(control, { recursive: true })
+    await writeFile(join(work, "AGENTS.md"), "OpenCode root context\n")
     await writeFile(join(project, "AGENTS.md"), "OpenCode project context\n")
     await writeFile(join(other, "AGENTS.md"), "OpenCode other-tool context\n")
     const contextPath = join(control, "continuation_context.json")
@@ -876,13 +894,21 @@ describe("directory AGENTS supervisor bridge", () => {
         defer: false,
       })
       await rm(join(control, "directory_agents_seen"), { force: true })
+      const rootDigest = new Bun.CryptoHasher("sha256")
+        .update("OpenCode root context\n")
+        .digest("hex")
+      await writeFile(
+        join(control, "directory_agents_seen"),
+        `${join(work, "AGENTS.md")}\t${rootDigest}\tinitial\n`,
+      )
       const priorEndpoint = process.env.METALANGUAGE_DIRECTORY_AGENTS_ENDPOINT
       const priorToken = process.env.METALANGUAGE_DIRECTORY_AGENTS_TOKEN
       const priorInstructions = process.env.METALANGUAGE_OPENCODE_SYSTEM_INSTRUCTIONS
       try {
         process.env.METALANGUAGE_DIRECTORY_AGENTS_ENDPOINT = callback.endpoint
         process.env.METALANGUAGE_DIRECTORY_AGENTS_TOKEN = callback.token
-        process.env.METALANGUAGE_OPENCODE_SYSTEM_INSTRUCTIONS = "exact instructions"
+        process.env.METALANGUAGE_OPENCODE_SYSTEM_INSTRUCTIONS =
+          "exact instructions\n\n<CONTEXT>\nOpenCode root context\n</CONTEXT>"
         const pluginFactory = new Function(
           SYSTEM_PLUGIN_SOURCE.replace("export default", "return"),
         )()
@@ -898,6 +924,14 @@ describe("directory AGENTS supervisor bridge", () => {
           output: "model-visible",
           metadata: { exit: 0 },
         }
+        const initialOutput = { system: ["provider default"] }
+        await plugin["experimental.chat.system.transform"](
+          { sessionID: "session-test" },
+          initialOutput,
+        )
+        expect(initialOutput.system).toEqual([
+          "exact instructions\n\n<CONTEXT>\nOpenCode root context\n</CONTEXT>",
+        ])
         await expect(
           plugin["tool.execute.before"](identity, { args }),
         ).rejects.toThrow("Local context activated; tool was not executed.")
@@ -912,7 +946,7 @@ describe("directory AGENTS supervisor bridge", () => {
           output,
         )
         expect(output.system).toEqual([
-          "exact instructions",
+          "exact instructions\n\n<CONTEXT>\nOpenCode root context\n</CONTEXT>",
           expect.stringContaining("OpenCode project context"),
         ])
         await expect(plugin["tool.execute.before"](identity, { args })).resolves.toBeUndefined()
@@ -930,6 +964,7 @@ describe("directory AGENTS supervisor bridge", () => {
         )
         expect(otherOutput.system).toHaveLength(2)
         expect(otherOutput.system[0]).toContain("exact instructions")
+        expect(otherOutput.system[0]).toContain("OpenCode root context")
         expect(otherOutput.system[1]).toContain("OpenCode project context")
         expect(otherOutput.system[1]).toContain("OpenCode other-tool context")
       } finally {

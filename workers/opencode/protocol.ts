@@ -74,6 +74,7 @@ export type RunnerRequest = {
   state_root: string
   initial_user_text?: string | null
   system_instructions?: string | null
+  initial_system_context?: string | null
   agent?: string | null
   variant?: string | null
   timeout_seconds?: number | null

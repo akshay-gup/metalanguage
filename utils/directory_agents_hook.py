@@ -686,6 +686,23 @@ def managed_context_for_directories(
     ).additional_context
 
 
+def initial_context_activation(
+    context: dict[str, Any],
+    state_path: Path,
+) -> ManagedContextActivation:
+    """Claim the actual rollout root for the backend's first request."""
+
+    raw_workdir = context.get("workdir")
+    if not isinstance(raw_workdir, str) or not raw_workdir.strip():
+        return ManagedContextActivation("", (), "initial")
+    return managed_context_activation(
+        context,
+        state_path,
+        [Path(raw_workdir).expanduser()],
+        activation="initial",
+    )
+
+
 def _hook_base_directory(payload: dict[str, Any], root: Path) -> Path:
     value = payload.get("cwd")
     if not isinstance(value, str) or not value.strip():
@@ -772,14 +789,7 @@ def directory_agents_observation(
     if not roots:
         return ""
     event_name = payload.get("hook_event_name")
-    if event_name == "UserPromptSubmit":
-        return managed_context_activation(
-            context,
-            state_path,
-            [roots[0]],
-            activation="initial",
-        ).additional_context
-    elif event_name == "PreToolUse":
+    if event_name == "PreToolUse":
         return pre_tool_context_gate(context, payload, state_path).additional_context
     elif event_name == "PostToolUse":
         return post_tool_context_activation(
