@@ -212,9 +212,36 @@ Useful flags:
 - `--codex-base-instructions-mode minimal`: Codex receives `.` instead of its
   model-catalog instructions. Native project-document loading is disabled; a
   managed hook injects root `AGENTS.md` on the first user prompt and a nonempty
-  exact-directory `AGENTS.md` after a tool targets that directory. Each unique
+  exact-directory `AGENTS.md` after a tool targets that directory. After Bash
+  tools, the hook also follows post-command-valid literal `cd`, `pushd`, and `popd`
+  transitions in ordinary command lists, including quoted paths, parent paths,
+  and absolute managed paths. The parser is deliberately bounded rather than a
+  complete Bash parser:
+  dynamic targets such as `cd "$dir"`, `cd -`, tilde, command substitutions,
+  globs, and `pushd +N` are not inferred. Pipelines, background jobs, subshells,
+  functions, and shell control structures are also unsupported. An `&&`/`||`
+  branch whose execution depends on an unobserved non-directory command status
+  is not followed. Quoted text, comments, and heredoc bodies are not treated as
+  commands.
+
+  Literal leading `git -C DIR` operands are treated as directory-scoped work
+  even though Git does not change the shell PWD. Repeated operands resolve in
+  Git order, each relative to the preceding Git directory; quoted literal and
+  absolute paths are accepted, `--` ends global option parsing, and dynamic,
+  malformed, or unsupported global-option forms are ignored. Every resulting
+  managed directory is considered even when Git later exits unsuccessfully,
+  because the attempted Git operation was already scoped there. Multiple
+  statically executed Git commands in one ordinary command list are supported;
+  branches dependent on an unknown prior status remain deliberately unobserved.
+  Each unique
   path/content digest is injected once as `<CONTEXT>...</CONTEXT>`, with no
-  Metalanguage-specific content-size cap.
+  Metalanguage-specific content-size cap. The direct OpenRouter worker uses the
+  same directory-scope loader. OpenCode observes native Bash only
+  after execution through its authenticated host callback and adds newly
+  activated context through its pre-inference system hook, retaining explicit
+  workdir plus literal shell/Git coverage. Codex native shell and Code Mode
+  `exec_command` share the trusted post-tool hook; OpenCode Code Mode
+  still does not expose native Bash through that plugin boundary.
 - `--codex-initial-prompt TEXT`: choose the first user message.
 
 Example using the minimal base placeholder and automatic root `AGENTS.md` loading:

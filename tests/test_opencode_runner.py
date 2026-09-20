@@ -525,6 +525,10 @@ class OpenCodeRunnerTests(unittest.TestCase):
                 durable_request["spawn_child_handler_command"],
                 {"configured": True},
             )
+            self.assertEqual(
+                durable_request["directory_agents_handler_command"],
+                {"configured": True},
+            )
 
     def test_mcp_translation_and_sensitive_event_redaction(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

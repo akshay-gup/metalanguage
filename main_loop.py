@@ -45,6 +45,11 @@ from utils.directory_agents import (
     ensure_directory_agents_file,
     ensure_directory_tree_agents_files,
 )
+from utils.directory_agents_hook import (
+    literal_git_directory_scopes,
+    literal_shell_directory_transitions,
+    managed_context_for_directories,
+)
 from utils.opencode_runner import (
     SOURCE_AUDITED_BUN_VERSIONS,
     SOURCE_AUDITED_OPENCODE_VERSIONS,
@@ -2061,6 +2066,7 @@ def run_worker(
             response = call_openrouter_with_tools(
                 api_key=api_key,
                 model=model,
+                instructions=PROVIDER_READ_README_INSTRUCTIONS,
                 input_items=conversation,
                 tools=[
                     bash_tool,
@@ -2111,6 +2117,7 @@ def run_worker(
             break
 
         for call in tool_calls:
+            additional_managed_context = ""
             call_id = call.get("call_id")
             if not isinstance(call_id, str) or not call_id:
                 conversation.append(
@@ -2196,6 +2203,23 @@ def run_worker(
                     timeout_seconds=bash_timeout_seconds,
                     rollout_username=rollout_username,
                 )
+                observed_directories = list(
+                    literal_shell_directory_transitions(
+                        command,
+                        Path(safe_wd),
+                    )
+                )
+                observed_directories.extend(
+                    literal_git_directory_scopes(
+                        command,
+                        Path(safe_wd),
+                    )
+                )
+                additional_managed_context = managed_context_for_directories(
+                    continuation_context,
+                    worker_state_dir / "directory_agents_seen",
+                    observed_directories,
+                )
                 after_shared = _snapshot_workspace_files(shared_workspace_dir)
                 shared_events = _shared_workspace_events(
                     before=before_shared,
@@ -2239,6 +2263,18 @@ def run_worker(
                     "output": json.dumps(tool_result),
                 }
             )
+            if additional_managed_context:
+                conversation.append(
+                    {
+                        "role": "developer",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": additional_managed_context,
+                            }
+                        ],
+                    }
+                )
     return WorkerResult(
         final_text=final_text,
         status="completed",

@@ -55,12 +55,44 @@ export const TOOL_SOURCE = `export default {
 `
 
 export const SYSTEM_PLUGIN_SOURCE = `export default async function metalanguageSystemPlugin() {
+  const managedContexts = new Map()
   return {
     "experimental.chat.system.transform": async (input, output) => {
       if (!input.sessionID) return
       const exact = process.env.METALANGUAGE_OPENCODE_SYSTEM_INSTRUCTIONS
-      if (exact === undefined) return
-      output.system.splice(0, output.system.length, exact)
+      if (exact !== undefined) output.system.splice(0, output.system.length, exact)
+      const additions = managedContexts.get(input.sessionID)
+      if (additions?.length) output.system.push(additions.join("\\n\\n"))
+    },
+    "tool.execute.after": async (input, _output) => {
+      if (input.tool !== "bash" || !input.sessionID || !input.callID) return
+      const endpoint = process.env.METALANGUAGE_DIRECTORY_AGENTS_ENDPOINT
+      const token = process.env.METALANGUAGE_DIRECTORY_AGENTS_TOKEN
+      try {
+        if (!endpoint || !token) return
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers: {
+            authorization: \`Bearer \${token}\`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            hook_event_name: "PostToolUse",
+            tool_name: input.tool,
+            tool_input: input.args,
+            tool_use_id: input.callID,
+            session_id: input.sessionID,
+            metalanguage_shell_transitions_only: true,
+          }),
+        })
+        if (!response.ok) return
+        const parsed = await response.json()
+        const context = parsed?.additional_context
+        if (typeof context !== "string" || !context.trim()) return
+        const additions = managedContexts.get(input.sessionID) ?? []
+        if (!additions.includes(context)) additions.push(context)
+        managedContexts.set(input.sessionID, additions)
+      } catch {}
     },
     "shell.env": async (_input, output) => {
       const configured = process.env.METALANGUAGE_OPENCODE_PROVIDER_ENV_NAMES ?? "[]"
@@ -70,14 +102,32 @@ export const SYSTEM_PLUGIN_SOURCE = `export default async function metalanguageS
         ...names,
         "OPENCODE_AUTH_CONTENT",
         "OPENCODE_SERVER_PASSWORD",
+        "METALANGUAGE_SPAWN_CHILD_ENDPOINT",
         "METALANGUAGE_SPAWN_CHILD_TOKEN",
+        "METALANGUAGE_DIRECTORY_AGENTS_ENDPOINT",
+        "METALANGUAGE_DIRECTORY_AGENTS_TOKEN",
       ]) {
-        if (typeof name === "string" && name) output.env[name] = ""
+        if (typeof name === "string" && name) delete output.env[name]
       }
     },
   }
 }
 `
+
+export function systemPluginSource(
+  directoryAgents?: { endpoint: string; token: string },
+): string {
+  if (!directoryAgents) return SYSTEM_PLUGIN_SOURCE
+  return SYSTEM_PLUGIN_SOURCE
+    .replace(
+      "process.env.METALANGUAGE_DIRECTORY_AGENTS_ENDPOINT",
+      JSON.stringify(directoryAgents.endpoint),
+    )
+    .replace(
+      "process.env.METALANGUAGE_DIRECTORY_AGENTS_TOKEN",
+      JSON.stringify(directoryAgents.token),
+    )
+}
 
 function failure(code: string, message: string): Record<string, unknown> {
   return {
@@ -146,6 +196,72 @@ export async function runHandler(command: string[], payload: unknown, timeoutMs 
       return parsed
     } catch {
       return failure("spawn_child_handler_malformed_response", "spawn_child handler returned a malformed response")
+    }
+  } finally {
+    process.off("SIGTERM", terminate)
+    process.off("SIGINT", terminate)
+  }
+}
+
+export async function runDirectoryAgentsHandler(
+  command: string[],
+  payload: unknown,
+  timeoutMs = 15_000,
+): Promise<{ additional_context: string }> {
+  const empty = { additional_context: "" }
+  if (
+    !command.length ||
+    !isRecord(payload) ||
+    payload.hook_event_name !== "PostToolUse"
+  ) return empty
+  let child: Bun.PipedSubprocess
+  try {
+    child = Bun.spawn(command, { stdin: "pipe", stdout: "pipe", stderr: "pipe" })
+  } catch {
+    return empty
+  }
+  const terminate = () => child.kill("SIGTERM")
+  process.once("SIGTERM", terminate)
+  process.once("SIGINT", terminate)
+  try {
+    child.stdin.write(`${JSON.stringify(payload)}\n`)
+    child.stdin.end()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("timeout")), Math.max(1, timeoutMs))
+    })
+    let stdout: string
+    let code: number
+    try {
+      ;[stdout, , code] = await Promise.race([
+        Promise.all([
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+          child.exited,
+        ]),
+        timeout,
+      ])
+    } catch {
+      child.kill("SIGKILL")
+      await child.exited
+      return empty
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+    if (code !== 0 || !stdout.trim()) return empty
+    try {
+      const parsed = JSON.parse(stdout.trim())
+      const hookOutput = isRecord(parsed) ? parsed.hookSpecificOutput : undefined
+      if (
+        !isRecord(hookOutput) ||
+        hookOutput.hookEventName !== "PostToolUse" ||
+        typeof hookOutput.additionalContext !== "string"
+      ) {
+        return empty
+      }
+      return { additional_context: hookOutput.additionalContext }
+    } catch {
+      return empty
     }
   } finally {
     process.off("SIGTERM", terminate)

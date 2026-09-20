@@ -446,7 +446,11 @@ def opencode_worker_fingerprint(worker_script: Path) -> str:
 
 def opencode_python_fingerprint(main_loop_path: Path) -> str:
     digest = hashlib.sha256()
-    for path in (Path(__file__).resolve(), main_loop_path.resolve()):
+    for path in (
+        Path(__file__).resolve(),
+        main_loop_path.resolve(),
+        (PROJECT_ROOT / "utils" / "directory_agents_hook.py").resolve(),
+    ):
         digest.update(path.name.encode())
         digest.update(b"\0")
         digest.update(path.read_bytes())
@@ -717,6 +721,8 @@ def _durable_request(request: dict[str, Any]) -> dict[str, Any]:
         durable["auth_file"] = {"configured": True}
     if "spawn_child_handler_command" in durable:
         durable["spawn_child_handler_command"] = {"configured": True}
+    if "directory_agents_handler_command" in durable:
+        durable["directory_agents_handler_command"] = {"configured": True}
     sandbox = durable.get("sandbox")
     if isinstance(sandbox, dict) and "read_only_mounts" in sandbox:
         sandbox["read_only_mounts"] = [
@@ -1007,6 +1013,11 @@ def run_opencode_rollout(
             sys.executable,
             str(PROJECT_ROOT / "main_loop.py"),
             "--child-tool-handler",
+            str(continuation_context_path),
+        ]
+        request["directory_agents_handler_command"] = [
+            sys.executable,
+            str(PROJECT_ROOT / "utils" / "directory_agents_hook.py"),
             str(continuation_context_path),
         ]
     if auth_file is not None:

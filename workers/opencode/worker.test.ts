@@ -12,8 +12,20 @@ import {
   type McpServerInput,
   type RunnerRequest,
 } from "./protocol.ts"
-import { finalAssistantText, opencodeConfig, sandboxedServerCommand, startSpawnCallback } from "./worker.ts"
-import { runHandler, SYSTEM_PLUGIN_SOURCE, TOOL_SOURCE } from "./spawn_bridge.ts"
+import {
+  finalAssistantText,
+  opencodeConfig,
+  sandboxedServerCommand,
+  startDirectoryAgentsCallback,
+  startSpawnCallback,
+} from "./worker.ts"
+import {
+  runDirectoryAgentsHandler,
+  runHandler,
+  SYSTEM_PLUGIN_SOURCE,
+  systemPluginSource,
+  TOOL_SOURCE,
+} from "./spawn_bridge.ts"
 
 function mcpServer(): McpServerInput {
   return {
@@ -792,8 +804,129 @@ describe("OpenCode native protocol adapter", () => {
     expect(TOOL_SOURCE).not.toContain("METALANGUAGE_OPENCODE_WORKER_SCRIPT")
     expect(SYSTEM_PLUGIN_SOURCE).toContain("experimental.chat.system.transform")
     expect(SYSTEM_PLUGIN_SOURCE).toContain("output.system.splice")
+    expect(SYSTEM_PLUGIN_SOURCE).toContain('"tool.execute.after"')
+    expect(SYSTEM_PLUGIN_SOURCE).toContain("METALANGUAGE_DIRECTORY_AGENTS_ENDPOINT")
+    const configuredPlugin = systemPluginSource({
+      endpoint: "http://127.0.0.1:12345/directory-agents",
+      token: "private-directory-token",
+    })
+    expect(configuredPlugin).toContain('const endpoint = "http://127.0.0.1:12345/directory-agents"')
+    expect(configuredPlugin).toContain('const token = "private-directory-token"')
+    expect(configuredPlugin).not.toContain(
+      "const endpoint = process.env.METALANGUAGE_DIRECTORY_AGENTS_ENDPOINT",
+    )
+    expect(configuredPlugin).not.toContain(
+      "const token = process.env.METALANGUAGE_DIRECTORY_AGENTS_TOKEN",
+    )
+    expect(() => new Function(SYSTEM_PLUGIN_SOURCE.replace("export default", "return"))).not.toThrow()
     expect(SYSTEM_PLUGIN_SOURCE).toContain('"shell.env"')
     expect(SYSTEM_PLUGIN_SOURCE).toContain("OPENCODE_AUTH_CONTENT")
+  })
+})
+
+describe("directory AGENTS supervisor bridge", () => {
+  test("returns exact shell-transition context through the authenticated callback", async () => {
+    const root = await mkdtemp(join(tmpdir(), "metalanguage-directory-agents-"))
+    const work = join(root, "work")
+    const project = join(work, "archives", "project")
+    const control = join(root, "control")
+    await mkdir(project, { recursive: true })
+    await mkdir(control, { recursive: true })
+    await writeFile(join(project, "AGENTS.md"), "OpenCode project context\n")
+    const contextPath = join(control, "continuation_context.json")
+    await writeFile(
+      contextPath,
+      JSON.stringify({
+        worker_backend: "opencode",
+        workdir: work,
+        shared_archives_root: join(work, "archives"),
+      }),
+    )
+    const hook = resolve(import.meta.dir, "../../utils/directory_agents_hook.py")
+    const command = ["python3", hook, contextPath]
+    const callback = await startDirectoryAgentsCallback(command)
+    try {
+      const unauthorized = await fetch(callback.endpoint, {
+        method: "POST",
+        headers: { authorization: "Bearer wrong" },
+        body: "{}",
+      })
+      expect(unauthorized.status).toBe(401)
+      const response = await fetch(callback.endpoint, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${callback.token}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          hook_event_name: "PostToolUse",
+          tool_name: "bash",
+          tool_input: { command: "cd archives/project && pwd" },
+          metalanguage_shell_transitions_only: true,
+        }),
+      })
+      expect(response.status).toBe(200)
+      expect(await response.json()).toMatchObject({
+        additional_context: expect.stringContaining("OpenCode project context"),
+      })
+      await rm(join(control, "directory_agents_seen"), { force: true })
+      const priorEndpoint = process.env.METALANGUAGE_DIRECTORY_AGENTS_ENDPOINT
+      const priorToken = process.env.METALANGUAGE_DIRECTORY_AGENTS_TOKEN
+      const priorInstructions = process.env.METALANGUAGE_OPENCODE_SYSTEM_INSTRUCTIONS
+      try {
+        process.env.METALANGUAGE_DIRECTORY_AGENTS_ENDPOINT = callback.endpoint
+        process.env.METALANGUAGE_DIRECTORY_AGENTS_TOKEN = callback.token
+        process.env.METALANGUAGE_OPENCODE_SYSTEM_INSTRUCTIONS = "exact instructions"
+        const pluginFactory = new Function(
+          SYSTEM_PLUGIN_SOURCE.replace("export default", "return"),
+        )()
+        const plugin = await pluginFactory()
+        const shellEnvironment = { env: {} as Record<string, string> }
+        await plugin["shell.env"]({}, shellEnvironment)
+        expect(shellEnvironment.env).not.toHaveProperty("METALANGUAGE_DIRECTORY_AGENTS_ENDPOINT")
+        expect(shellEnvironment.env).not.toHaveProperty("METALANGUAGE_DIRECTORY_AGENTS_TOKEN")
+        const args = { command: "cd archives/project && pwd" }
+        const identity = { tool: "bash", sessionID: "session-test", callID: "call-test" }
+        const toolOutput = {
+          title: "shell",
+          output: "model-visible",
+          metadata: { exit: 0 },
+        }
+        await plugin["tool.execute.after"]({ ...identity, args }, toolOutput)
+        expect(toolOutput).toEqual({
+          title: "shell",
+          output: "model-visible",
+          metadata: { exit: 0 },
+        })
+        const output = { system: ["provider default"] }
+        await plugin["experimental.chat.system.transform"](
+          { sessionID: "session-test" },
+          output,
+        )
+        expect(output.system).toEqual([
+          "exact instructions",
+          expect.stringContaining("OpenCode project context"),
+        ])
+      } finally {
+        if (priorEndpoint === undefined) delete process.env.METALANGUAGE_DIRECTORY_AGENTS_ENDPOINT
+        else process.env.METALANGUAGE_DIRECTORY_AGENTS_ENDPOINT = priorEndpoint
+        if (priorToken === undefined) delete process.env.METALANGUAGE_DIRECTORY_AGENTS_TOKEN
+        else process.env.METALANGUAGE_DIRECTORY_AGENTS_TOKEN = priorToken
+        if (priorInstructions === undefined) delete process.env.METALANGUAGE_OPENCODE_SYSTEM_INSTRUCTIONS
+        else process.env.METALANGUAGE_OPENCODE_SYSTEM_INSTRUCTIONS = priorInstructions
+      }
+      expect(
+        await runDirectoryAgentsHandler(command, {
+          hook_event_name: "PostToolUse",
+          tool_name: "bash",
+          tool_input: { command: "printf 'cd archives/project'" },
+          metalanguage_shell_transitions_only: true,
+        }),
+      ).toEqual({ additional_context: "" })
+    } finally {
+      callback.stop()
+      await rm(root, { recursive: true, force: true })
+    }
   })
 })
 

@@ -82,6 +82,7 @@ export type RunnerRequest = {
   provider_env_names?: string[]
   custom_provider?: CustomProviderInput | null
   spawn_child_handler_command?: string[] | null
+  directory_agents_handler_command?: string[] | null
   mcp_servers?: Record<string, McpServerInput>
   sensitive_mcp_tools?: McpToolSelector[]
   sandbox?: {

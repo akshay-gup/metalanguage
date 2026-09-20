@@ -38,9 +38,11 @@ import {
   type TranslatedMcp,
 } from "./protocol.ts"
 import {
+  runDirectoryAgentsHandler,
   runHandler,
   runSpawnBridgeFromStdio,
   SYSTEM_PLUGIN_SOURCE,
+  systemPluginSource,
   TOOL_SOURCE,
 } from "./spawn_bridge.ts"
 
@@ -387,6 +389,7 @@ async function startHostMcpBridges(
           "OPENCODE_AUTH_CONTENT",
           "OPENCODE_SERVER_PASSWORD",
           "METALANGUAGE_SPAWN_CHILD_TOKEN",
+          "METALANGUAGE_DIRECTORY_AGENTS_TOKEN",
         ].map((name) => [name, ""]),
       )
     }
@@ -1038,6 +1041,38 @@ export async function startSpawnCallback(command: string[], handlerTimeoutMs = 1
   }
 }
 
+export async function startDirectoryAgentsCallback(
+  command: string[],
+  handlerTimeoutMs = 15_000,
+): Promise<{ endpoint: string; token: string; stop: () => void }> {
+  const token = randomSecret()
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      if (request.method !== "POST" || new URL(request.url).pathname !== "/directory-agents") {
+        return new Response("not found", { status: 404 })
+      }
+      if (request.headers.get("authorization") !== `Bearer ${token}`) {
+        return new Response("unauthorized", { status: 401 })
+      }
+      try {
+        const raw = await request.text()
+        if (raw.length > 2 * 1024 * 1024) return new Response("request too large", { status: 413 })
+        const result = await runDirectoryAgentsHandler(command, JSON.parse(raw), handlerTimeoutMs)
+        return Response.json(result)
+      } catch {
+        return Response.json({ additional_context: "" })
+      }
+    },
+  })
+  return {
+    endpoint: `http://127.0.0.1:${server.port}/directory-agents`,
+    token,
+    stop: () => server.stop(true),
+  }
+}
+
 function parseRequest(value: unknown): RunnerRequest {
   if (!isRecord(value)) throw new Error("runner request must be a JSON object")
   for (const field of ["opencode_bin", "model", "cwd", "state_root"] as const) {
@@ -1085,10 +1120,19 @@ export async function runRequest(request: RunnerRequest, cancelled: Promise<void
   }
   let env: WorkerEnvironment
   let callback: Awaited<ReturnType<typeof startSpawnCallback>> | undefined
+  let directoryAgentsCallback: Awaited<ReturnType<typeof startDirectoryAgentsCallback>> | undefined
   try {
     callback = request.spawn_child_handler_command?.length
       ? await startSpawnCallback(request.spawn_child_handler_command)
       : undefined
+    directoryAgentsCallback = request.directory_agents_handler_command?.length
+      ? await startDirectoryAgentsCallback(request.directory_agents_handler_command)
+      : undefined
+    if (directoryAgentsCallback) {
+      const pluginPath = join(root, "config/plugin/metalanguage_system.js")
+      await writeFile(pluginPath, systemPluginSource(directoryAgentsCallback), { mode: 0o600 })
+      await chmod(pluginPath, 0o600)
+    }
     env = await isolatedEnvironment(
       request,
       root,
@@ -1098,6 +1142,7 @@ export async function runRequest(request: RunnerRequest, cancelled: Promise<void
     )
   } catch (error) {
     callback?.stop()
+    directoryAgentsCallback?.stop()
     await stopHostMcpBridges(hostMcp.bridges, hostMcp.hostRoot)
     throw asRunnerError("state_isolation_failed", error)
   }
@@ -1127,6 +1172,7 @@ export async function runRequest(request: RunnerRequest, cancelled: Promise<void
     }
   } finally {
     callback?.stop()
+    directoryAgentsCallback?.stop()
     await stopHostMcpBridges(hostMcp.bridges, hostMcp.hostRoot)
   }
 }
