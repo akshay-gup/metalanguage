@@ -804,8 +804,10 @@ describe("OpenCode native protocol adapter", () => {
     expect(TOOL_SOURCE).not.toContain("METALANGUAGE_OPENCODE_WORKER_SCRIPT")
     expect(SYSTEM_PLUGIN_SOURCE).toContain("experimental.chat.system.transform")
     expect(SYSTEM_PLUGIN_SOURCE).toContain("output.system.splice")
+    expect(SYSTEM_PLUGIN_SOURCE).toContain('"tool.execute.before"')
     expect(SYSTEM_PLUGIN_SOURCE).toContain('"tool.execute.after"')
     expect(SYSTEM_PLUGIN_SOURCE).toContain("METALANGUAGE_DIRECTORY_AGENTS_ENDPOINT")
+    expect(SYSTEM_PLUGIN_SOURCE).not.toContain("UserPromptSubmit")
     const configuredPlugin = systemPluginSource({
       endpoint: "http://127.0.0.1:12345/directory-agents",
       token: "private-directory-token",
@@ -829,10 +831,13 @@ describe("directory AGENTS supervisor bridge", () => {
     const root = await mkdtemp(join(tmpdir(), "metalanguage-directory-agents-"))
     const work = join(root, "work")
     const project = join(work, "archives", "project")
+    const other = join(work, "other")
     const control = join(root, "control")
     await mkdir(project, { recursive: true })
+    await mkdir(other, { recursive: true })
     await mkdir(control, { recursive: true })
     await writeFile(join(project, "AGENTS.md"), "OpenCode project context\n")
+    await writeFile(join(other, "AGENTS.md"), "OpenCode other-tool context\n")
     const contextPath = join(control, "continuation_context.json")
     await writeFile(
       contextPath,
@@ -868,6 +873,7 @@ describe("directory AGENTS supervisor bridge", () => {
       expect(response.status).toBe(200)
       expect(await response.json()).toMatchObject({
         additional_context: expect.stringContaining("OpenCode project context"),
+        defer: false,
       })
       await rm(join(control, "directory_agents_seen"), { force: true })
       const priorEndpoint = process.env.METALANGUAGE_DIRECTORY_AGENTS_ENDPOINT
@@ -892,7 +898,9 @@ describe("directory AGENTS supervisor bridge", () => {
           output: "model-visible",
           metadata: { exit: 0 },
         }
-        await plugin["tool.execute.after"]({ ...identity, args }, toolOutput)
+        await expect(
+          plugin["tool.execute.before"](identity, { args }),
+        ).rejects.toThrow("Local context activated; tool was not executed.")
         expect(toolOutput).toEqual({
           title: "shell",
           output: "model-visible",
@@ -907,6 +915,23 @@ describe("directory AGENTS supervisor bridge", () => {
           "exact instructions",
           expect.stringContaining("OpenCode project context"),
         ])
+        await expect(plugin["tool.execute.before"](identity, { args })).resolves.toBeUndefined()
+        await plugin["tool.execute.after"]({ ...identity, args }, toolOutput)
+        await expect(
+          plugin["tool.execute.before"](
+            { tool: "read_file", sessionID: "session-test", callID: "call-read" },
+            { args: { workdir: other } },
+          ),
+        ).rejects.toThrow("Local context activated; tool was not executed.")
+        const otherOutput = { system: ["provider default"] }
+        await plugin["experimental.chat.system.transform"](
+          { sessionID: "session-test" },
+          otherOutput,
+        )
+        expect(otherOutput.system).toHaveLength(2)
+        expect(otherOutput.system[0]).toContain("exact instructions")
+        expect(otherOutput.system[1]).toContain("OpenCode project context")
+        expect(otherOutput.system[1]).toContain("OpenCode other-tool context")
       } finally {
         if (priorEndpoint === undefined) delete process.env.METALANGUAGE_DIRECTORY_AGENTS_ENDPOINT
         else process.env.METALANGUAGE_DIRECTORY_AGENTS_ENDPOINT = priorEndpoint
@@ -917,12 +942,17 @@ describe("directory AGENTS supervisor bridge", () => {
       }
       expect(
         await runDirectoryAgentsHandler(command, {
+          hook_event_name: "UserPromptSubmit",
+        }),
+      ).toEqual({ additional_context: "", defer: false })
+      expect(
+        await runDirectoryAgentsHandler(command, {
           hook_event_name: "PostToolUse",
           tool_name: "bash",
           tool_input: { command: "printf 'cd archives/project'" },
           metalanguage_shell_transitions_only: true,
         }),
-      ).toEqual({ additional_context: "" })
+      ).toEqual({ additional_context: "", defer: false })
     } finally {
       callback.stop()
       await rm(root, { recursive: true, force: true })

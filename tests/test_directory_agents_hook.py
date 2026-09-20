@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from main_loop import run_worker
+from utils.directory_agents_hook import pre_tool_context_gate
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -71,6 +72,140 @@ class DirectoryAgentsHookTests(unittest.TestCase):
                 "tool_input": {"command": command, **tool_input},
             }
         )
+
+    def _pre_response(
+        self,
+        command: str,
+        **tool_input: str,
+    ) -> dict[str, object]:
+        return self._invoke_response(
+            {
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_input": {"command": command, **tool_input},
+            }
+        )
+
+    def _pre(self, command: str, **tool_input: str) -> str:
+        response = self._pre_response(command, **tool_input)
+        if not response:
+            return ""
+        return str(response["hookSpecificOutput"]["additionalContext"])
+
+    def test_pre_tool_first_unseen_defers_then_repeat_executes(self) -> None:
+        response = self._pre_response("cd archives/project && printf work")
+
+        self.assertEqual(
+            response["hookSpecificOutput"]["permissionDecision"],
+            "deny",
+        )
+        self.assertEqual(
+            response["hookSpecificOutput"]["permissionDecisionReason"],
+            "Local context activated; tool was not executed.",
+        )
+        self.assertIn(
+            "<CONTEXT>\nproject context\n</CONTEXT>",
+            response["hookSpecificOutput"]["additionalContext"],
+        )
+        self.assertEqual(self._pre("cd archives/project && printf work"), "")
+        records = (
+            (self.control / "directory_agents_seen")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        )
+        self.assertEqual(records[-1].split("\t")[2], "pre_tool_gate")
+
+    def test_pre_tool_changed_digest_defers_again(self) -> None:
+        self.assertIn("project context", self._pre("cd archives/project"))
+        (self.project / "AGENTS.md").write_text("revised context\n", encoding="utf-8")
+
+        self.assertIn("revised context", self._pre("cd archives/project"))
+        self.assertEqual(self._pre("cd archives/project"), "")
+
+    def test_root_is_already_seen_before_first_tool(self) -> None:
+        self.assertEqual(self._pre("pwd"), "")
+
+    def test_pre_tool_multiple_contexts_produce_one_deferral(self) -> None:
+        response = self._pre_response("cd archives; cd project; pwd")
+        context = str(response["hookSpecificOutput"]["additionalContext"])
+
+        self.assertEqual(response["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertEqual(context.count("<CONTEXT>"), 2)
+        self.assertIn("archives context", context)
+        self.assertIn("project context", context)
+        self.assertEqual(self._pre("cd archives; cd project; pwd"), "")
+
+    def test_pre_tool_explicit_workdir_and_git_c_are_eligible(self) -> None:
+        explicit = self._invoke_response(
+            {
+                "hook_event_name": "PreToolUse",
+                "tool_name": "read_file",
+                "tool_input": {"workdir": str(self.project)},
+            }
+        )
+        self.assertIn(
+            "project context",
+            explicit["hookSpecificOutput"]["additionalContext"],
+        )
+        (self.archives / "AGENTS.md").write_text("git revision\n", encoding="utf-8")
+        git_response = self._pre_response("git -C archives status")
+        self.assertIn(
+            "git revision",
+            git_response["hookSpecificOutput"]["additionalContext"],
+        )
+
+    def test_pre_tool_static_branches_gate_but_unknown_and_dynamic_do_not(self) -> None:
+        self.assertIn("project context", self._pre("true && cd archives/project"))
+        (self.project / "AGENTS.md").write_text("branch revision\n", encoding="utf-8")
+        self.assertEqual(self._pre("printf unknown && cd archives/project"), "")
+        self.assertEqual(self._pre('cd "$PROJECT"'), "")
+        self.assertEqual(
+            self._pre('cd "$PROJECT" || cd archives/project'),
+            "",
+        )
+        self.assertIn(
+            "branch revision",
+            self._pre("printf unknown; cd archives/project"),
+        )
+
+    def test_pre_and_post_share_deduplication_state(self) -> None:
+        self.assertIn("project context", self._pre("cd archives/project"))
+        self.assertEqual(self._bash("cd archives/project"), "")
+        (self.project / "AGENTS.md").write_text("post revision\n", encoding="utf-8")
+        self.assertIn("post revision", self._bash("cd archives/project"))
+        self.assertEqual(self._pre("cd archives/project"), "")
+        records = (
+            (self.control / "directory_agents_seen")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        )
+        self.assertEqual(records[-1].split("\t")[2], "post_tool_fallback")
+
+    def test_post_tool_fallback_can_activate_a_newly_created_scope(self) -> None:
+        created = self.archives / "created-later"
+        self.assertEqual(self._pre("cd archives/created-later"), "")
+        created.mkdir()
+        (created / "AGENTS.md").write_text("created context\n", encoding="utf-8")
+
+        self.assertIn("created context", self._bash("cd archives/created-later"))
+
+    def test_pre_tool_ignores_missing_empty_unsafe_and_outside_agents(self) -> None:
+        missing = self.archives / "missing-agents"
+        empty = self.archives / "empty-agents"
+        unsafe = self.archives / "unsafe-agents"
+        outside = Path(self.temp.name) / "outside-pre"
+        for directory in (missing, empty, unsafe, outside):
+            directory.mkdir()
+        (empty / "AGENTS.md").write_text(" \n", encoding="utf-8")
+        target = outside / "target.md"
+        target.write_text("outside context\n", encoding="utf-8")
+        (unsafe / "AGENTS.md").symlink_to(target)
+        (outside / "AGENTS.md").write_text("outside context\n", encoding="utf-8")
+
+        self.assertEqual(self._pre("cd archives/missing-agents"), "")
+        self.assertEqual(self._pre("cd archives/empty-agents"), "")
+        self.assertEqual(self._pre("cd archives/unsafe-agents"), "")
+        self.assertEqual(self._pre(f"cd {outside}"), "")
 
     def test_literal_cd_activates_exact_directory_and_deduplicates(self) -> None:
         context = self._bash("cd archives/project && printf work")
@@ -244,7 +379,7 @@ class DirectoryAgentsHookTests(unittest.TestCase):
 
 
 class OpenRouterDirectoryAgentsTests(unittest.TestCase):
-    def test_literal_transition_is_context_only_and_preserves_tool_result(self) -> None:
+    def test_pre_gate_has_no_side_effect_and_repeat_preserves_tool_result(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             workdir = root / "work"
@@ -259,6 +394,7 @@ class OpenRouterDirectoryAgentsTests(unittest.TestCase):
                 "openrouter project context\n",
                 encoding="utf-8",
             )
+            side_effect = project / "side-effect.txt"
 
             captured_inputs: list[list[dict[str, object]]] = []
             responses = iter(
@@ -275,6 +411,7 @@ class OpenRouterDirectoryAgentsTests(unittest.TestCase):
                                     {
                                         "command": (
                                             "cd archives/project\n"
+                                            "printf executed > side-effect.txt\n"
                                             "printf visible-out\n"
                                             "printf visible-err >&2\n"
                                             "false"
@@ -291,6 +428,28 @@ class OpenRouterDirectoryAgentsTests(unittest.TestCase):
                                 "type": "function_call",
                                 "id": "item-2",
                                 "call_id": "call-2",
+                                "name": "run_bash",
+                                "arguments": json.dumps(
+                                    {
+                                        "command": (
+                                            "cd archives/project\n"
+                                            "printf executed > side-effect.txt\n"
+                                            "printf visible-out\n"
+                                            "printf visible-err >&2\n"
+                                            "false"
+                                        )
+                                    }
+                                ),
+                            }
+                        ],
+                    },
+                    {
+                        "status": "completed",
+                        "output": [
+                            {
+                                "type": "function_call",
+                                "id": "item-3",
+                                "call_id": "call-3",
                                 "name": "run_bash",
                                 "arguments": json.dumps({"command": "pwd -P"}),
                             }
@@ -313,6 +472,8 @@ class OpenRouterDirectoryAgentsTests(unittest.TestCase):
                 captured_inputs.append(
                     json.loads(json.dumps(kwargs["input_items"]))
                 )
+                if len(captured_inputs) == 2:
+                    self.assertFalse(side_effect.exists())
                 return next(responses)
 
             benchmark_driver = SimpleNamespace(handle_tool=lambda *_args: None)
@@ -365,14 +526,28 @@ class OpenRouterDirectoryAgentsTests(unittest.TestCase):
                 if item.get("type") == "function_call_output"
             )
             first_result = json.loads(first_output["output"])
-            self.assertEqual(first_result["exit_code"], 1)
-            self.assertEqual(first_result["stdout"], "visible-out")
-            self.assertEqual(first_result["stderr"], "visible-err")
-            self.assertNotIn("metalanguage", first_output["output"].lower())
+            self.assertEqual(first_result["status"], "deferred")
+            self.assertEqual(
+                first_result["message"],
+                "Local context activated; tool was not executed.",
+            )
+            self.assertIs(first_result["tool_executed"], False)
+
+            repeated_output = next(
+                item
+                for item in captured_inputs[2]
+                if item.get("type") == "function_call_output"
+                and item.get("call_id") == "call-2"
+            )
+            repeated_result = json.loads(repeated_output["output"])
+            self.assertEqual(repeated_result["exit_code"], 1)
+            self.assertEqual(repeated_result["stdout"], "visible-out")
+            self.assertEqual(repeated_result["stderr"], "visible-err")
+            self.assertTrue(side_effect.is_file())
 
             second_outputs = [
                 item
-                for item in captured_inputs[2]
+                for item in captured_inputs[3]
                 if item.get("type") == "function_call_output"
             ]
             second_result = json.loads(second_outputs[-1]["output"])

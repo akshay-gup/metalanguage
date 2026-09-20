@@ -1062,7 +1062,7 @@ export async function startDirectoryAgentsCallback(
         const result = await runDirectoryAgentsHandler(command, JSON.parse(raw), handlerTimeoutMs)
         return Response.json(result)
       } catch {
-        return Response.json({ additional_context: "" })
+        return Response.json({ additional_context: "", defer: false })
       }
     },
   })

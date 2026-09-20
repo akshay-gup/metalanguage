@@ -210,13 +210,21 @@ Useful flags:
 - `--codex-sandbox-mode read-only|workspace-write|danger-full-access`: choose the
   rollout sandbox mode.
 - `--codex-base-instructions-mode minimal`: Codex receives `.` instead of its
-  model-catalog instructions. Native project-document loading is disabled; a
-  managed hook injects root `AGENTS.md` on the first user prompt and a nonempty
-  exact-directory `AGENTS.md` after a tool targets that directory. After Bash
-  tools, the hook also follows post-command-valid literal `cd`, `pushd`, and `popd`
-  transitions in ordinary command lists, including quoted paths, parent paths,
-  and absolute managed paths. The parser is deliberately bounded rather than a
-  complete Bash parser:
+  model-catalog instructions. Native project-document loading is disabled; the
+  managed hook injects and atomically marks the actual rollout-root `AGENTS.md`
+  on the first user prompt.
+
+  Before each subsequent tool dispatch, the same loader resolves the tool's
+  exact directory or explicit workdir. For shell tools it additionally resolves
+  statically executed literal `cd`, `pushd`, and `popd` transitions and literal
+  leading `git -C` operands. If any resolved path/content digest is unseen, all
+  unseen `<CONTEXT>` blocks are injected and atomically recorded, while the tool
+  is denied before execution with the neutral result `Local context activated;
+  tool was not executed.` The model receives another inference step and must
+  reissue or revise the call; the original call is never resumed automatically.
+  A repeat executes normally, and a changed `AGENTS.md` digest gates once again.
+
+  The parser is deliberately bounded rather than a complete Bash parser:
   dynamic targets such as `cd "$dir"`, `cd -`, tilde, command substitutions,
   globs, and `pushd +N` are not inferred. Pipelines, background jobs, subshells,
   functions, and shell control structures are also unsupported. An `&&`/`||`
@@ -233,15 +241,23 @@ Useful flags:
   because the attempted Git operation was already scoped there. Multiple
   statically executed Git commands in one ordinary command list are supported;
   branches dependent on an unknown prior status remain deliberately unobserved.
-  Each unique
-  path/content digest is injected once as `<CONTEXT>...</CONTEXT>`, with no
-  Metalanguage-specific content-size cap. The direct OpenRouter worker uses the
-  same directory-scope loader. OpenCode observes native Bash only
-  after execution through its authenticated host callback and adds newly
-  activated context through its pre-inference system hook, retaining explicit
-  workdir plus literal shell/Git coverage. Codex native shell and Code Mode
-  `exec_command` share the trusted post-tool hook; OpenCode Code Mode
-  still does not expose native Bash through that plugin boundary.
+  Each unique path/content digest is injected once, with no
+  Metalanguage-specific content-size cap. Only regular, non-symlink, nonblank
+  UTF-8 exact-directory files under managed roots are eligible; an empty exact
+  file never falls back to an ancestor. State records label `initial`,
+  `pre_tool_gate`, and `post_tool_fallback` activations. The retained post-tool
+  pass shares that state and remains a fallback when a statically recognizable
+  scope (for example, one created earlier in an unconditional command list)
+  becomes resolvable only after execution. It does not infer dynamic shell
+  values or a final PWD.
+
+  Codex native tools and Code Mode nested tools use trusted `UserPromptSubmit`,
+  `PreToolUse`, and `PostToolUse` hooks. Direct OpenRouter gates at its dispatch
+  boundary. OpenCode's generated plugin gates native Bash and other native tools
+  through `tool.execute.before`, retains `tool.execute.after` fallback, and adds
+  newly activated context at its next system-transform boundary. OpenCode 1.18.29
+  Code Mode exposes only MCP calls inside its confined program, not native Bash;
+  those nested MCP calls traverse the same plugin callbacks.
 - `--codex-initial-prompt TEXT`: choose the first user message.
 
 Example using the minimal base placeholder and automatic root `AGENTS.md` loading:

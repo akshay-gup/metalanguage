@@ -767,6 +767,26 @@ fn managed_hook_cli_overrides(
             TomlValue::try_from(vec![prompt_group]).context("serialize root AGENTS hook")?,
         ));
 
+        let pre_group = post_group.clone();
+        let pre_identity = HookTrustIdentity {
+            event_name: "pre_tool_use",
+            group: pre_group.clone(),
+        };
+        let pre_identity_toml =
+            TomlValue::try_from(pre_identity).context("serialize pre-tool AGENTS hook identity")?;
+        let pre_state_key = format!("{}:pre_tool_use:0:0", session_flags_path.display());
+        states.insert(
+            pre_state_key,
+            HookStateToml {
+                enabled: Some(true),
+                trusted_hash: Some(version_for_toml(&pre_identity_toml)),
+            },
+        );
+        overrides.push((
+            "hooks.PreToolUse".to_string(),
+            TomlValue::try_from(vec![pre_group]).context("serialize pre-tool AGENTS hook")?,
+        ));
+
         let post_identity = HookTrustIdentity {
             event_name: "post_tool_use",
             group: post_group.clone(),
@@ -1287,7 +1307,7 @@ mod tests {
     }
 
     #[test]
-    fn directory_agents_hook_observes_prompts_and_completed_tools() {
+    fn directory_agents_hook_gates_and_observes_tools() {
         let overrides =
             managed_hook_cli_overrides(Some("python3 /private/directory_agents_hook.py"))
                 .expect("managed directory hook overrides");
@@ -1300,6 +1320,7 @@ mod tests {
             vec![
                 "hooks.PreCompact",
                 "hooks.UserPromptSubmit",
+                "hooks.PreToolUse",
                 "hooks.PostToolUse",
                 "hooks.state",
             ]
@@ -1315,12 +1336,24 @@ mod tests {
             "python3 /private/directory_agents_hook.py"
         );
         assert_eq!(hook[0]["hooks"][0]["async"], false);
+        let value = overrides
+            .iter()
+            .find(|(key, _)| key == "hooks.PreToolUse")
+            .map(|(_, value)| value)
+            .expect("configured pre-tool hook");
+        let hook = serde_json::to_value(value).expect("serialize configured pre-tool hook");
+        assert_eq!(
+            hook[0]["hooks"][0]["command"],
+            "python3 /private/directory_agents_hook.py"
+        );
+        assert_eq!(hook[0]["hooks"][0]["async"], false);
+        assert_eq!(hook[0]["hooks"][0]["additionalContextLimit"], 0);
         let state = overrides
             .iter()
             .find(|(name, _)| name == "hooks.state")
             .and_then(|(_, value)| serde_json::to_value(value).ok())
             .expect("serialize managed hook state");
-        assert_eq!(state.as_object().map(|entries| entries.len()), Some(3));
+        assert_eq!(state.as_object().map(|entries| entries.len()), Some(4));
     }
 
     #[test]

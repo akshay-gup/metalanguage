@@ -56,43 +56,79 @@ export const TOOL_SOURCE = `export default {
 
 export const SYSTEM_PLUGIN_SOURCE = `export default async function metalanguageSystemPlugin() {
   const managedContexts = new Map()
+  const deferredSessions = new Set()
+  const gateQueues = new Map()
+  const activate = async (sessionID, payload) => {
+    const endpoint = process.env.METALANGUAGE_DIRECTORY_AGENTS_ENDPOINT
+    const token = process.env.METALANGUAGE_DIRECTORY_AGENTS_TOKEN
+    try {
+      if (!endpoint || !token) return { additional_context: "", defer: false }
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          authorization: \`Bearer \${token}\`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ ...payload, session_id: sessionID }),
+      })
+      if (!response.ok) return { additional_context: "", defer: false }
+      const parsed = await response.json()
+      const context = parsed?.additional_context
+      if (typeof context === "string" && context.trim()) {
+        const additions = managedContexts.get(sessionID) ?? []
+        if (!additions.includes(context)) additions.push(context)
+        managedContexts.set(sessionID, additions)
+      }
+      return parsed
+    } catch {
+      return { additional_context: "", defer: false }
+    }
+  }
   return {
     "experimental.chat.system.transform": async (input, output) => {
       if (!input.sessionID) return
       const exact = process.env.METALANGUAGE_OPENCODE_SYSTEM_INSTRUCTIONS
       if (exact !== undefined) output.system.splice(0, output.system.length, exact)
+      deferredSessions.delete(input.sessionID)
       const additions = managedContexts.get(input.sessionID)
       if (additions?.length) output.system.push(additions.join("\\n\\n"))
     },
-    "tool.execute.after": async (input, _output) => {
-      if (input.tool !== "bash" || !input.sessionID || !input.callID) return
-      const endpoint = process.env.METALANGUAGE_DIRECTORY_AGENTS_ENDPOINT
-      const token = process.env.METALANGUAGE_DIRECTORY_AGENTS_TOKEN
-      try {
-        if (!endpoint || !token) return
-        const response = await fetch(endpoint, {
-          method: "POST",
-          headers: {
-            authorization: \`Bearer \${token}\`,
-            "content-type": "application/json",
-          },
-          body: JSON.stringify({
-            hook_event_name: "PostToolUse",
-            tool_name: input.tool,
-            tool_input: input.args,
-            tool_use_id: input.callID,
-            session_id: input.sessionID,
-            metalanguage_shell_transitions_only: true,
-          }),
+    "tool.execute.before": async (input, output) => {
+      if (!input.sessionID || !input.callID) return
+      const prior = gateQueues.get(input.sessionID) ?? Promise.resolve()
+      const gate = prior.catch(() => {}).then(async () => {
+        if (deferredSessions.has(input.sessionID)) {
+          throw new Error("Local context activated; tool was not executed.")
+        }
+        const result = await activate(input.sessionID, {
+          hook_event_name: "PreToolUse",
+          tool_name: input.tool,
+          tool_input: output.args,
+          tool_use_id: input.callID,
         })
-        if (!response.ok) return
-        const parsed = await response.json()
-        const context = parsed?.additional_context
-        if (typeof context !== "string" || !context.trim()) return
-        const additions = managedContexts.get(input.sessionID) ?? []
-        if (!additions.includes(context)) additions.push(context)
-        managedContexts.set(input.sessionID, additions)
-      } catch {}
+        if (result?.defer === true) deferredSessions.add(input.sessionID)
+        if (!deferredSessions.has(input.sessionID)) return
+        throw new Error(
+          typeof result.neutral_result === "string"
+            ? result.neutral_result
+            : "Local context activated; tool was not executed.",
+        )
+      })
+      gateQueues.set(input.sessionID, gate)
+      try {
+        await gate
+      } finally {
+        if (gateQueues.get(input.sessionID) === gate) gateQueues.delete(input.sessionID)
+      }
+    },
+    "tool.execute.after": async (input, _output) => {
+      if (!input.sessionID || !input.callID) return
+      await activate(input.sessionID, {
+        hook_event_name: "PostToolUse",
+        tool_name: input.tool,
+        tool_input: input.args,
+        tool_use_id: input.callID,
+      })
     },
     "shell.env": async (_input, output) => {
       const configured = process.env.METALANGUAGE_OPENCODE_PROVIDER_ENV_NAMES ?? "[]"
@@ -207,12 +243,12 @@ export async function runDirectoryAgentsHandler(
   command: string[],
   payload: unknown,
   timeoutMs = 15_000,
-): Promise<{ additional_context: string }> {
-  const empty = { additional_context: "" }
+): Promise<{ additional_context: string; defer: boolean; neutral_result?: string }> {
+  const empty = { additional_context: "", defer: false }
   if (
     !command.length ||
     !isRecord(payload) ||
-    payload.hook_event_name !== "PostToolUse"
+    !["PreToolUse", "PostToolUse"].includes(String(payload.hook_event_name))
   ) return empty
   let child: Bun.PipedSubprocess
   try {
@@ -254,12 +290,21 @@ export async function runDirectoryAgentsHandler(
       const hookOutput = isRecord(parsed) ? parsed.hookSpecificOutput : undefined
       if (
         !isRecord(hookOutput) ||
-        hookOutput.hookEventName !== "PostToolUse" ||
+        hookOutput.hookEventName !== payload.hook_event_name ||
         typeof hookOutput.additionalContext !== "string"
       ) {
         return empty
       }
-      return { additional_context: hookOutput.additionalContext }
+      const defer =
+        payload.hook_event_name === "PreToolUse" &&
+        hookOutput.permissionDecision === "deny"
+      return {
+        additional_context: hookOutput.additionalContext,
+        defer,
+        ...(defer && typeof hookOutput.permissionDecisionReason === "string"
+          ? { neutral_result: hookOutput.permissionDecisionReason }
+          : {}),
+      }
     } catch {
       return empty
     }

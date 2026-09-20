@@ -82,6 +82,26 @@ class _ShellWord:
     dynamic: bool = False
 
 
+@dataclass(frozen=True)
+class _LiteralShellScopes:
+    transitions: tuple[Path, ...]
+    git_directories: tuple[Path, ...]
+
+
+@dataclass(frozen=True)
+class ManagedContextActivation:
+    additional_context: str
+    paths: tuple[Path, ...]
+    activation: str
+
+    @property
+    def deferred(self) -> bool:
+        return bool(self.additional_context)
+
+
+NEUTRAL_DEFER_RESULT = "Local context activated; tool was not executed."
+
+
 def _managed_roots(context: dict[str, Any]) -> tuple[Path, ...]:
     roots: list[Path] = []
     for key in ("workdir", "shared_archives_root", "shared_workspace_dir"):
@@ -89,7 +109,7 @@ def _managed_roots(context: dict[str, Any]) -> tuple[Path, ...]:
         if isinstance(value, str) and value:
             try:
                 root = Path(value).expanduser().resolve(strict=True)
-            except OSError:
+            except (OSError, RuntimeError):
                 continue
             if root.is_dir() and root not in roots:
                 roots.append(root)
@@ -314,35 +334,27 @@ def _change_directory(current: Path, target: str) -> tuple[Path, Path] | None:
     )
     try:
         resolved = logical.resolve(strict=True)
-    except OSError:
+    except (OSError, RuntimeError):
         return None
     if not resolved.is_dir() or not os.access(resolved, os.X_OK):
         return None
     return logical, resolved
 
 
-def literal_shell_directory_transitions(
+def _simple_shell_commands(
     command: str,
-    start_directory: Path,
-) -> tuple[Path, ...]:
-    """Return post-command-valid literal directory-transition targets.
-
-    This intentionally does not claim to parse Bash completely. Dynamic targets,
-    pipelines, background jobs, subshells, functions, and shell control structures
-    are outside the supported subset.
-    """
-
+) -> tuple[list[list[_ShellWord]], list[str]] | None:
     tokens = _lex_shell(command)
     unsupported_operators = _CONTROL_OPERATORS - {";", "&&", "||"}
     if tokens is None or any(token in unsupported_operators for token in tokens):
-        return ()
+        return None
     for index, token in enumerate(tokens):
         if token not in {"&&", "||"}:
             continue
         if index == 0 or index == len(tokens) - 1:
-            return ()
+            return None
         if tokens[index - 1] in _CONTROL_OPERATORS or tokens[index + 1] in _CONTROL_OPERATORS:
-            return ()
+            return None
 
     simple_commands: list[list[_ShellWord | str]] = []
     separators: list[str] = []
@@ -364,54 +376,11 @@ def literal_shell_directory_transitions(
     for simple in simple_commands:
         words = _command_words(simple)
         if words is None:
-            return ()
+            return None
         if words and not words[0].dynamic and words[0].value in _UNSUPPORTED_COMMANDS:
-            return ()
+            return None
         normalized.append(words)
-
-    current = start_directory.resolve()
-    stack: list[Path] = []
-    transitions: list[Path] = []
-    previous_status: bool | None = None
-    preceding_separator = ";"
-    for index, words in enumerate(normalized):
-        should_run = preceding_separator == ";"
-        if preceding_separator == "&&":
-            should_run = previous_status is True
-        elif preceding_separator == "||":
-            should_run = previous_status is False
-        if not should_run:
-            preceding_separator = separators[index] if index < len(separators) else ";"
-            continue
-
-        status: bool | None = None
-        if words and not words[0].dynamic:
-            name = words[0].value
-            if name in {"true", ":"} and len(words) == 1:
-                status = True
-            elif name == "false" and len(words) == 1:
-                status = False
-            elif name in {"cd", "pushd"}:
-                target = _literal_directory_argument(words, name)
-                if target is None:
-                    changed = None
-                else:
-                    changed = _change_directory(current, target)
-                    status = changed is not None
-                if changed is not None:
-                    logical, resolved = changed
-                    if name == "pushd":
-                        stack.append(current)
-                    current = logical
-                    transitions.append(resolved)
-            elif name == "popd" and len(words) == 1:
-                status = bool(stack)
-                if stack:
-                    current = stack.pop()
-                    transitions.append(current.resolve())
-        previous_status = status
-        preceding_separator = separators[index] if index < len(separators) else ";"
-    return tuple(dict.fromkeys(transitions))
+    return normalized, separators
 
 
 def _git_directory_operands(
@@ -482,56 +451,18 @@ def _git_directory_operands(
     return tuple(directories)
 
 
-def literal_git_directory_scopes(
+def _literal_shell_scopes(
     command: str,
     start_directory: Path,
-) -> tuple[Path, ...]:
-    """Return literal directories selected by executed ``git -C`` commands.
-
-    Repeated ``-C`` operands resolve in Git order: the first relative to the
-    shell directory and each later relative to the preceding Git directory.
-    Selection is treated as directory-scoped work even when Git later fails.
-    """
-
-    tokens = _lex_shell(command)
-    unsupported_operators = _CONTROL_OPERATORS - {";", "&&", "||"}
-    if tokens is None or any(token in unsupported_operators for token in tokens):
-        return ()
-    for index, token in enumerate(tokens):
-        if token not in {"&&", "||"}:
-            continue
-        if index == 0 or index == len(tokens) - 1:
-            return ()
-        if tokens[index - 1] in _CONTROL_OPERATORS or tokens[index + 1] in _CONTROL_OPERATORS:
-            return ()
-
-    simple_commands: list[list[_ShellWord | str]] = []
-    separators: list[str] = []
-    current_tokens: list[_ShellWord | str] = []
-    for token in tokens:
-        if token in {";", "&&", "||"}:
-            if current_tokens:
-                simple_commands.append(current_tokens)
-                separators.append(str(token))
-                current_tokens = []
-            continue
-        current_tokens.append(token)
-    if current_tokens:
-        simple_commands.append(current_tokens)
-    if len(separators) >= len(simple_commands):
-        separators = separators[: len(simple_commands) - 1]
-
-    normalized: list[list[_ShellWord]] = []
-    for simple in simple_commands:
-        words = _command_words(simple)
-        if words is None:
-            return ()
-        if words and not words[0].dynamic and words[0].value in _UNSUPPORTED_COMMANDS:
-            return ()
-        normalized.append(words)
+) -> _LiteralShellScopes:
+    parsed = _simple_shell_commands(command)
+    if parsed is None:
+        return _LiteralShellScopes((), ())
+    normalized, separators = parsed
 
     current = start_directory.resolve()
     stack: list[Path] = []
+    transitions: list[Path] = []
     directories: list[Path] = []
     previous_status: bool | None = None
     preceding_separator = ";"
@@ -555,16 +486,18 @@ def literal_git_directory_scopes(
             elif name in {"cd", "pushd"}:
                 target = _literal_directory_argument(words, name)
                 changed = _change_directory(current, target) if target is not None else None
-                status = changed is not None
+                status = changed is not None if target is not None else None
                 if changed is not None:
-                    logical, _resolved = changed
+                    logical, resolved = changed
                     if name == "pushd":
                         stack.append(current)
                     current = logical
+                    transitions.append(resolved)
             elif name == "popd" and len(words) == 1:
                 status = bool(stack)
                 if stack:
                     current = stack.pop()
+                    transitions.append(current.resolve())
             elif name == "git":
                 selected = _git_directory_operands(words, current)
                 if selected is not None:
@@ -572,19 +505,67 @@ def literal_git_directory_scopes(
                 status = None
         previous_status = status
         preceding_separator = separators[index] if index < len(separators) else ";"
-    return tuple(dict.fromkeys(directories))
+    return _LiteralShellScopes(
+        tuple(dict.fromkeys(transitions)),
+        tuple(dict.fromkeys(directories)),
+    )
+
+
+def literal_shell_directory_transitions(
+    command: str,
+    start_directory: Path,
+) -> tuple[Path, ...]:
+    """Return statically executed literal directory-transition targets.
+
+    This intentionally does not claim to parse Bash completely. Dynamic targets,
+    pipelines, background jobs, subshells, functions, and shell control structures
+    are outside the supported subset.
+    """
+
+    return _literal_shell_scopes(command, start_directory).transitions
+
+
+def literal_git_directory_scopes(
+    command: str,
+    start_directory: Path,
+) -> tuple[Path, ...]:
+    """Return literal directories selected by statically executed ``git -C``.
+
+    Repeated ``-C`` operands resolve in Git order: the first relative to the
+    shell directory and each later relative to the preceding Git directory.
+    Selection is treated as directory-scoped work even when Git later fails.
+    """
+
+    return _literal_shell_scopes(command, start_directory).git_directories
+
+
+def literal_shell_directory_scopes(
+    command: str,
+    start_directory: Path,
+) -> tuple[Path, ...]:
+    """Return all statically executed shell and Git exact-directory scopes."""
+
+    scopes = _literal_shell_scopes(command, start_directory)
+    return tuple(dict.fromkeys((*scopes.transitions, *scopes.git_directories)))
 
 
 def _read_agents(directory: Path) -> tuple[Path, str, str] | None:
     candidate = directory / "AGENTS.md"
     descriptor: int | None = None
     try:
+        path_metadata = os.lstat(candidate)
+        if not stat.S_ISREG(path_metadata.st_mode):
+            return None
         descriptor = os.open(
             candidate,
             os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
         )
         metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode):
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or (metadata.st_dev, metadata.st_ino)
+            != (path_metadata.st_dev, path_metadata.st_ino)
+        ):
             return None
         with os.fdopen(descriptor, "rb", closefd=False) as handle:
             content_bytes = handle.read()
@@ -599,30 +580,72 @@ def _read_agents(directory: Path) -> tuple[Path, str, str] | None:
             os.close(descriptor)
 
 
-def _first_load(state_path: Path, key: str) -> bool:
+def _state_key(record: str) -> tuple[str, str] | None:
+    try:
+        parsed = json.loads(record)
+    except json.JSONDecodeError:
+        parts = record.rstrip("\n").split("\t")
+        return (parts[0], parts[1]) if len(parts) >= 2 else None
+    if not isinstance(parsed, dict):
+        return None
+    path = parsed.get("path")
+    digest = parsed.get("digest")
+    if not isinstance(path, str) or not isinstance(digest, str):
+        return None
+    return path, digest
+
+
+def _claim_unseen(
+    state_path: Path,
+    candidates: list[tuple[Path, str, str]],
+    activation: str,
+) -> list[tuple[Path, str, str]]:
+    if not candidates:
+        return []
     state_path.parent.mkdir(parents=True, exist_ok=True)
     with state_path.open("a+", encoding="utf-8") as state:
         os.chmod(state_path, 0o600)
         fcntl.flock(state.fileno(), fcntl.LOCK_EX)
         state.seek(0)
-        if key in {line.rstrip("\n") for line in state}:
-            return False
-        state.write(key + "\n")
+        seen = {
+            key
+            for line in state
+            if (key := _state_key(line)) is not None
+        }
+        unseen = [
+            candidate
+            for candidate in candidates
+            if (str(candidate[0]), candidate[1]) not in seen
+        ]
+        if not unseen:
+            return []
+        records = "".join(
+            f"{path}\t{digest}\t{activation}\n"
+            for path, digest, _content in unseen
+        )
+        state.seek(0, os.SEEK_END)
+        state.write(records)
         state.flush()
-        return True
+        os.fsync(state.fileno())
+        return unseen
 
 
-def managed_context_for_directories(
+def managed_context_activation(
     context: dict[str, Any],
     state_path: Path,
     directories: list[Path] | tuple[Path, ...],
-) -> str:
+    *,
+    activation: str,
+) -> ManagedContextActivation:
     roots = _managed_roots(context)
-    observations: list[str] = []
-    for directory in dict.fromkeys(directories):
+    candidates: list[tuple[Path, str, str]] = []
+    candidate_keys: set[tuple[str, str]] = set()
+    for raw_directory in dict.fromkeys(directories):
         try:
-            directory = directory.resolve(strict=True)
-        except OSError:
+            directory = raw_directory.resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        if not directory.is_dir():
             continue
         if not any(directory == root or root in directory.parents for root in roots):
             continue
@@ -632,10 +655,110 @@ def managed_context_for_directories(
         if loaded is None:
             continue
         path, digest, content = loaded
-        key = f"{path}\t{digest}"
-        if _first_load(state_path, key):
-            observations.append(f"<CONTEXT>\n{content.rstrip()}\n</CONTEXT>")
-    return "\n\n".join(observations)
+        key = str(path), digest
+        if key in candidate_keys:
+            continue
+        candidate_keys.add(key)
+        candidates.append((path, digest, content))
+    unseen = _claim_unseen(state_path, candidates, activation)
+    return ManagedContextActivation(
+        additional_context="\n\n".join(
+            f"<CONTEXT>\n{content.rstrip()}\n</CONTEXT>"
+            for _path, _digest, content in unseen
+        ),
+        paths=tuple(path for path, _digest, _content in unseen),
+        activation=activation,
+    )
+
+
+def managed_context_for_directories(
+    context: dict[str, Any],
+    state_path: Path,
+    directories: list[Path] | tuple[Path, ...],
+    *,
+    activation: str = "post_tool_fallback",
+) -> str:
+    return managed_context_activation(
+        context,
+        state_path,
+        directories,
+        activation=activation,
+    ).additional_context
+
+
+def _hook_base_directory(payload: dict[str, Any], root: Path) -> Path:
+    value = payload.get("cwd")
+    if not isinstance(value, str) or not value.strip():
+        return root
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        return root
+    try:
+        resolved = path.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return root
+    return resolved if resolved.is_dir() else root
+
+
+def _tool_directories(
+    payload: dict[str, Any],
+    root: Path,
+    *,
+    include_tool_directory: bool,
+) -> tuple[Path, ...]:
+    base = _hook_base_directory(payload, root)
+    try:
+        directory = _tool_directory(payload, base)
+    except (OSError, RuntimeError):
+        directory = base
+    directories = [directory] if include_tool_directory else []
+    tool_input = payload.get("tool_input")
+    arguments = tool_input if isinstance(tool_input, dict) else {}
+    command = arguments.get("command")
+    tool_name = str(payload.get("tool_name") or "").lower()
+    if tool_name in _SHELL_TOOL_NAMES and isinstance(command, str):
+        scopes = _literal_shell_scopes(command, directory)
+        directories.extend(scopes.transitions)
+        directories.extend(scopes.git_directories)
+    return tuple(dict.fromkeys(directories))
+
+
+def pre_tool_context_gate(
+    context: dict[str, Any],
+    payload: dict[str, Any],
+    state_path: Path,
+) -> ManagedContextActivation:
+    roots = _managed_roots(context)
+    if not roots:
+        return ManagedContextActivation("", (), "pre_tool_gate")
+    return managed_context_activation(
+        context,
+        state_path,
+        _tool_directories(payload, roots[0], include_tool_directory=True),
+        activation="pre_tool_gate",
+    )
+
+
+def post_tool_context_activation(
+    context: dict[str, Any],
+    payload: dict[str, Any],
+    state_path: Path,
+) -> ManagedContextActivation:
+    roots = _managed_roots(context)
+    if not roots:
+        return ManagedContextActivation("", (), "post_tool_fallback")
+    return managed_context_activation(
+        context,
+        state_path,
+        _tool_directories(
+            payload,
+            roots[0],
+            include_tool_directory=(
+                payload.get("metalanguage_shell_transitions_only") is not True
+            ),
+        ),
+        activation="post_tool_fallback",
+    )
 
 
 def directory_agents_observation(
@@ -650,24 +773,22 @@ def directory_agents_observation(
         return ""
     event_name = payload.get("hook_event_name")
     if event_name == "UserPromptSubmit":
-        directories = [roots[0]]
+        return managed_context_activation(
+            context,
+            state_path,
+            [roots[0]],
+            activation="initial",
+        ).additional_context
+    elif event_name == "PreToolUse":
+        return pre_tool_context_gate(context, payload, state_path).additional_context
     elif event_name == "PostToolUse":
-        directory = _tool_directory(payload, roots[0])
-        directories = (
-            []
-            if payload.get("metalanguage_shell_transitions_only") is True
-            else [directory]
-        )
-        tool_input = payload.get("tool_input")
-        arguments = tool_input if isinstance(tool_input, dict) else {}
-        command = arguments.get("command")
-        tool_name = str(payload.get("tool_name") or "").lower()
-        if tool_name in _SHELL_TOOL_NAMES and isinstance(command, str):
-            directories.extend(literal_shell_directory_transitions(command, directory))
-            directories.extend(literal_git_directory_scopes(command, directory))
+        return post_tool_context_activation(
+            context,
+            payload,
+            state_path,
+        ).additional_context
     else:
         return ""
-    return managed_context_for_directories(context, state_path, directories)
 
 
 def main() -> None:
@@ -687,14 +808,20 @@ def main() -> None:
         )
         if not observation:
             return
+        hook_output: dict[str, Any] = {
+            "hookEventName": event_name,
+            "additionalContext": observation,
+        }
+        if event_name == "PreToolUse":
+            hook_output.update(
+                {
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": NEUTRAL_DEFER_RESULT,
+                }
+            )
         print(
             json.dumps(
-                {
-                    "hookSpecificOutput": {
-                        "hookEventName": event_name,
-                        "additionalContext": observation,
-                    }
-                },
+                {"hookSpecificOutput": hook_output},
                 ensure_ascii=False,
             )
         )

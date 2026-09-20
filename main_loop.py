@@ -46,9 +46,9 @@ from utils.directory_agents import (
     ensure_directory_tree_agents_files,
 )
 from utils.directory_agents_hook import (
-    literal_git_directory_scopes,
-    literal_shell_directory_transitions,
-    managed_context_for_directories,
+    NEUTRAL_DEFER_RESULT,
+    post_tool_context_activation,
+    pre_tool_context_gate,
 )
 from utils.opencode_runner import (
     SOURCE_AUDITED_BUN_VERSIONS,
@@ -2116,6 +2116,7 @@ def run_worker(
             final_text = _extract_text_from_response(response)
             break
 
+        deferred_this_response = False
         for call in tool_calls:
             additional_managed_context = ""
             call_id = call.get("call_id")
@@ -2150,38 +2151,19 @@ def run_worker(
 
             tool_name = str(call.get("name") or "")
             command = str(args.get("command", "")).strip()
-            benchmark_tool_result = benchmark_driver.handle_tool(
-                rollout_benchmark,
-                tool_name,
-                args,
-            )
-            if benchmark_tool_result is not None:
-                tool_result = benchmark_tool_result
-            elif tool_name == "spawn_child":
-                tool_result = _spawn_child_continuation(
-                    context=continuation_context,
-                    args=args,
-                    progress_callback=progress_callback,
-                )
-                if tool_result.get("child_spawned"):
-                    spawned_child_slots.append(tool_result)
-            elif tool_name != "run_bash":
-                tool_result = {"error": f"unsupported tool '{call.get('name')}'"}
-            elif not command:
-                tool_result = {"error": "missing or malformed 'command' argument"}
-            else:
-                command_index += 1
-                if progress_callback is not None:
-                    progress_callback(
-                        "worker_tool_started",
-                        elapsed_seconds=round(time.monotonic() - started_at, 3),
-                        turn_count=turn_count,
-                        command_index=command_index,
-                        command=command[:1000],
-                    )
+            tool_was_executed = False
+            post_tool_args = args
+            safe_wd: str | None = None
+            pre_tool_args = args
+            if tool_name == "run_bash":
                 wd = str(args.get("working_directory") or workdir)
                 try:
-                    resolved_wd = Path(wd).resolve()
+                    requested_wd = Path(wd).expanduser()
+                    resolved_wd = (
+                        requested_wd.resolve()
+                        if requested_wd.is_absolute()
+                        else (workdir / requested_wd).resolve()
+                    )
                     allowed_roots = [
                         workdir.resolve(),
                         seed_output_dir.resolve(),
@@ -2195,6 +2177,67 @@ def run_worker(
                             break
                 except Exception:
                     safe_wd = str(workdir)
+                pre_tool_args = {**args, "working_directory": safe_wd}
+            gate = pre_tool_context_gate(
+                continuation_context,
+                {
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": tool_name,
+                    "tool_input": pre_tool_args,
+                    "cwd": str(workdir),
+                },
+                worker_state_dir / "directory_agents_seen",
+            )
+            if gate.deferred:
+                deferred_this_response = True
+                additional_managed_context = gate.additional_context
+                if progress_callback is not None:
+                    progress_callback(
+                        "directory_agents_activated",
+                        elapsed_seconds=round(time.monotonic() - started_at, 3),
+                        turn_count=turn_count,
+                        activation=gate.activation,
+                        paths=[str(path) for path in gate.paths],
+                    )
+            if deferred_this_response:
+                tool_result = {
+                    "status": "deferred",
+                    "message": NEUTRAL_DEFER_RESULT,
+                    "tool_executed": False,
+                }
+            elif (
+                benchmark_tool_result := benchmark_driver.handle_tool(
+                    rollout_benchmark,
+                    tool_name,
+                    args,
+                )
+            ) is not None:
+                tool_was_executed = True
+                tool_result = benchmark_tool_result
+            elif tool_name == "spawn_child":
+                tool_was_executed = True
+                tool_result = _spawn_child_continuation(
+                    context=continuation_context,
+                    args=args,
+                    progress_callback=progress_callback,
+                )
+                if tool_result.get("child_spawned"):
+                    spawned_child_slots.append(tool_result)
+            elif tool_name != "run_bash":
+                tool_result = {"error": f"unsupported tool '{call.get('name')}'"}
+            elif not command:
+                tool_result = {"error": "missing or malformed 'command' argument"}
+            else:
+                assert safe_wd is not None
+                command_index += 1
+                if progress_callback is not None:
+                    progress_callback(
+                        "worker_tool_started",
+                        elapsed_seconds=round(time.monotonic() - started_at, 3),
+                        turn_count=turn_count,
+                        command_index=command_index,
+                        command=command[:1000],
+                    )
                 before_shared = _snapshot_workspace_files(shared_workspace_dir)
                 tool_result = _run_bash_tool(
                     command=command,
@@ -2203,23 +2246,8 @@ def run_worker(
                     timeout_seconds=bash_timeout_seconds,
                     rollout_username=rollout_username,
                 )
-                observed_directories = list(
-                    literal_shell_directory_transitions(
-                        command,
-                        Path(safe_wd),
-                    )
-                )
-                observed_directories.extend(
-                    literal_git_directory_scopes(
-                        command,
-                        Path(safe_wd),
-                    )
-                )
-                additional_managed_context = managed_context_for_directories(
-                    continuation_context,
-                    worker_state_dir / "directory_agents_seen",
-                    observed_directories,
-                )
+                tool_was_executed = True
+                post_tool_args = {**args, "working_directory": safe_wd}
                 after_shared = _snapshot_workspace_files(shared_workspace_dir)
                 shared_events = _shared_workspace_events(
                     before=before_shared,
@@ -2253,6 +2281,27 @@ def run_worker(
                         command_index=command_index,
                         exit_code=tool_result.get("exit_code"),
                         timed_out=tool_result.get("timed_out"),
+                    )
+
+            if tool_was_executed:
+                post_activation = post_tool_context_activation(
+                    continuation_context,
+                    {
+                        "hook_event_name": "PostToolUse",
+                        "tool_name": tool_name,
+                        "tool_input": post_tool_args,
+                        "cwd": str(workdir),
+                    },
+                    worker_state_dir / "directory_agents_seen",
+                )
+                additional_managed_context = post_activation.additional_context
+                if additional_managed_context and progress_callback is not None:
+                    progress_callback(
+                        "directory_agents_activated",
+                        elapsed_seconds=round(time.monotonic() - started_at, 3),
+                        turn_count=turn_count,
+                        activation=post_activation.activation,
+                        paths=[str(path) for path in post_activation.paths],
                     )
 
             conversation.append(call)
