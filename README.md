@@ -280,8 +280,42 @@ Useful flags:
   Completion through a later `write_stdin` still lacks the original workdir.
   Direct OpenRouter gates at its dispatch boundary.
   OpenCode's generated plugin gates native Bash and other native tools through
-  `tool.execute.before`, then retains `tool.execute.after` fallback and injects
-  context at the next system-transform boundary. OpenCode 1.18.29 Code Mode
+  `tool.execute.before`, then retains `tool.execute.after` fallback. Nested
+  context is projected through `experimental.chat.messages.transform` as a
+  clearly labelled **synthetic user-role message**, not an assistant statement
+  or a new human request. This intentionally has lower instruction authority
+  than Codex's developer-role additions. The fixed root/system instructions and
+  actual initial `Begin.` message remain unchanged; nested guides no longer
+  accumulate in the system prefix.
+
+  Each activation gets a unique managed message ID. At the first message
+  projection after activation, it is anchored after the last whole conversation
+  message, following that exchange's tool calls/results and before the model
+  reconsiders the denied call. Later projections retain that anchor and ID,
+  rather than moving the guide to the tail. Callback batches retain arrival
+  order; pre-gates and post-fallbacks share a serial queue. A new fallback also
+  latches subsequent admissions until its context is projected; already
+  dispatched tools are not undone. A late callback first appears at the next
+  available projection, without retroactively changing an earlier request.
+  System transforms alone cannot release the pre-tool latch.
+
+  This is a request projection held by the plugin for the live session, not a
+  persisted user message in OpenCode's database or a rewritten tool result.
+  The host's path/digest activation ledger remains the delivery audit. Repeated
+  projections/duplicate callback bodies do not duplicate owned messages; changed
+  guide revisions remain cumulative at their separate activation positions.
+  Only owned IDs are managed: copied guide text in real user/assistant messages
+  and tool outputs is untouched. Pending tool results or a missing historical
+  anchor stop projection rather than silently relocating guidance. Automatic
+  compaction/pruning is disabled by the worker; restoring this in-memory
+  projection after a server restart or resuming that native session is not
+  supported. New managed rollouts create a new native session. OpenCode decay
+  remains unsupported. This placement change and its focused regression tests
+  have not been run or live-validated. The previously observed installed
+  OpenCode 1.18.31 remains outside the audited 1.18.29 whitelist; that separate
+  live-validation blocker is unchanged.
+
+  OpenCode 1.18.29 Code Mode
   exposes only MCP calls inside its confined program, not native Bash; those
   nested MCP calls do traverse the same plugin callbacks, while there is no
   Code Mode native-shell boundary to intercept.

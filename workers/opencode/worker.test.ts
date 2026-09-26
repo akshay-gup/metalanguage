@@ -804,6 +804,7 @@ describe("OpenCode native protocol adapter", () => {
     expect(TOOL_SOURCE).toContain("METALANGUAGE_SPAWN_CHILD_ENDPOINT")
     expect(TOOL_SOURCE).not.toContain("METALANGUAGE_OPENCODE_WORKER_SCRIPT")
     expect(SYSTEM_PLUGIN_SOURCE).toContain("experimental.chat.system.transform")
+    expect(SYSTEM_PLUGIN_SOURCE).toContain("experimental.chat.messages.transform")
     expect(SYSTEM_PLUGIN_SOURCE).toContain("output.system.splice")
     expect(SYSTEM_PLUGIN_SOURCE).toContain('"tool.execute.before"')
     expect(SYSTEM_PLUGIN_SOURCE).toContain('"tool.execute.after"')
@@ -947,8 +948,25 @@ describe("directory AGENTS supervisor bridge", () => {
         )
         expect(output.system).toEqual([
           "exact instructions\n\n<CONTEXT>\nOpenCode root context\n</CONTEXT>",
-          expect.stringContaining("OpenCode project context"),
         ])
+        // A system transform alone cannot release an unseen guide's gate.
+        await expect(plugin["tool.execute.before"](identity, { args })).rejects.toThrow(
+          "Local context activated; tool was not executed.",
+        )
+        const conversation = { messages: [
+          {
+            info: { id: "user-begin", sessionID: "session-test", role: "user", time: { created: 1 }, agent: "build", model: { providerID: "fixture", modelID: "fixture" } },
+            parts: [{ type: "text", text: "Begin." }],
+          },
+          {
+            info: { id: "assistant-gate", sessionID: "session-test", role: "assistant" },
+            parts: [{ type: "tool", callID: "call-test", state: { status: "error", error: "Local context activated; tool was not executed." } }],
+          },
+        ] }
+        await plugin["experimental.chat.messages.transform"]({}, conversation)
+        expect(conversation.messages).toHaveLength(3)
+        expect(conversation.messages[2].info.role).toBe("user")
+        expect(conversation.messages[2].parts[0].text).toContain("OpenCode project context")
         await expect(plugin["tool.execute.before"](identity, { args })).resolves.toBeUndefined()
         await plugin["tool.execute.after"]({ ...identity, args }, toolOutput)
         await expect(
@@ -962,11 +980,17 @@ describe("directory AGENTS supervisor bridge", () => {
           { sessionID: "session-test" },
           otherOutput,
         )
-        expect(otherOutput.system).toHaveLength(2)
+        expect(otherOutput.system).toHaveLength(1)
         expect(otherOutput.system[0]).toContain("exact instructions")
         expect(otherOutput.system[0]).toContain("OpenCode root context")
-        expect(otherOutput.system[1]).toContain("OpenCode project context")
-        expect(otherOutput.system[1]).toContain("OpenCode other-tool context")
+        conversation.messages.push({
+          info: { id: "assistant-other-gate", sessionID: "session-test", role: "assistant" },
+          parts: [{ type: "tool", callID: "call-read", state: { status: "error", error: "Local context activated; tool was not executed." } }],
+        })
+        await plugin["experimental.chat.messages.transform"]({}, conversation)
+        expect(conversation.messages).toHaveLength(5)
+        expect(conversation.messages[2].parts[0].text).toContain("OpenCode project context")
+        expect(conversation.messages[4].parts[0].text).toContain("OpenCode other-tool context")
       } finally {
         if (priorEndpoint === undefined) delete process.env.METALANGUAGE_DIRECTORY_AGENTS_ENDPOINT
         else process.env.METALANGUAGE_DIRECTORY_AGENTS_ENDPOINT = priorEndpoint
