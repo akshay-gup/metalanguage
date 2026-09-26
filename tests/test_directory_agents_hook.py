@@ -144,6 +144,27 @@ class DirectoryAgentsHookTests(unittest.TestCase):
         self.assertIn("project context", context)
         self.assertEqual(self._pre("cd archives; cd project; pwd"), "")
 
+    def test_exec_pre_hook_uses_explicit_workdir_before_command_execution(self) -> None:
+        payload = {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "cwd": str(self.managed),
+            "tool_input": {"command": "pwd", "workdir": "archives/project"},
+        }
+        response = self._invoke_response(payload)
+        self.assertEqual(
+            response,
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "additionalContext": "<CONTEXT>\nproject context\n</CONTEXT>",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": "Local context activated; tool was not executed.",
+                }
+            },
+        )
+        self.assertEqual(self._invoke_response(payload), {})
+
     def test_pre_tool_explicit_workdir_and_git_c_are_eligible(self) -> None:
         explicit = self._invoke_response(
             {

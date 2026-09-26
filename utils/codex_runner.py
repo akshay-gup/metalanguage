@@ -14,6 +14,10 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from filelock import FileLock, Timeout
+
+from utils import codex_bundle
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUNNER_CRATE_DIR = PROJECT_ROOT / "crates" / "metalanguage-codex-runner"
 RUNNER_MANIFEST = RUNNER_CRATE_DIR / "Cargo.toml"
@@ -119,6 +123,34 @@ def _require_adjacent_code_mode_host(runner_bin: Path) -> None:
 
 
 def ensure_codex_runner_built(*, release: bool = False) -> Path:
+    runner_bin = runner_binary_path(release=release)
+    runner_bin.parent.mkdir(parents=True, exist_ok=True)
+    manifest = codex_bundle.manifest_path(runner_bin)
+    try:
+        with FileLock(str(manifest) + ".lock", timeout=0):
+            # Invalidate before either build: a failed/partial rebuild must not
+            # leave an older pair's provenance usable.
+            manifest.unlink(missing_ok=True)
+            sources = _codex_bundle_source_fingerprint()
+            # Require Cargo to materialize both expected outputs. In particular,
+            # a target override must not leave old host-platform binaries here
+            # and accidentally certify them after building somewhere else.
+            runner_bin.unlink(missing_ok=True)
+            runner_bin.with_name(CODE_MODE_HOST_FILENAME).unlink(missing_ok=True)
+            _build_codex_runner_and_host(release=release)
+            if _codex_bundle_source_fingerprint() != sources:
+                raise RuntimeError(
+                    "Codex bundle sources changed during the build. " + codex_bundle.REBUILD
+                )
+            codex_bundle.write_manifest(
+                runner_bin, runner_bin.with_name(CODE_MODE_HOST_FILENAME), sources, release=release
+            )
+    except Timeout as exc:
+        raise RuntimeError("Another Codex runner/host bundle build is in progress.") from exc
+    return runner_bin
+
+
+def _build_codex_runner_and_host(*, release: bool) -> None:
     profile_args = ["--release"] if release else []
     target_dir = _runner_target_dir()
     build_env = os.environ.copy()
@@ -152,51 +184,24 @@ def ensure_codex_runner_built(*, release: bool = False) -> Path:
     if not runner_bin.is_file() or not os.access(runner_bin, os.X_OK):
         raise RuntimeError(f"Cargo did not produce an executable Codex runner: {runner_bin}")
     _require_adjacent_code_mode_host(runner_bin)
-    return runner_bin
 
 
-def _codex_runner_source_inputs() -> list[Path]:
-    inputs = [RUNNER_MANIFEST]
-    lockfile = RUNNER_CRATE_DIR / "Cargo.lock"
-    if lockfile.exists():
-        inputs.append(lockfile)
-    build_rs = RUNNER_CRATE_DIR / "build.rs"
-    if build_rs.exists():
-        inputs.append(build_rs)
-    src_dir = RUNNER_CRATE_DIR / "src"
-    if src_dir.exists():
-        inputs.extend(sorted(src_dir.rglob("*.rs")))
-    return inputs
-
-
-def _newest_codex_runner_source_input() -> tuple[Path, int] | None:
-    newest: tuple[Path, int] | None = None
-    for path in _codex_runner_source_inputs():
-        try:
-            mtime_ns = path.stat().st_mtime_ns
-        except FileNotFoundError:
-            continue
-        if newest is None or mtime_ns > newest[1]:
-            newest = (path, mtime_ns)
-    return newest
+def _codex_bundle_source_fingerprint(*, target_dir: Path | None = None) -> dict[str, str]:
+    return codex_bundle.source_fingerprint(
+        PROJECT_ROOT, CODEX_ROOT, RUNNER_CRATE_DIR,
+        target_dir if target_dir is not None else _runner_target_dir(),
+    )
 
 
 def _assert_managed_codex_runner_fresh(path: Path, *, release: bool = False) -> None:
-    managed_path = runner_binary_path(release=release).expanduser().resolve()
-    if path != managed_path:
-        return
-
-    newest = _newest_codex_runner_source_input()
-    if newest is None:
-        return
-    newest_path, newest_mtime_ns = newest
-    if path.stat().st_mtime_ns >= newest_mtime_ns:
-        return
-
-    raise RuntimeError(
-        "Codex runner binary is older than its source inputs: "
-        f"{path} is older than {newest_path}. Rebuild it with "
-        "--codex-build-runner so the matching code-mode host is rebuilt too."
+    # Explicit runner paths must not bypass provenance checks for the paired host.
+    if not codex_bundle.manifest_path(path).is_file():
+        raise RuntimeError(
+            f"Codex runner/host bundle has no build manifest: {path}. {codex_bundle.REBUILD}"
+        )
+    codex_bundle.validate_manifest(
+        path, path.with_name(CODE_MODE_HOST_FILENAME),
+        _codex_bundle_source_fingerprint(target_dir=path.parent.parent), release=release,
     )
 
 

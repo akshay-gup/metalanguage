@@ -202,10 +202,26 @@ uv run python -B main_loop.py \
   --num-rollouts 8
 ```
 
+The runner and CodeMode host are validated as one local build. The manifest
+records the vendored Codex commit plus content fingerprints for its tracked and
+nonignored source files, the runner crate, build helpers, and local Cargo config.
+Dirty edits, additions, and deletions invalidate it even if modification times
+are preserved. Ignored build products and the configured target directory are
+excluded from source hashing. Executable file identities bind both binaries to
+that build without hashing build outputs; copying or replacing either may require
+a rebuild. Old binaries without a manifest fail closed with rebuild instructions.
+
 Useful flags:
 
-- `--codex-build-runner`: build the runner before starting the episode.
-- `--codex-runner-bin PATH`: use an explicit prebuilt runner binary.
+- `--codex-build-runner`: build the runner and matching CodeMode host before
+  starting the episode. A successful paired build writes a local `.bundle.json`
+  manifest beside the runner. Builds invalidate the old manifest and remove the
+  two previous executable outputs first, so Cargo must produce both again, and
+  reject source changes detected between their initial and final fingerprints.
+- `--codex-runner-bin PATH`: use an explicit prebuilt runner binary with its
+  adjacent host and valid build manifest; explicit paths do not bypass freshness
+  validation. To build at another location, set `CARGO_TARGET_DIR` and retain the
+  resulting `debug/` or `release/` bundle directory layout.
 - `--codex-home PATH`: choose the Codex auth/config directory.
 - `--codex-sandbox-mode read-only|workspace-write|danger-full-access`: choose the
   rollout sandbox mode.
@@ -257,7 +273,13 @@ Useful flags:
 
   Codex native tools and Code Mode nested tools use the trusted `PreToolUse` and
   `PostToolUse` hooks; the redundant initial `UserPromptSubmit` hook is not
-  installed. Direct OpenRouter gates at its dispatch boundary.
+  installed. The managed Codex source forwards an explicitly supplied
+  `exec_command.workdir` unchanged alongside `command` before execution and on
+  direct completion; an omitted workdir stays omitted. The existing directory
+  resolver uses this start directory without inferring a dynamic final PWD.
+  Completion through a later `write_stdin` still lacks the original workdir.
+  These local hook changes have not yet been tested or rebuilt into the paired
+  runner/CodeMode-host binaries. Direct OpenRouter gates at its dispatch boundary.
   OpenCode's generated plugin gates native Bash and other native tools through
   `tool.execute.before`, then retains `tool.execute.after` fallback and injects
   context at the next system-transform boundary. OpenCode 1.18.29 Code Mode
