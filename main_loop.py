@@ -40,6 +40,7 @@ from utils.benchmark_driver import (
     active_benchmark_item,
 )
 from utils.codex_runner import resolve_codex_runner_bin, run_codex_rollout
+from utils.directory_agents_decay import claim_policy, validate_policy
 from utils.directory_agents import (
     DirectoryAgentsWatcher,
     ensure_directory_agents_file,
@@ -2011,6 +2012,8 @@ def run_worker(
     progress_callback: Any = None,
 ) -> WorkerResult:
     """Run a multi-turn tool-calling worker loop and return final assistant text."""
+    validate_policy(continuation_context.get("directory_agents_mode", "cumulative"),
+                    continuation_context.get("directory_agents_decay_steps"), {"openrouter"})
     initial_activation = initial_context_activation(
         {**continuation_context, "workdir": str(workdir)},
         worker_state_dir / "directory_agents_seen",
@@ -2382,6 +2385,8 @@ def run_codex_worker(
     persist_session: bool = False,
 ) -> WorkerResult:
     """Run one rollout through the Metalanguage-owned Codex runner."""
+    validate_policy((continuation_context or {}).get("directory_agents_mode", "cumulative"),
+                    (continuation_context or {}).get("directory_agents_decay_steps"), {"codex"})
 
     initial_activation = initial_context_activation(
         {
@@ -2420,6 +2425,8 @@ def run_codex_worker(
         sandbox_mode=sandbox_mode,
         initial_user_text=initial_user_text,
         initial_developer_context=initial_activation.additional_context,
+        directory_agents_mode=(continuation_context or {}).get("directory_agents_mode", "cumulative"),
+        directory_agents_decay_steps=(continuation_context or {}).get("directory_agents_decay_steps"),
         base_instructions=base_instructions,
         spawn_child_handler_context_path=continuation_context_path,
         benchmark_mcp_servers=benchmark_mcp_servers,
@@ -2491,6 +2498,8 @@ def run_opencode_worker(
     progress_callback: Any = None,
 ) -> WorkerResult:
     """Run one rollout through the Metalanguage-owned TypeScript/Bun worker."""
+    validate_policy((continuation_context or {}).get("directory_agents_mode", "cumulative"),
+                    (continuation_context or {}).get("directory_agents_decay_steps"), {"opencode"})
 
     initial_activation = initial_context_activation(
         {**(continuation_context or {}), "workdir": str(workdir)},
@@ -3099,6 +3108,9 @@ def _validate_shuffled_rollout_records(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run one RLVR episode.")
+    parser.add_argument("--directory-agents-mode", choices=["cumulative", "decay"], default="cumulative")
+    parser.add_argument("--directory-agents-decay-steps", type=int, default=None,
+                        help="Required positive K for decay; acknowledged model inference steps.")
     parser.add_argument(
         "--benchmark",
         choices=["supergpqa", "arc-agi", "open-ended"],
@@ -3491,6 +3503,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
         rollout_slots, enabled=fixed_rollouts_enabled
     )
     required_backends = {slot.worker_backend for slot in rollout_slots}
+    validate_policy(args.directory_agents_mode, args.directory_agents_decay_steps, required_backends)
     args._benchmark_worker_backend = rollout_slots[0].worker_backend
     if args.worker_timeout_seconds <= 0:
         raise ValueError("--worker-timeout-seconds must be > 0")
@@ -3507,6 +3520,8 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
     runtime_root = _resolve_runtime_root(args.runtime_root)
     runtime_was_empty = not any(runtime_root.iterdir())
     _claim_runtime_archive_identity(runtime_root)
+    claim_policy(runtime_root, args.directory_agents_mode, args.directory_agents_decay_steps,
+                 was_empty=runtime_was_empty)
     _claim_runtime_rollout_identity(
         runtime_root,
         rollout_slots,
@@ -4372,6 +4387,9 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 shared_archives_root=shared_archives_root,
             )
             continuation_context.update(task_rollout_metadata)
+            if args.directory_agents_mode == "decay":
+                continuation_context["directory_agents_mode"] = "decay"
+                continuation_context["directory_agents_decay_steps"] = args.directory_agents_decay_steps
             planned_context_path = (
                 opencode_mcp_control_dir / CONTINUATION_CONTEXT_FILENAME
                 if worker_backend == "opencode"

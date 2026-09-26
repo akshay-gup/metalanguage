@@ -278,8 +278,7 @@ Useful flags:
   direct completion; an omitted workdir stays omitted. The existing directory
   resolver uses this start directory without inferring a dynamic final PWD.
   Completion through a later `write_stdin` still lacks the original workdir.
-  These local hook changes have not yet been tested or rebuilt into the paired
-  runner/CodeMode-host binaries. Direct OpenRouter gates at its dispatch boundary.
+  Direct OpenRouter gates at its dispatch boundary.
   OpenCode's generated plugin gates native Bash and other native tools through
   `tool.execute.before`, then retains `tool.execute.after` fallback and injects
   context at the next system-transform boundary. OpenCode 1.18.29 Code Mode
@@ -287,6 +286,78 @@ Useful flags:
   nested MCP calls do traverse the same plugin callbacks, while there is no
   Code Mode native-shell boundary to intercept.
 - `--codex-initial-prompt TEXT`: choose the first user message.
+
+#### Opt-in directory guidance decay (managed Codex only)
+
+The default remains cumulative. A **fresh runtime root** can opt in with
+`--directory-agents-mode decay --directory-agents-decay-steps K`, where `K` is
+an explicitly supplied positive integer (there is no default lifetime).
+The versioned `directory_agents_policy.json` identity locks mode and K for
+later iterations of that runtime. Historical cumulative runtimes cannot be
+migrated in place; OpenCode, OpenRouter and mixed backend configurations reject
+decay. Focused Python/native regression tests and bounded sol/high K=2 smokes
+with direct tools and CodeMode have passed. These are focused checks, not a
+full-suite or exhaustive failure/retry validation. A vendored Codex commit changes
+the bundle's source identity even when source bytes stay equivalent; rebuild the
+paired runner/CodeMode host when the freshness check requires it.
+
+Root guidance remains fixed. A nested exact-directory guide activated after
+acknowledged model step `s` is appended as a developer `<CONTEXT>` block and is
+eligible for steps `s+1` through `s+K`. It is excluded before step `s+K+1` unless
+an observed access renews it. For example, K=1 activation after step 1 makes the
+guide available in step 2; an access in step 2 renews it through step 3. This
+example does not select a default K. Multiple tools within one model inference
+do not advance age. A and B can coexist; changing directory does not evict A.
+Renewal changes only the deadline, retaining the original message position.
+Digest revision replaces that managed version with a new tail activation.
+Expired reentry activates again even if that path/digest was historically seen.
+
+New/revised pre-tool activations deny the call with the existing neutral result
+and require a new inference and explicit reissue. Further tool admissions from
+that originating inference remain blocked, including CodeMode catch/retry and
+late calls from older cells. Independent scopes observed during the same
+inference can still accumulate, avoiding A/B eviction oscillation. Expiry itself
+happens at a new request boundary, where the model receives the reduced input;
+it does not need an additional removal-only tool deferral. Already admitted or
+running operations may finish: this does not roll back a dynamic program's prior
+effects. Post-tool fallback has the same lifetime; late fallback from an older
+inference is ignored. The existing delayed `write_stdin` workdir limitation
+still applies.
+
+The same parser and file checks resolve accesses. Only successfully read,
+nonblank eligible guides renew. Missing, empty, unreadable, unsafe and unresolved
+files leave an existing deadline unchanged; they do not trigger immediate
+eviction or renewal. Unknown dynamic targets do not renew guessed scopes.
+A known explicit start directory can renew even if a later dynamic transition
+is unknown. No ancestor fallback or content-size cap is introduced. Access
+means resolver observation, not demonstrated semantic uptake by the model.
+
+Each logical sampling step counts once on `response.created`. Transport retries
+reuse its epoch. A failure/cancellation before that acknowledgement consumes no
+step; after acknowledgement it consumes one even if generation fails later.
+Provider acceptance with a lost acknowledgement is unknowable and conservatively
+does not count. Prewarm is not a sampling step. Atomic request snapshots wait
+for earlier activations; old inference admissions cannot reopen a closed gate.
+
+Only native-owned message IDs are filtered from sampling requests. Unrelated
+developer instructions, assistant reasoning/messages, tool outputs, quoted
+copies and files remain unchanged. The audit history retains original messages;
+there is no claim of clean forgetting or reversal of propagated information.
+Codex's existing WebSocket prefix check rejects continuation after removal and
+sends the full current input without `previous_response_id`; no session reset
+or proxy is used. Actual request tokens can decrease, but retained audit/history
+size and conservative local context-boundary estimates need not decrease.
+The managed PreCompact stop policy remains in force; this does not add resumable
+native-session leases or permit replaying an audit transcript as a decay session.
+
+The host control directory receives `directory_agents_decay.jsonl`: request
+snapshots identify excluded/retained managed IDs, accesses record path/digest,
+deadline and gate status, and acknowledgements identify retries. Prepared and
+committed access records distinguish interrupted publication. Log writes fail
+closed; no guide bodies are duplicated into this lifecycle log. Resolver failure
+also fails closed before dispatch. Live lease state is session-local; a process
+restart must start a new rollout, and existing native-session resume rejection
+is unchanged. The cumulative seen ledger remains separate from active leases.
 
 Example using the minimal base placeholder and automatic root `AGENTS.md` loading:
 

@@ -17,6 +17,7 @@ from typing import Any
 from filelock import FileLock, Timeout
 
 from utils import codex_bundle
+from utils.directory_agents_decay import validate_policy
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUNNER_CRATE_DIR = PROJECT_ROOT / "crates" / "metalanguage-codex-runner"
@@ -293,10 +294,17 @@ def run_codex_rollout(
     sensitive_mcp_tools: tuple[tuple[str, str], ...] = (),
     progress_callback: Callable[..., None] | None = None,
     persist_session: bool = False,
+    directory_agents_mode: str = "cumulative",
+    directory_agents_decay_steps: int | None = None,
 ) -> dict[str, Any]:
+    validate_policy(directory_agents_mode, directory_agents_decay_steps, {"codex"})
     runner_bin = runner_bin.expanduser().resolve()
     if not runner_bin.exists():
         raise FileNotFoundError(f"Codex runner binary does not exist: {runner_bin}")
+    if directory_agents_mode == "decay":
+        if spawn_child_handler_context_path is None:
+            raise ValueError("directory AGENTS decay requires the managed resolver context")
+        _assert_managed_codex_runner_fresh(runner_bin, release=runner_bin.parent.name == "release")
     workspace_roots = [
         str(workdir),
         str(seed_output_dir),
@@ -330,13 +338,17 @@ def run_codex_rollout(
             "--child-tool-handler",
             str(spawn_child_handler_context_path),
         ]
-        request["directory_agents_hook_command"] = shlex.join(
-            [
-                sys.executable,
-                str(PROJECT_ROOT / "utils" / "directory_agents_hook.py"),
-                str(spawn_child_handler_context_path),
-            ]
-        )
+        resolver_command = [
+            sys.executable,
+            str(PROJECT_ROOT / "utils" / "directory_agents_hook.py"),
+            str(spawn_child_handler_context_path),
+        ]
+        if directory_agents_mode == "decay":
+            request["directory_agents_decay_steps"] = directory_agents_decay_steps
+            request["directory_agents_resolver_command"] = [*resolver_command, "--resolve-decay"]
+            request["directory_agents_audit_path"] = str(control_dir / "directory_agents_decay.jsonl")
+        else:
+            request["directory_agents_hook_command"] = shlex.join(resolver_command)
     if benchmark_mcp_servers:
         request["mcp_servers"] = benchmark_mcp_servers
     if sensitive_mcp_tools:

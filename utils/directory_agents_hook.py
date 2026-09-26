@@ -593,12 +593,16 @@ def literal_shell_directory_scopes(
 
 
 def _read_agents(directory: Path) -> tuple[Path, str, str] | None:
+    return _read_agents_result(directory)[1]
+
+
+def _read_agents_result(directory: Path) -> tuple[str, tuple[Path, str, str] | None]:
     candidate = directory / "AGENTS.md"
     descriptor: int | None = None
     try:
         path_metadata = os.lstat(candidate)
         if not stat.S_ISREG(path_metadata.st_mode):
-            return None
+            return "excluded", None
         descriptor = os.open(
             candidate,
             os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
@@ -609,15 +613,17 @@ def _read_agents(directory: Path) -> tuple[Path, str, str] | None:
             or (metadata.st_dev, metadata.st_ino)
             != (path_metadata.st_dev, path_metadata.st_ino)
         ):
-            return None
+            return "changed_during_read", None
         with os.fdopen(descriptor, "rb", closefd=False) as handle:
             content_bytes = handle.read()
         content = content_bytes.decode("utf-8")
         if not content.strip():
-            return None
-        return candidate, hashlib.sha256(content_bytes).hexdigest(), content
+            return "empty", None
+        return "loaded", (candidate, hashlib.sha256(content_bytes).hexdigest(), content)
+    except FileNotFoundError:
+        return "absent", None
     except (OSError, UnicodeError):
-        return None
+        return "unreadable", None
     finally:
         if descriptor is not None:
             os.close(descriptor)
@@ -845,6 +851,11 @@ def directory_agents_observation(
 
 
 def main() -> None:
+    if len(sys.argv) == 3 and sys.argv[2] == "--resolve-decay":
+        context = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+        payload = json.loads(sys.stdin.read())
+        print(json.dumps(resolve_decay_access(context, payload), ensure_ascii=False))
+        return
     if len(sys.argv) != 2:
         return
     try:
@@ -880,6 +891,56 @@ def main() -> None:
         )
     except (OSError, UnicodeError, json.JSONDecodeError, ValueError, TypeError):
         return
+
+
+def resolve_decay_access(context: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    """Observe exact scopes using the cumulative parser, without a seen ledger.
+
+    Only successfully loaded guides renew. Unknown operands, absence, empty
+    files, excluded files and read failures neither invent access nor renew a
+    previous body. They leave that body's existing deadline unchanged.
+    """
+    if not isinstance(context, dict) or not isinstance(payload, dict):
+        raise ValueError("invalid decay resolver input")
+    roots = _managed_roots(context)
+    if not roots:
+        raise ValueError("decay resolver has no managed roots")
+    root = Path(context["workdir"]).resolve(strict=True)
+    arguments = payload.get("tool_input") or {}
+    if not isinstance(arguments, dict):
+        raise ValueError("invalid tool input")
+    explicit = any(isinstance(arguments.get(k), str) and arguments[k].strip() for k in (
+        "workdir", "working_directory", "cwd", "directory", "filePath", "file_path", "path",
+    ))
+    if not explicit and str(payload.get("tool_name", "")).lower() not in _SHELL_TOOL_NAMES:
+        return {"schema": 1, "guides": [], "observations": [{"status": "unknown"}]}
+    try:
+        _tool_directory(payload, _hook_base_directory(payload, roots[0]))
+    except (OSError, RuntimeError):
+        # The cumulative parser has a best-effort base fallback. That fallback
+        # is not evidence of access for lease renewal.
+        return {"schema": 1, "guides": [], "observations": [{"status": "unresolved"}]}
+    guides = []
+    observations = []
+    for directory in _tool_directories(payload, roots[0], include_tool_directory=True):
+        try:
+            directory = directory.resolve(strict=True)
+        except (OSError, RuntimeError):
+            observations.append({"directory": str(directory), "status": "unresolved"})
+            continue
+        if directory == root:
+            status, loaded = "fixed_root", None
+        elif not directory.is_dir() or ".git" in directory.parts or not any(
+            directory == managed or managed in directory.parents for managed in roots
+        ):
+            status, loaded = "excluded", None
+        else:
+            status, loaded = _read_agents_result(directory)
+        observations.append({"directory": str(directory), "status": status})
+        if loaded is not None:
+            path, digest, content = loaded
+            guides.append({"path": str(path), "digest": digest, "content": content})
+    return {"schema": 1, "guides": guides, "observations": observations}
 
 
 if __name__ == "__main__":

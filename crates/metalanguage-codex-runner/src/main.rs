@@ -99,6 +99,9 @@ struct RunnerRequest {
     shared_archives_root: PathBuf,
     spawn_child_handler_command: Option<Vec<String>>,
     directory_agents_hook_command: Option<String>,
+    directory_agents_decay_steps: Option<std::num::NonZeroU64>,
+    directory_agents_resolver_command: Option<Vec<String>>,
+    directory_agents_audit_path: Option<PathBuf>,
     mcp_servers: Option<HashMap<String, Value>>,
     sensitive_mcp_tools: Option<Vec<McpToolSelector>>,
     persist_session: Option<bool>,
@@ -148,6 +151,19 @@ async fn run_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
 
 async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
     let persist_session = request.persist_session.unwrap_or(false);
+    let managed_context_decay = match (
+        request.directory_agents_decay_steps,
+        request.directory_agents_resolver_command,
+        request.directory_agents_audit_path,
+    ) {
+        (None, None, None) => None,
+        (Some(steps), Some(command), Some(audit_path)) if request.directory_agents_hook_command.is_none() => Some(Arc::new(
+            codex_core::managed_context_decay::ManagedContextDecay::new(steps, command)
+                .map_err(anyhow::Error::msg)?
+                .with_audit_file(std::fs::File::create_new(audit_path).context("create decay audit log")?),
+        )),
+        _ => bail!("directory AGENTS decay requires steps, resolver and audit path, without the cumulative hook"),
+    };
     if request.resume_rollout_path.is_some()
         || request.expected_thread_id.is_some()
         || request.expected_session_id.is_some()
@@ -234,6 +250,7 @@ async fn run_request(request: RunnerRequest, arg0_paths: Arg0DispatchPaths) -> a
         .harness_overrides(overrides);
     config_builder = config_builder.cli_overrides(cli_overrides);
     let mut config = config_builder.build().await.context("load Codex config")?;
+    config.managed_context_decay = managed_context_decay;
     config.base_instructions = Some(".".to_string());
     config.project_doc_max_bytes = 0;
     let mcp_servers = request
