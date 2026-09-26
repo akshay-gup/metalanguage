@@ -12,6 +12,8 @@ from unittest.mock import patch
 from main_loop import run_codex_worker, run_opencode_worker, run_worker
 from utils.directory_agents_hook import (
     initial_context_activation,
+    literal_git_directory_scopes,
+    literal_shell_directory_transitions,
     pre_tool_context_gate,
 )
 
@@ -405,6 +407,84 @@ class DirectoryAgentsHookTests(unittest.TestCase):
         self.assertEqual(
             self._bash('git -C archives -C "$repo" status'),
             "",
+        )
+
+    def test_unknown_cwd_blocks_relative_scopes_until_absolute_restore(self) -> None:
+        child = self.managed / "child"
+        restored = self.archives / "restored"
+        restored_child = restored / "child"
+        for directory in (child, restored_child):
+            directory.mkdir(parents=True)
+
+        self.assertEqual(
+            literal_shell_directory_transitions(
+                'cd "$TARGET"; cd child',
+                self.managed,
+            ),
+            (),
+        )
+        self.assertEqual(
+            literal_git_directory_scopes(
+                'cd "$TARGET"; git -C child status',
+                self.managed,
+            ),
+            (),
+        )
+        self.assertEqual(
+            literal_shell_directory_transitions(
+                f'cd "$TARGET"; cd {restored}; cd child',
+                self.managed,
+            ),
+            (restored.resolve(), restored_child.resolve()),
+        )
+        self.assertEqual(
+            literal_git_directory_scopes(
+                f'cd "$TARGET"; git -C {restored_child} status',
+                self.managed,
+            ),
+            (restored_child.resolve(),),
+        )
+
+    def test_unknown_stack_and_conditional_changes_do_not_leak_a_relative_base(self) -> None:
+        child = self.managed / "child"
+        archive_child = self.archives / "child"
+        for directory in (child, archive_child):
+            directory.mkdir()
+
+        self.assertEqual(
+            literal_shell_directory_transitions(
+                'pushd "$TARGET"; popd; cd child',
+                self.managed,
+            ),
+            (),
+        )
+        self.assertEqual(
+            literal_shell_directory_transitions(
+                f'printf unknown && cd {self.archives}; cd child',
+                self.managed,
+            ),
+            (),
+        )
+        self.assertEqual(
+            literal_git_directory_scopes(
+                f'printf unknown || cd {self.archives}; git -C child status',
+                self.managed,
+            ),
+            (),
+        )
+        self.assertEqual(
+            literal_shell_directory_transitions(
+                'false && cd "$TARGET"; cd child',
+                self.managed,
+            ),
+            (child.resolve(),),
+        )
+        self.assertEqual(
+            literal_shell_directory_transitions(
+                'pushd archives; cd "$TARGET"; popd; cd child',
+                self.managed,
+            ),
+            (self.archives.resolve(), self.managed.resolve(), child.resolve()),
         )
 
 

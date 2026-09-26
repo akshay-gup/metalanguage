@@ -327,8 +327,10 @@ def _literal_directory_argument(words: list[_ShellWord], command: str) -> str | 
     return arguments[0].value
 
 
-def _change_directory(current: Path, target: str) -> tuple[Path, Path] | None:
+def _change_directory(current: Path | None, target: str) -> tuple[Path, Path] | None:
     target_path = Path(target)
+    if current is None and not target_path.is_absolute():
+        return None
     logical = Path(
         os.path.normpath(target if target_path.is_absolute() else current / target_path)
     )
@@ -385,7 +387,7 @@ def _simple_shell_commands(
 
 def _git_directory_operands(
     words: list[_ShellWord],
-    start_directory: Path,
+    start_directory: Path | None,
 ) -> tuple[Path, ...] | None:
     """Resolve the leading global ``git -C`` options for one simple command.
 
@@ -460,24 +462,32 @@ def _literal_shell_scopes(
         return _LiteralShellScopes((), ())
     normalized, separators = parsed
 
-    current = start_directory.resolve()
-    stack: list[Path] = []
+    current: Path | None = start_directory.resolve()
+    stack: list[Path | None] | None = []
     transitions: list[Path] = []
     directories: list[Path] = []
     previous_status: bool | None = None
     preceding_separator = ";"
     for index, words in enumerate(normalized):
-        should_run = preceding_separator == ";"
+        should_run: bool | None = preceding_separator == ";"
         if preceding_separator == "&&":
-            should_run = previous_status is True
+            should_run = previous_status if previous_status is not None else None
         elif preceding_separator == "||":
-            should_run = previous_status is False
-        if not should_run:
+            should_run = not previous_status if previous_status is not None else None
+        if should_run is False:
             preceding_separator = separators[index] if index < len(separators) else ";"
             continue
 
+        before_current = current
+        before_stack = None if stack is None else stack.copy()
         status: bool | None = None
-        if words and not words[0].dynamic:
+        command_transitions: list[Path] = []
+        command_directories: list[Path] = []
+        if words and words[0].dynamic:
+            # A dynamic command name can expand to a directory-changing builtin.
+            current = None
+            stack = None
+        elif words:
             name = words[0].value
             if name in {"true", ":"} and len(words) == 1:
                 status = True
@@ -486,24 +496,57 @@ def _literal_shell_scopes(
             elif name in {"cd", "pushd"}:
                 target = _literal_directory_argument(words, name)
                 changed = _change_directory(current, target) if target is not None else None
-                status = changed is not None if target is not None else None
+                target_is_absolute = target is not None and Path(target).is_absolute()
+                status = (
+                    changed is not None
+                    if target is not None and (current is not None or target_is_absolute)
+                    else None
+                )
                 if changed is not None:
                     logical, resolved = changed
                     if name == "pushd":
-                        stack.append(current)
+                        if stack is not None:
+                            stack.append(current)
                     current = logical
-                    transitions.append(resolved)
+                    command_transitions.append(resolved)
+                elif status is None:
+                    current = None
+                    if name == "pushd":
+                        stack = None
             elif name == "popd" and len(words) == 1:
-                status = bool(stack)
+                status = bool(stack) if stack is not None else None
                 if stack:
                     current = stack.pop()
-                    transitions.append(current.resolve())
+                    if current is not None:
+                        command_transitions.append(current.resolve())
+                elif stack is None:
+                    current = None
+            elif name == "popd":
+                # Stack indices and options are outside the bounded subset but
+                # may still mutate both the directory and stack.
+                status = None
+                current = None
+                stack = None
             elif name == "git":
                 selected = _git_directory_operands(words, current)
                 if selected is not None:
-                    directories.extend(selected)
+                    command_directories.extend(selected)
                 status = None
-        previous_status = status
+        if should_run is True:
+            transitions.extend(command_transitions)
+            directories.extend(command_directories)
+            previous_status = status
+        else:
+            # The command may run, so none of its scopes is guaranteed. Merge
+            # its possible state with the no-execution state at the branch join.
+            current = current if current == before_current else None
+            stack = stack if stack == before_stack else None
+            if preceding_separator == "&&" and status is False:
+                previous_status = False
+            elif preceding_separator == "||" and status is True:
+                previous_status = True
+            else:
+                previous_status = None
         preceding_separator = separators[index] if index < len(separators) else ";"
     return _LiteralShellScopes(
         tuple(dict.fromkeys(transitions)),
