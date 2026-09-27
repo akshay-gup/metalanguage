@@ -40,6 +40,7 @@ from utils.benchmark_driver import (
     active_benchmark_item,
 )
 from utils.codex_runner import resolve_codex_runner_bin, run_codex_rollout
+from utils.directory_agents_decay import IDENTITY_FILE as DIRECTORY_AGENTS_POLICY_FILENAME
 from utils.directory_agents_decay import claim_policy, validate_policy
 from utils.directory_agents import (
     DirectoryAgentsWatcher,
@@ -865,8 +866,11 @@ def _runtime_benchmark(runtime_root: Path) -> str | None:
                 for path in runtime_root.iterdir()
                 if path.name
                 not in {
+                    # These identities are initialized before the benchmark
+                    # check and validated by their own startup guards.
                     RUNTIME_ARCHIVE_IDENTITY_FILENAME,
                     RUNTIME_ROLLOUT_IDENTITY_FILENAME,
+                    DIRECTORY_AGENTS_POLICY_FILENAME,
                 }
             ]
             if runtime_root.exists()
