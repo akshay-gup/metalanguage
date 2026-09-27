@@ -19,10 +19,33 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+from utils.directory_agents_decay import validate_policy
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 OPENCODE_WORKER_SCRIPT = PROJECT_ROOT / "workers" / "opencode" / "worker.ts"
 SOURCE_AUDITED_OPENCODE_VERSIONS = ("1.18.29",)
 SOURCE_AUDITED_BUN_VERSIONS = ("1.3.14",)
+MANAGED_INFERENCE_CAPABILITY = {
+    "protocol": "metalanguage-inference-v2",
+    "base": "826d9ad46a22bef0294998e08daa3c4904fea28f",
+    "acknowledgement": "response-metadata-before-dispatch",
+}
+
+
+def require_opencode_decay_runtime(path: Path) -> None:
+    """A separate patched-runtime contract, never a widened stock allowlist."""
+    result = subprocess.run(
+        [str(path.resolve()), "--metalanguage-capabilities"],
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    try:
+        capability = json.loads(result.stdout) if result.returncode == 0 else None
+    except (ValueError, TypeError):
+        capability = None
+    if capability != MANAGED_INFERENCE_CAPABILITY:
+        raise RuntimeError("OpenCode decay requires a custom build of the pinned lifecycle patch; stock binaries are unsupported")
+
+
 DEFAULT_BUBBLEWRAP_BIN = Path("/usr/bin/bwrap")
 # OpenCode 1.18.29's worker-facing SDK, permission, HTTP, plugin, MCP, CLI, and
 # runtime-flag seams were checked against the vendored 1.18.21 source. Both
@@ -449,6 +472,7 @@ def opencode_python_fingerprint(main_loop_path: Path) -> str:
     for path in (
         Path(__file__).resolve(),
         main_loop_path.resolve(),
+        (PROJECT_ROOT / "utils" / "directory_agents_decay.py").resolve(),
         (PROJECT_ROOT / "utils" / "directory_agents_hook.py").resolve(),
     ):
         digest.update(path.name.encode())
@@ -888,6 +912,8 @@ def run_opencode_rollout(
     system_instructions: str | None = None,
     initial_system_context: str | None = None,
     continuation_context_path: Path | None = None,
+    directory_agents_mode: str = "cumulative",
+    directory_agents_decay_steps: int | None = None,
     benchmark_mcp_servers: dict[str, Any] | None = None,
     sensitive_mcp_tools: tuple[tuple[str, str], ...] = (),
     auth_file: Path | None = None,
@@ -910,6 +936,11 @@ def run_opencode_rollout(
     test_provider_config: dict[str, Any] | None = None,
     progress_callback: Callable[..., None] | None = None,
 ) -> dict[str, Any]:
+    validate_policy(directory_agents_mode, directory_agents_decay_steps, {"opencode"})
+    if directory_agents_mode == "decay":
+        if continuation_context_path is None:
+            raise ValueError("OpenCode decay requires the managed directory resolver")
+        require_opencode_decay_runtime(opencode_bin)
     unsupported_versions = sorted(
         set(allowed_versions) - set(SOURCE_AUDITED_OPENCODE_VERSIONS)
     )
@@ -1007,6 +1038,8 @@ def run_opencode_rollout(
     }
     if test_provider_config is not None:
         request["test_provider_config"] = test_provider_config
+    if directory_agents_mode == "decay":
+        request["directory_agents_decay_steps"] = str(directory_agents_decay_steps)
     if system_instructions is not None and system_instructions.strip():
         request["system_instructions"] = system_instructions
     if initial_system_context is not None and initial_system_context.strip():

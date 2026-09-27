@@ -16,8 +16,8 @@ def validate_policy(mode: str, steps: int | None, backends: set[str]) -> None:
         return
     if type(steps) is not int or not 1 <= steps <= 2**64 - 1:
         raise ValueError("decay mode requires a positive --directory-agents-decay-steps K")
-    if backends != {"codex"}:
-        raise ValueError("directory AGENTS decay is supported only by managed Codex")
+    if not backends or not backends <= {"codex", "opencode"}:
+        raise ValueError("directory AGENTS decay requires managed Codex or lifecycle-patched OpenCode")
 
 
 def claim_policy(root: Path, mode: str, steps: int | None, *, was_empty: bool) -> None:

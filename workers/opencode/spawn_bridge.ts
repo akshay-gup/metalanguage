@@ -1,4 +1,5 @@
 import { isRecord } from "./protocol.ts"
+import { DIRECTORY_DECAY_FACTORY } from "./directory_decay.ts"
 
 export const TOOL_SOURCE = `export default {
   description: "Spawn at most one child rollout from a prepared workspace. Validation failures are retryable and the parent rollout continues after the tool result.",
@@ -54,7 +55,7 @@ export const TOOL_SOURCE = `export default {
 }
 `
 
-export const SYSTEM_PLUGIN_SOURCE = `export default async function metalanguageSystemPlugin() {
+export const SYSTEM_PLUGIN_SOURCE = DIRECTORY_DECAY_FACTORY + `\nexport default async function metalanguageSystemPlugin(input) {
   const managedContexts = new Map()
   const deferredSessions = new Set()
   const gateQueues = new Map()
@@ -105,7 +106,7 @@ export const SYSTEM_PLUGIN_SOURCE = `export default async function metalanguageS
       return { additional_context: "", defer: false }
     }
   }
-  return {
+  const hooks = {
     "experimental.chat.system.transform": async (input, output) => {
       if (!input.sessionID) return
       const exact = process.env.METALANGUAGE_OPENCODE_SYSTEM_INSTRUCTIONS
@@ -219,11 +220,15 @@ export const SYSTEM_PLUGIN_SOURCE = `export default async function metalanguageS
         "METALANGUAGE_SPAWN_CHILD_TOKEN",
         "METALANGUAGE_DIRECTORY_AGENTS_ENDPOINT",
         "METALANGUAGE_DIRECTORY_AGENTS_TOKEN",
+        "METALANGUAGE_DIRECTORY_AGENTS_DECAY_STEPS",
       ]) {
         if (typeof name === "string" && name) delete output.env[name]
       }
     },
   }
+  const steps = process.env.METALANGUAGE_DIRECTORY_AGENTS_DECAY_STEPS
+  return steps === undefined ? hooks : { ...hooks, ...directoryDecay(input, steps,
+    process.env.METALANGUAGE_DIRECTORY_AGENTS_ENDPOINT, process.env.METALANGUAGE_DIRECTORY_AGENTS_TOKEN) }
 }
 `
 
@@ -232,11 +237,11 @@ export function systemPluginSource(
 ): string {
   if (!directoryAgents) return SYSTEM_PLUGIN_SOURCE
   return SYSTEM_PLUGIN_SOURCE
-    .replace(
+    .replaceAll(
       "process.env.METALANGUAGE_DIRECTORY_AGENTS_ENDPOINT",
       JSON.stringify(directoryAgents.endpoint),
     )
-    .replace(
+    .replaceAll(
       "process.env.METALANGUAGE_DIRECTORY_AGENTS_TOKEN",
       JSON.stringify(directoryAgents.token),
     )
@@ -320,18 +325,23 @@ export async function runDirectoryAgentsHandler(
   command: string[],
   payload: unknown,
   timeoutMs = 15_000,
-): Promise<{ additional_context: string; defer: boolean; neutral_result?: string }> {
+  decay = false,
+): Promise<{ additional_context: string; defer: boolean; neutral_result?: string; resolution?: unknown }> {
   const empty = { additional_context: "", defer: false }
+  const unavailable = () => {
+    if (decay) throw new Error("Directory decay resolver failed; refusing tool admission")
+    return empty
+  }
   if (
     !command.length ||
     !isRecord(payload) ||
     !["PreToolUse", "PostToolUse"].includes(String(payload.hook_event_name))
-  ) return empty
+  ) return unavailable()
   let child: Bun.PipedSubprocess
   try {
-    child = Bun.spawn(command, { stdin: "pipe", stdout: "pipe", stderr: "pipe" })
+    child = Bun.spawn(decay ? [...command, "--resolve-decay"] : command, { stdin: "pipe", stdout: "pipe", stderr: "pipe" })
   } catch {
-    return empty
+    return unavailable()
   }
   const terminate = () => child.kill("SIGTERM")
   process.once("SIGTERM", terminate)
@@ -357,20 +367,26 @@ export async function runDirectoryAgentsHandler(
     } catch {
       child.kill("SIGKILL")
       await child.exited
-      return empty
+      return unavailable()
     } finally {
       if (timer) clearTimeout(timer)
     }
-    if (code !== 0 || !stdout.trim()) return empty
+    if (code !== 0 || !stdout.trim()) return unavailable()
     try {
       const parsed = JSON.parse(stdout.trim())
+      if (decay) {
+        if (!isRecord(parsed) || parsed.schema !== 1 || !Array.isArray(parsed.guides) || !Array.isArray(parsed.observations)) {
+          return unavailable()
+        }
+        return { ...empty, resolution: parsed }
+      }
       const hookOutput = isRecord(parsed) ? parsed.hookSpecificOutput : undefined
       if (
         !isRecord(hookOutput) ||
         hookOutput.hookEventName !== payload.hook_event_name ||
         typeof hookOutput.additionalContext !== "string"
       ) {
-        return empty
+        return unavailable()
       }
       const defer =
         payload.hook_event_name === "PreToolUse" &&
@@ -383,7 +399,7 @@ export async function runDirectoryAgentsHandler(
           : {}),
       }
     } catch {
-      return empty
+      return unavailable()
     }
   } finally {
     process.off("SIGTERM", terminate)

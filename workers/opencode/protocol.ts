@@ -84,6 +84,8 @@ export type RunnerRequest = {
   custom_provider?: CustomProviderInput | null
   spawn_child_handler_command?: string[] | null
   directory_agents_handler_command?: string[] | null
+  // Decimal string preserves the shared unsigned-64-bit policy range.
+  directory_agents_decay_steps?: string
   mcp_servers?: Record<string, McpServerInput>
   sensitive_mcp_tools?: McpToolSelector[]
   sandbox?: {

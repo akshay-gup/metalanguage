@@ -327,25 +327,34 @@ Useful flags:
   Code Mode native-shell boundary to intercept.
 - `--codex-initial-prompt TEXT`: choose the first user message.
 
-#### Opt-in directory guidance decay (managed Codex only)
+#### Opt-in directory guidance decay (managed Codex and patched OpenCode)
 
 The default remains cumulative. A **fresh runtime root** can opt in with
 `--directory-agents-mode decay --directory-agents-decay-steps K`, where `K` is
 an explicitly supplied positive integer (there is no default lifetime).
 The versioned `directory_agents_policy.json` identity locks mode and K for
 later iterations of that runtime. Historical cumulative runtimes cannot be
-migrated in place; OpenCode, OpenRouter and mixed backend configurations reject
-decay. Focused Python/native regression tests and bounded sol/high K=2 smokes
-with direct tools and CodeMode have passed. These are focused checks, not a
-full-suite or exhaustive failure/retry validation. A vendored Codex commit changes
-the bundle's source identity even when source bytes stay equivalent; rebuild the
-paired runner/CodeMode host when the freshness check requires it.
+migrated in place; OpenRouter rejects decay. Codex and OpenCode may share a
+decay runtime only when each slot meets its own managed runtime requirement.
+The OpenCode lifecycle patch is source-only and has not been built or run.
+Its custom CLI capability contract is `metalanguage-inference-v2`.
+Stock OpenCode binaries, including the audited 1.18.29 release and the observed
+installed 1.18.31 release, do not satisfy its separate capability check. The
+patch is based on vendored commit `826d9ad46a22bef0294998e08daa3c4904fea28f`
+(1.18.21); it does not update the stock 1.18.29 audit or version whitelist.
+The Codex focused Python/native regression tests and bounded sol/high K=2
+smokes with direct tools and CodeMode passed previously. They do not validate
+OpenCode. A vendored Codex commit changes the bundle's source identity even
+when source bytes stay equivalent; rebuild the paired runner/CodeMode host
+when the freshness check requires it.
 
 Root guidance remains fixed. A nested exact-directory guide activated after
-acknowledged model step `s` is appended as a developer
-`<AGENTS_MD path="…/AGENTS.md">` block and is eligible for steps `s+1` through
-`s+K`. It is excluded before step `s+K+1` unless
-an observed access renews it. For example, K=1 activation after step 1 makes the
+acknowledged model step `s` is eligible for steps `s+1` through `s+K`.
+Codex supplies its `<AGENTS_MD path="…/AGENTS.md">` block as developer
+context. Patched OpenCode inserts a labeled synthetic USER message after the
+original conversation anchor, preserving chronological placement. It is
+excluded before step `s+K+1` unless an observed access renews it. For example,
+K=1 activation after step 1 makes the
 guide available in step 2; an access in step 2 renews it through step 3. This
 example does not select a default K. Multiple tools within one model inference
 do not advance age. A and B can coexist; changing directory does not evict A.
@@ -373,12 +382,18 @@ A known explicit start directory can renew even if a later dynamic transition
 is unknown. No ancestor fallback or content-size cap is introduced. Access
 means resolver observation, not demonstrated semantic uptake by the model.
 
-Each logical sampling step counts once on `response.created`. Transport retries
-reuse its epoch. A failure/cancellation before that acknowledgement consumes no
+Each Codex logical sampling step counts once on `response.created`. The patched
+OpenCode AI SDK path waits for provider response metadata before releasing any
+model output to the SDK's tool executor; a stable assistant message ID identifies
+the request. Transport retries before metadata reuse that ID and snapshot.
+OpenCode refuses a second provider submission under an ID that has already
+acknowledged, so a later stream failure stops that rollout instead of silently
+undercounting a retry. A failure/cancellation before acknowledgement consumes no
 step; after acknowledgement it consumes one even if generation fails later.
 Provider acceptance with a lost acknowledgement is unknowable and conservatively
-does not count. Prewarm is not a sampling step. Atomic request snapshots wait
-for earlier activations; old inference admissions cannot reopen a closed gate.
+does not count. Codex prewarm and OpenCode auxiliary title generation are outside
+the managed sampling ledger. Atomic request snapshots wait for earlier activations;
+old inference admissions cannot reopen a closed gate.
 
 Only native-owned message IDs are filtered from sampling requests. Unrelated
 developer instructions, assistant reasoning/messages, tool outputs, quoted
@@ -386,12 +401,20 @@ copies and files remain unchanged. The audit history retains original messages;
 there is no claim of clean forgetting or reversal of propagated information.
 Codex's existing WebSocket prefix check rejects continuation after removal and
 sends the full current input without `previous_response_id`; no session reset
-or proxy is used. Actual request tokens can decrease, but retained audit/history
-size and conservative local context-boundary estimates need not decrease.
+or proxy is used. Patched OpenCode requires the OpenAI or OpenAI-compatible
+AI SDK stream to supply a nonempty provider response ID; other runtime/provider
+paths fail closed. It disables the OpenAI WebSocket continuation path and rejects
+opaque previous-response or conversation references, then replays the filtered
+input. Manual task calls without an acknowledged inference identity also fail
+closed. Compaction has a managed inference ID and may stop when selection has
+removed an active guide's original anchor. Actual request tokens can decrease,
+but retained audit/history size and conservative local context-boundary
+estimates need not decrease.
 The managed PreCompact stop policy remains in force; this does not add resumable
 native-session leases or permit replaying an audit transcript as a decay session.
 
-The host control directory receives `directory_agents_decay.jsonl`: request
+The Codex host control directory and patched OpenCode private worker state
+root each receive `directory_agents_decay.jsonl`: request
 snapshots identify excluded/retained managed IDs, accesses record path/digest,
 deadline and gate status, and acknowledgements identify retries. Prepared and
 committed access records distinguish interrupted publication. Log writes fail
@@ -399,6 +422,9 @@ closed; no guide bodies are duplicated into this lifecycle log. Resolver failure
 also fails closed before dispatch. Live lease state is session-local; a process
 restart must start a new rollout, and existing native-session resume rejection
 is unchanged. The cumulative seen ledger remains separate from active leases.
+The new OpenCode regression source covers lease aging, same-position renewal,
+expiry and reentry, compound program gates, stale cells, and acknowledgement
+ordering; it has not been executed.
 
 Example using the minimal base placeholder and automatic root `AGENTS.md` loading:
 

@@ -3,6 +3,7 @@
 import { constants } from "node:fs"
 import {
   access,
+  appendFile,
   chmod,
   lstat,
   mkdir,
@@ -487,6 +488,9 @@ async function isolatedEnvironment(
     env.METALANGUAGE_SPAWN_CHILD_TOKEN = callback.token
   }
   env.METALANGUAGE_OPENCODE_PROVIDER_ENV_NAMES = JSON.stringify(request.provider_env_names ?? [])
+  if (request.directory_agents_decay_steps !== undefined) {
+    env.METALANGUAGE_DIRECTORY_AGENTS_DECAY_STEPS = request.directory_agents_decay_steps
+  }
   if (request.sandbox?.masked_paths?.[0]) {
     env.METALANGUAGE_OPENCODE_MASKED_PATH = request.sandbox.masked_paths[0]
   }
@@ -529,7 +533,26 @@ async function verifyVersion(request: RunnerRequest, env: WorkerEnvironment): Pr
   }
   if (code !== 0) throw new RunnerError("opencode_version_failed", `OpenCode --version exited ${code}`)
   const version = stdout.trim()
-  if (
+  if (request.directory_agents_decay_steps !== undefined) {
+    const capability = Bun.spawn([request.opencode_bin, "--metalanguage-capabilities"], { env, stdout: "pipe", stderr: "pipe" })
+    try {
+      const [raw, exit] = await withTimeout(
+        Promise.all([new Response(capability.stdout).text(), capability.exited]), 10_000,
+        new RunnerError("unsupported_opencode_version", "Patched OpenCode capability check timed out"),
+      )
+      const contract = JSON.parse(raw)
+      if (exit !== 0 || !isRecord(contract) || Object.keys(contract).length !== 3 ||
+          contract.protocol !== "metalanguage-inference-v2" ||
+          contract.base !== "826d9ad46a22bef0294998e08daa3c4904fea28f" ||
+          contract.acknowledgement !== "response-metadata-before-dispatch") {
+        throw new Error("Unrecognized lifecycle contract")
+      }
+    } catch (error) {
+      capability.kill("SIGKILL")
+      await capability.exited
+      throw new RunnerError("unsupported_opencode_version", "OpenCode decay requires the pinned custom lifecycle build", { cause: error })
+    }
+  } else if (
     version !== SOURCE_AUDITED_OPENCODE_VERSION ||
     (request.allowed_versions?.length && !request.allowed_versions.includes(version))
   ) {
@@ -1053,6 +1076,7 @@ export async function startSpawnCallback(command: string[], handlerTimeoutMs = 1
 export async function startDirectoryAgentsCallback(
   command: string[],
   handlerTimeoutMs = 15_000,
+  decayAuditPath?: string,
 ): Promise<{ endpoint: string; token: string; stop: () => void }> {
   const token = randomSecret()
   const server = Bun.serve({
@@ -1068,9 +1092,16 @@ export async function startDirectoryAgentsCallback(
       try {
         const raw = await request.text()
         if (raw.length > 2 * 1024 * 1024) return new Response("request too large", { status: 413 })
-        const result = await runDirectoryAgentsHandler(command, JSON.parse(raw), handlerTimeoutMs)
+        const payload = JSON.parse(raw)
+        if (decayAuditPath && payload.hook_event_name === "ManagedContextAudit") {
+          if (!isRecord(payload.record) || typeof payload.session_id !== "string") throw new Error("Invalid decay audit")
+          await appendFile(decayAuditPath, JSON.stringify({ session_id: payload.session_id, ...payload.record }) + "\n", { mode: 0o600 })
+          return Response.json({ ok: true })
+        }
+        const result = await runDirectoryAgentsHandler(command, payload, handlerTimeoutMs, decayAuditPath !== undefined)
         return Response.json(result)
       } catch {
+        if (decayAuditPath) return new Response("Directory decay callback failed", { status: 500 })
         return Response.json({ additional_context: "", defer: false })
       }
     },
@@ -1092,6 +1123,11 @@ function parseRequest(value: unknown): RunnerRequest {
 }
 
 export async function runRequest(request: RunnerRequest, cancelled: Promise<void>): Promise<void> {
+  if (request.directory_agents_decay_steps !== undefined &&
+      (typeof request.directory_agents_decay_steps !== "string" || !/^[1-9][0-9]*$/.test(request.directory_agents_decay_steps) ||
+       BigInt(request.directory_agents_decay_steps) > (1n << 64n) - 1n || !request.directory_agents_handler_command?.length)) {
+    throw new RunnerError("invalid_request", "Directory decay requires explicit positive K and a managed resolver")
+  }
   verifyBunVersion(request)
   let cwd: string
   try {
@@ -1135,7 +1171,8 @@ export async function runRequest(request: RunnerRequest, cancelled: Promise<void
       ? await startSpawnCallback(request.spawn_child_handler_command)
       : undefined
     directoryAgentsCallback = request.directory_agents_handler_command?.length
-      ? await startDirectoryAgentsCallback(request.directory_agents_handler_command)
+      ? await startDirectoryAgentsCallback(request.directory_agents_handler_command, 15_000,
+          request.directory_agents_decay_steps === undefined ? undefined : join(root, "directory_agents_decay.jsonl"))
       : undefined
     if (directoryAgentsCallback) {
       const pluginPath = join(root, "config/plugin/metalanguage_system.js")

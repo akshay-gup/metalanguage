@@ -71,6 +71,7 @@ from utils.opencode_runner import (
     resolve_opencode_bin,
     resolve_opencode_worker_script,
     run_opencode_rollout,
+    require_opencode_decay_runtime,
     text_sha256,
     validate_opencode_host_primitives,
 )
@@ -2535,6 +2536,8 @@ def run_opencode_worker(
         system_instructions=system_instructions,
         initial_system_context=initial_activation.additional_context,
         continuation_context_path=continuation_context_path,
+        directory_agents_mode=(continuation_context or {}).get("directory_agents_mode", "cumulative"),
+        directory_agents_decay_steps=(continuation_context or {}).get("directory_agents_decay_steps"),
         benchmark_mcp_servers=benchmark_mcp_servers,
         sensitive_mcp_tools=sensitive_mcp_tools,
         auth_file=auth_file,
@@ -3680,7 +3683,9 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             opencode_bubblewrap_sha256 = file_sha256(opencode_bubblewrap_bin)
         opencode_runtime_version = executable_version(opencode_bin)
         opencode_bun_version = executable_version(opencode_bun_bin)
-        if opencode_runtime_version not in opencode_allowed_versions:
+        if args.directory_agents_mode == "decay":
+            require_opencode_decay_runtime(opencode_bin)
+        elif opencode_runtime_version not in opencode_allowed_versions:
             raise RuntimeError(
                 f"OpenCode version {opencode_runtime_version} is not source-audited"
             )

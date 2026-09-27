@@ -9,14 +9,16 @@ from utils.directory_agents_hook import resolve_decay_access
 
 
 class DecayPolicyTests(unittest.TestCase):
-    def test_requires_explicit_positive_integer_and_codex_only(self):
+    def test_requires_explicit_positive_integer_and_managed_backends(self):
         for value in (None, 0, -1, True, 1.5, 2**64):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 validate_policy("decay", value, {"codex"})
-        for backends in ({"opencode"}, {"openrouter"}, {"codex", "opencode"}):
+        for backends in (set(), {"openrouter"}, {"codex", "openrouter"}):
             with self.subTest(backends=backends), self.assertRaises(ValueError):
                 validate_policy("decay", 2, backends)
         validate_policy("decay", 1, {"codex"})
+        validate_policy("decay", 1, {"opencode"})
+        validate_policy("decay", 1, {"codex", "opencode"})
         validate_policy("cumulative", None, {"opencode", "codex"})
         with self.assertRaises(ValueError):
             validate_policy("cumulative", 1, {"codex"})
