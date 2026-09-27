@@ -835,11 +835,11 @@ describe("OpenCode native protocol adapter", () => {
       state_root: "/state",
       initial_user_text: "Begin.",
       system_instructions: ".",
-      initial_system_context: "<CONTEXT>\nroot\n</CONTEXT>",
+      initial_system_context: '<AGENTS_MD path="/workspace/AGENTS.md">\nroot\n</AGENTS_MD>',
     }
     expect(request.initial_user_text).toBe("Begin.")
     expect(initialSystemInstructions(request)).toBe(
-      ".\n\n<CONTEXT>\nroot\n</CONTEXT>",
+      '.\n\n<AGENTS_MD path="/workspace/AGENTS.md">\nroot\n</AGENTS_MD>',
     )
   })
 })
@@ -905,11 +905,12 @@ describe("directory AGENTS supervisor bridge", () => {
       const priorEndpoint = process.env.METALANGUAGE_DIRECTORY_AGENTS_ENDPOINT
       const priorToken = process.env.METALANGUAGE_DIRECTORY_AGENTS_TOKEN
       const priorInstructions = process.env.METALANGUAGE_OPENCODE_SYSTEM_INSTRUCTIONS
+      const rootContext = `<AGENTS_MD path="${join(work, "AGENTS.md")}">\nOpenCode root context\n</AGENTS_MD>`
       try {
         process.env.METALANGUAGE_DIRECTORY_AGENTS_ENDPOINT = callback.endpoint
         process.env.METALANGUAGE_DIRECTORY_AGENTS_TOKEN = callback.token
         process.env.METALANGUAGE_OPENCODE_SYSTEM_INSTRUCTIONS =
-          "exact instructions\n\n<CONTEXT>\nOpenCode root context\n</CONTEXT>"
+          "exact instructions\n\n" + rootContext
         const pluginFactory = new Function(
           SYSTEM_PLUGIN_SOURCE.replace("export default", "return"),
         )()
@@ -931,7 +932,7 @@ describe("directory AGENTS supervisor bridge", () => {
           initialOutput,
         )
         expect(initialOutput.system).toEqual([
-          "exact instructions\n\n<CONTEXT>\nOpenCode root context\n</CONTEXT>",
+          "exact instructions\n\n" + rootContext,
         ])
         await expect(
           plugin["tool.execute.before"](identity, { args }),
@@ -947,7 +948,7 @@ describe("directory AGENTS supervisor bridge", () => {
           output,
         )
         expect(output.system).toEqual([
-          "exact instructions\n\n<CONTEXT>\nOpenCode root context\n</CONTEXT>",
+          "exact instructions\n\n" + rootContext,
         ])
         // A system transform alone cannot release an unseen guide's gate.
         await expect(plugin["tool.execute.before"](identity, { args })).rejects.toThrow(
@@ -967,6 +968,9 @@ describe("directory AGENTS supervisor bridge", () => {
         expect(conversation.messages).toHaveLength(3)
         expect(conversation.messages[2].info.role).toBe("user")
         expect(conversation.messages[2].parts[0].text).toContain("OpenCode project context")
+        expect(conversation.messages[2].parts[0].text).toContain(
+          `<AGENTS_MD path="${join(project, "AGENTS.md")}">\nOpenCode project context\n</AGENTS_MD>`,
+        )
         await expect(plugin["tool.execute.before"](identity, { args })).resolves.toBeUndefined()
         await plugin["tool.execute.after"]({ ...identity, args }, toolOutput)
         await expect(

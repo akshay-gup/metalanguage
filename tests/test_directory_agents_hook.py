@@ -14,6 +14,7 @@ from utils.directory_agents_hook import (
     initial_context_activation,
     literal_git_directory_scopes,
     literal_shell_directory_transitions,
+    managed_context_activation,
     pre_tool_context_gate,
 )
 
@@ -112,7 +113,7 @@ class DirectoryAgentsHookTests(unittest.TestCase):
             "Local context activated; tool was not executed.",
         )
         self.assertIn(
-            "<CONTEXT>\nproject context\n</CONTEXT>",
+            f'<AGENTS_MD path="{self.project / "AGENTS.md"}">\nproject context\n</AGENTS_MD>',
             response["hookSpecificOutput"]["additionalContext"],
         )
         self.assertEqual(self._pre("cd archives/project && printf work"), "")
@@ -125,6 +126,24 @@ class DirectoryAgentsHookTests(unittest.TestCase):
 
     def test_user_prompt_hook_is_disabled_after_direct_initial_delivery(self) -> None:
         self.assertEqual(self._invoke({"hook_event_name": "UserPromptSubmit"}), "")
+
+    def test_automatic_guides_label_escaped_source_without_changing_body(self) -> None:
+        directory = self.managed / 'a&"\'<b>'
+        directory.mkdir()
+        body = '  <literal>& "quoted"\nsecond line  \n'
+        (directory / "AGENTS.md").write_text(body, encoding="utf-8")
+        expected = (
+            f'<AGENTS_MD path="{self.managed}/a&amp;&quot;&#x27;&lt;b&gt;/AGENTS.md">\n'
+            '  <literal>& "quoted"\nsecond line\n</AGENTS_MD>'
+        )
+        for phase in ("initial", "pre_tool_gate", "post_tool_fallback"):
+            with self.subTest(phase=phase):
+                activation = managed_context_activation(
+                    {"workdir": str(self.managed)}, self.control / f"{phase}.seen",
+                    [directory], activation=phase,
+                )
+                self.assertEqual(activation.additional_context, expected)
+                self.assertEqual(activation.paths, (directory / "AGENTS.md",))
 
     def test_pre_tool_changed_digest_defers_again(self) -> None:
         self.assertIn("project context", self._pre("cd archives/project"))
@@ -141,7 +160,9 @@ class DirectoryAgentsHookTests(unittest.TestCase):
         context = str(response["hookSpecificOutput"]["additionalContext"])
 
         self.assertEqual(response["hookSpecificOutput"]["permissionDecision"], "deny")
-        self.assertEqual(context.count("<CONTEXT>"), 2)
+        self.assertEqual(context.count("<AGENTS_MD path="), 2)
+        self.assertIn(f'path="{self.archives / "AGENTS.md"}"', context)
+        self.assertIn(f'path="{self.project / "AGENTS.md"}"', context)
         self.assertIn("archives context", context)
         self.assertIn("project context", context)
         self.assertEqual(self._pre("cd archives; cd project; pwd"), "")
@@ -159,7 +180,7 @@ class DirectoryAgentsHookTests(unittest.TestCase):
             {
                 "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
-                    "additionalContext": "<CONTEXT>\nproject context\n</CONTEXT>",
+                    "additionalContext": f'<AGENTS_MD path="{self.project / "AGENTS.md"}">\nproject context\n</AGENTS_MD>',
                     "permissionDecision": "deny",
                     "permissionDecisionReason": "Local context activated; tool was not executed.",
                 }
@@ -505,7 +526,7 @@ class InitialDirectoryContextBackendTests(unittest.TestCase):
 
                     self.assertEqual(
                         initial.additional_context,
-                        f"<CONTEXT>\n{content.rstrip()}\n</CONTEXT>",
+                        f'<AGENTS_MD path="{workdir / "AGENTS.md"}">\n{content.rstrip()}\n</AGENTS_MD>',
                     )
                     self.assertEqual(initial.activation, "initial")
                     self.assertFalse(
@@ -599,7 +620,7 @@ class InitialDirectoryContextBackendTests(unittest.TestCase):
             self.assertEqual(kwargs["initial_user_text"], "Begin.")
             self.assertEqual(
                 kwargs["initial_developer_context"],
-                "<CONTEXT>\ncodex root\n</CONTEXT>",
+                f'<AGENTS_MD path="{paths["work"] / "AGENTS.md"}">\ncodex root\n</AGENTS_MD>',
             )
             self.assertEqual(events[0][1]["activation"], "initial")
             record = context_path.with_name("directory_agents_seen").read_text(encoding="utf-8")
@@ -658,7 +679,7 @@ class InitialDirectoryContextBackendTests(unittest.TestCase):
             self.assertEqual(kwargs["system_instructions"], ".")
             self.assertEqual(
                 kwargs["initial_system_context"],
-                "<CONTEXT>\nopencode root\n</CONTEXT>",
+                f'<AGENTS_MD path="{paths["work"] / "AGENTS.md"}">\nopencode root\n</AGENTS_MD>',
             )
             record = context_path.with_name("directory_agents_seen").read_text(encoding="utf-8")
             self.assertEqual(record.splitlines()[0].split("\t")[2], "initial")
@@ -814,8 +835,8 @@ class OpenRouterDirectoryAgentsTests(unittest.TestCase):
                 if item.get("role") == "developer"
             ]
             self.assertEqual(len(developer_messages), 1)
-            self.assertIn(
-                "openrouter project context",
+            self.assertEqual(
+                f'<AGENTS_MD path="{project / "AGENTS.md"}">\nopenrouter project context\n</AGENTS_MD>',
                 developer_messages[0]["content"][0]["text"],
             )
             first_output = next(
@@ -906,7 +927,10 @@ class OpenRouterDirectoryAgentsTests(unittest.TestCase):
                 )
 
             self.assertEqual(captured[0]["role"], "developer")
-            self.assertIn("root managed context", captured[0]["content"][0]["text"])
+            self.assertEqual(
+                captured[0]["content"][0]["text"],
+                f'<AGENTS_MD path="{workdir / "AGENTS.md"}">\nroot managed context\n</AGENTS_MD>',
+            )
             self.assertEqual(captured[1]["role"], "user")
             record = (
                 (state / "directory_agents_seen")

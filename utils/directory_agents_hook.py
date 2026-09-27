@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import html
 import json
 import os
 import re
@@ -679,6 +680,12 @@ def _claim_unseen(
         return unseen
 
 
+def _agents_context(path: Path, content: str) -> str:
+    attribute = html.escape(str(path), quote=True)
+    attribute = attribute.replace("\t", "&#9;").replace("\n", "&#10;").replace("\r", "&#13;")
+    return f'<AGENTS_MD path="{attribute}">\n{content.rstrip()}\n</AGENTS_MD>'
+
+
 def managed_context_activation(
     context: dict[str, Any],
     state_path: Path,
@@ -712,8 +719,8 @@ def managed_context_activation(
     unseen = _claim_unseen(state_path, candidates, activation)
     return ManagedContextActivation(
         additional_context="\n\n".join(
-            f"<CONTEXT>\n{content.rstrip()}\n</CONTEXT>"
-            for _path, _digest, content in unseen
+            _agents_context(path, content)
+            for path, _digest, content in unseen
         ),
         paths=tuple(path for path, _digest, _content in unseen),
         activation=activation,

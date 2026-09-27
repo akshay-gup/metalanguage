@@ -234,12 +234,18 @@ Useful flags:
   uses its prompt-level system field. This applies equally to fresh bootstrap,
   inherited-child, and bootstrap-reinitialized workspaces.
 
+  Automatically supplied root and nested guides use
+  `<AGENTS_MD path="…/AGENTS.md">` followed by the file contents and
+  `</AGENTS_MD>`. The path is the resolved source filename, escaped for the
+  quoted attribute. Existing trailing-whitespace trimming is unchanged.
+
   Before each subsequent tool dispatch, the same loader resolves the tool's
   exact directory or explicit workdir. For shell tools it additionally resolves
   statically executed literal `cd`, `pushd`, and `popd` transitions and literal
   leading `git -C` operands. If any resolved path/content digest is unseen, all
-  unseen `<CONTEXT>` blocks are injected and atomically recorded, while the tool
-  is denied before execution with the neutral result `Local context activated;
+  unseen `<AGENTS_MD path="…/AGENTS.md">` blocks are injected and atomically
+  recorded, while the tool is denied before execution with the neutral result
+  `Local context activated;
   tool was not executed.` The model receives another inference step and must
   reissue or revise the call; the original call is never resumed automatically.
   A repeat executes normally, and a changed `AGENTS.md` digest gates once again.
@@ -336,8 +342,9 @@ the bundle's source identity even when source bytes stay equivalent; rebuild the
 paired runner/CodeMode host when the freshness check requires it.
 
 Root guidance remains fixed. A nested exact-directory guide activated after
-acknowledged model step `s` is appended as a developer `<CONTEXT>` block and is
-eligible for steps `s+1` through `s+K`. It is excluded before step `s+K+1` unless
+acknowledged model step `s` is appended as a developer
+`<AGENTS_MD path="…/AGENTS.md">` block and is eligible for steps `s+1` through
+`s+K`. It is excluded before step `s+K+1` unless
 an observed access renews it. For example, K=1 activation after step 1 makes the
 guide available in step 2; an access in step 2 renews it through step 3. This
 example does not select a default K. Multiple tools within one model inference

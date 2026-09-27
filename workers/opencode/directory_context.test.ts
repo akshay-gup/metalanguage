@@ -86,7 +86,8 @@ describe("chronological managed directory context", () => {
     const f = await fixture()
     try {
       let dispatched = 0
-      const execute = async () => { await f.before("<CONTEXT>guide A</CONTEXT>"); dispatched++ }
+      const guide = '<AGENTS_MD path="/A/AGENTS.md">\nguide A\n</AGENTS_MD>'
+      const execute = async () => { await f.before(guide); dispatched++ }
       await expect(execute()).rejects.toThrow("tool was not executed")
       const system = { system: ["fixed root"] }
       await f.plugin["experimental.chat.system.transform"]({ sessionID: "session" }, system)
@@ -100,6 +101,7 @@ describe("chronological managed directory context", () => {
       const first = await f.project([begin, tools])
       expect(first.map((m) => m.info.role)).toEqual(["user", "assistant", "user"])
       expect(first[2].parts[0].text).toContain("not a new human request")
+      expect(first[2].parts[0].text).toContain(guide)
       expect(first[2].parts[0].synthetic).toBe(true)
       expect(first[2].parts[0].metadata).toMatchObject({ metalanguage: { kind: "directory_agents", phase: "PreToolUse" } })
       expect([begin, tools]).toEqual(snapshot)
@@ -169,9 +171,9 @@ describe("chronological managed directory context", () => {
   test("cumulative revisions and multi-scope bodies retain original positions and path identities", async () => {
     const f = await fixture()
     try {
-      const a = "<CONTEXT path='/A/AGENTS.md'>same</CONTEXT>"
-      const b = "<CONTEXT path='/B/AGENTS.md'>same</CONTEXT>"
-      const revised = "<CONTEXT path='/A/AGENTS.md'>revised</CONTEXT>"
+      const a = '<AGENTS_MD path="/A/AGENTS.md">\nsame\n</AGENTS_MD>'
+      const b = '<AGENTS_MD path="/B/AGENTS.md">\nsame\n</AGENTS_MD>'
+      const revised = '<AGENTS_MD path="/A/AGENTS.md">\nrevised\n</AGENTS_MD>'
       const combined = a + "\n\n" + b
       await expect(f.before(combined)).rejects.toThrow("tool was not executed")
       const first = await f.project([user(), exchange("ab")])
