@@ -5,6 +5,7 @@ import {
   access,
   appendFile,
   chmod,
+  copyFile,
   lstat,
   mkdir,
   readFile,
@@ -769,6 +770,30 @@ async function readServerUrl(server: ServerProcess, timeoutSeconds: number): Pro
   )
 }
 
+export async function seedAccountDb(request: RunnerRequest, root: string): Promise<void> {
+  const source = request.opencode_account_db
+  if (!source) return
+  let sourceStat
+  try {
+    sourceStat = await stat(source)
+  } catch {
+    sourceStat = undefined
+  }
+  if (!sourceStat?.isFile()) {
+    throw asRunnerError(
+      "state_isolation_failed",
+      new Error(`OpenCode account database is not a regular file: ${source}`),
+    )
+  }
+  const dbPath = join(root, "data/opencode.db")
+  try {
+    await copyFile(source, dbPath)
+    await chmod(dbPath, 0o600)
+  } catch (error) {
+    throw asRunnerError("state_isolation_failed", error)
+  }
+}
+
 async function startServer(
   request: RunnerRequest,
   env: WorkerEnvironment,
@@ -1193,6 +1218,7 @@ export async function runRequest(request: RunnerRequest, cancelled: Promise<void
     throw asRunnerError("state_isolation_failed", error)
   }
   try {
+    await seedAccountDb(request, root)
     await verifyVersion(request, env)
     const password = env.OPENCODE_SERVER_PASSWORD
     const { server, baseUrl } = await startServer({ ...request, cwd }, env, root)

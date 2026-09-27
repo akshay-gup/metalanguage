@@ -83,6 +83,7 @@ from utils.opencode_runner import (
     custom_provider_configuration,
     custom_provider_environment_names,
     custom_provider_fingerprint,
+    default_opencode_account_db,
     opencode_python_fingerprint,
     opencode_worker_fingerprint,
     prepare_provider_environment,
@@ -1244,6 +1245,9 @@ def _worker_backend_resume_compatible(
             "opencode_worker_sha256": getattr(args, "_opencode_worker_sha256", None),
             "opencode_python_sha256": getattr(args, "_opencode_python_sha256", None),
             "opencode_auth_sha256": getattr(args, "_opencode_auth_sha256", None),
+            "opencode_account_db_sha256": getattr(
+                args, "_opencode_account_db_sha256", None
+            ),
             "opencode_provider_env_sha256": getattr(
                 args, "_opencode_provider_env_sha256", None
             ),
@@ -2030,6 +2034,7 @@ def run_opencode_worker(
     benchmark_mcp_servers: dict[str, Any] | None = None,
     sensitive_mcp_tools: tuple[tuple[str, str], ...] = (),
     auth_file: Path | None = None,
+    opencode_account_db: Path | None = None,
     agent: str | None = None,
     variant: str | None = None,
     allowed_versions: tuple[str, ...] = SOURCE_AUDITED_OPENCODE_VERSIONS,
@@ -2086,6 +2091,7 @@ def run_opencode_worker(
         benchmark_mcp_servers=benchmark_mcp_servers,
         sensitive_mcp_tools=sensitive_mcp_tools,
         auth_file=auth_file,
+        opencode_account_db=opencode_account_db,
         agent=agent,
         variant=variant,
         allowed_versions=allowed_versions,
@@ -3149,6 +3155,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
     opencode_bun_bin: Path | None = None
     opencode_bin: Path | None = None
     opencode_auth_file: Path | None = None
+    opencode_account_db: Path | None = None
     opencode_allowed_versions = tuple(
         version.strip()
         for version in args.opencode_allowed_versions.split(",")
@@ -3166,6 +3173,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
     opencode_bun_sha256: str | None = None
     opencode_worker_sha256: str | None = None
     opencode_auth_sha256: str | None = None
+    opencode_account_db_sha256: str | None = None
     opencode_slot_environments: dict[RolloutSlot, OpenCodeSlotEnvironment] = {}
     opencode_python_sha256: str | None = None
     opencode_bubblewrap_version: str | None = None
@@ -3209,6 +3217,12 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 raise FileNotFoundError(
                     f"OpenCode auth file does not exist: {opencode_auth_file}"
                 )
+        if getattr(args, "opencode_account_db", None):
+            raise SystemExit(
+                "error: --opencode-account-db was removed; the console account "
+                "database is now always seeded into OpenCode rollouts when present"
+            )
+        opencode_account_db = default_opencode_account_db()
         _validate_opencode_containment(
             args.benchmark, args.opencode_sandbox_mode, args.opencode_network_mode
         )
@@ -3234,6 +3248,11 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
         opencode_worker_sha256 = opencode_worker_fingerprint(opencode_worker_script)
         opencode_auth_sha256 = (
             file_sha256(opencode_auth_file) if opencode_auth_file is not None else None
+        )
+        opencode_account_db_sha256 = (
+            file_sha256(opencode_account_db)
+            if opencode_account_db is not None
+            else None
         )
         for slot in opencode_slots:
             slot_model = slot.model
@@ -3314,6 +3333,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             slot_args._opencode_worker_sha256 = opencode_worker_sha256
             slot_args._opencode_python_sha256 = opencode_python_sha256
             slot_args._opencode_auth_sha256 = opencode_auth_sha256
+            slot_args._opencode_account_db_sha256 = opencode_account_db_sha256
             slot_args._opencode_provider_env_names = (
                 slot_environment.provider_env_names
             )
@@ -4114,6 +4134,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                             benchmark_mcp_servers=rollout_benchmark.mcp_servers,
                             sensitive_mcp_tools=rollout_benchmark.sensitive_mcp_tools,
                             auth_file=opencode_auth_file,
+                            opencode_account_db=opencode_account_db,
                             agent=args.opencode_agent,
                             variant=args.opencode_variant,
                             allowed_versions=opencode_allowed_versions,
@@ -4465,6 +4486,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                 "opencode_worker_sha256": opencode_worker_sha256,
                 "opencode_python_sha256": opencode_python_sha256,
                 "opencode_auth_sha256": opencode_auth_sha256,
+                "opencode_account_db_sha256": opencode_account_db_sha256,
                 "opencode_provider_env_sha256": (
                     opencode_slot_environment.provider_env_sha256
                     if opencode_slot_environment is not None
@@ -4761,6 +4783,7 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
                                         "opencode_bun_sha256": opencode_bun_sha256,
                                         "opencode_worker_sha256": opencode_worker_sha256,
                                         "opencode_auth_sha256": opencode_auth_sha256,
+                                        "opencode_account_db_sha256": opencode_account_db_sha256,
                                         "opencode_provider_env_sha256": (
                                             opencode_slot_environment.provider_env_sha256
                                             if opencode_slot_environment is not None

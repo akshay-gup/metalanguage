@@ -10,6 +10,7 @@ import re
 import select
 import shutil
 import signal
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -732,6 +733,58 @@ def _cleanup_host_mcp_roots(worker_state_dir: Path) -> None:
         shutil.rmtree(path, ignore_errors=True)
 
 
+# Tables kept when seeding an OpenCode account database into an isolated rollout.
+# Everything else (sessions, messages, credentials, todos, projects) is stripped so
+# the rollout sees the console subscription identity but none of the user's state.
+_OPENCODE_ACCOUNT_KEEP_TABLES = frozenset(
+    {"account", "account_state", "migration", "data_migration"}
+)
+
+
+def default_opencode_account_db() -> Path | None:
+    """Locate the local OpenCode account database holding the console login.
+
+    Returns the path when it exists, else None so rollouts without a console
+    login keep working exactly as before.
+    """
+    data_home = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+    candidate = data_home / "opencode" / "opencode.db"
+    return candidate if candidate.is_file() else None
+
+
+def seed_opencode_account_db(source: Path, dest: Path) -> None:
+    """Copy an OpenCode account DB, keeping only console-subscription tables.
+
+    The copy keeps the ``account``/``account_state`` rows (the console OAuth
+    identity that unlocks subscription providers such as ``opencode-go``) plus
+    the migration bookkeeping tables, and drops all rows from every other
+    table. The rollout's server runs its own migrations on top on startup.
+    """
+    if not source.is_file():
+        raise FileNotFoundError(
+            f"OpenCode account database does not exist: {source}"
+        )
+    shutil.copy2(source, dest)
+    connection = sqlite3.connect(dest)
+    try:
+        tables = [
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        ]
+        for table in tables:
+            if table.startswith("sqlite_"):
+                continue
+            if table not in _OPENCODE_ACCOUNT_KEEP_TABLES:
+                connection.execute(f'DELETE FROM "{table}"')
+        connection.commit()
+        connection.execute("VACUUM")
+    finally:
+        connection.close()
+    os.chmod(dest, 0o600)
+
+
 def _durable_request(request: dict[str, Any]) -> dict[str, Any]:
     """Return diagnostic request metadata without MCP credentials/arguments."""
     durable = json.loads(json.dumps(request))
@@ -746,6 +799,8 @@ def _durable_request(request: dict[str, Any]) -> dict[str, Any]:
             server["env"] = {key: {"redacted": True} for key in env}
     if "auth_file" in durable:
         durable["auth_file"] = {"configured": True}
+    if "opencode_account_db" in durable:
+        durable["opencode_account_db"] = {"configured": True}
     if "spawn_child_handler_command" in durable:
         durable["spawn_child_handler_command"] = {"configured": True}
     if "directory_agents_handler_command" in durable:
@@ -920,6 +975,7 @@ def run_opencode_rollout(
     benchmark_mcp_servers: dict[str, Any] | None = None,
     sensitive_mcp_tools: tuple[tuple[str, str], ...] = (),
     auth_file: Path | None = None,
+    opencode_account_db: Path | None = None,
     agent: str | None = None,
     variant: str | None = None,
     allowed_versions: tuple[str, ...] = SOURCE_AUDITED_OPENCODE_VERSIONS,
@@ -1060,6 +1116,10 @@ def run_opencode_rollout(
         ]
     if auth_file is not None:
         request["auth_file"] = str(auth_file.resolve())
+    if opencode_account_db is not None:
+        seeded_account_db = control_dir / "opencode_account.db"
+        seed_opencode_account_db(opencode_account_db.resolve(), seeded_account_db)
+        request["opencode_account_db"] = str(seeded_account_db)
     if agent:
         request["agent"] = agent
     if variant:

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { lstat, mkdir, mkdtemp, readlink, realpath, rm, symlink, writeFile } from "node:fs/promises"
+import { lstat, mkdir, mkdtemp, readFile, readlink, realpath, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 
@@ -17,6 +17,7 @@ import {
   initialSystemInstructions,
   opencodeConfig,
   sandboxedServerCommand,
+  seedAccountDb,
   startDirectoryAgentsCallback,
   startSpawnCallback,
 } from "./worker.ts"
@@ -1125,6 +1126,65 @@ describe("spawn_child supervisor bridge", () => {
       })
     } finally {
       callback.stop()
+    }
+  })
+})
+
+describe("opencode account db seeding", () => {
+  async function makeRoot(): Promise<string> {
+    const root = await mkdtemp(join(tmpdir(), "metalanguage-acctest-"))
+    await mkdir(join(root, "data"), { recursive: true })
+    return root
+  }
+
+  function baseRequest(): RunnerRequest {
+    return {
+      opencode_bin: "/usr/bin/false",
+      model: "test/test-model",
+      cwd: "/tmp",
+      state_root: "/tmp",
+    }
+  }
+
+  test("copies the seeded db into the isolated data dir", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "metalanguage-accdb-"))
+    const root = await makeRoot()
+    try {
+      const source = join(dir, "account.db")
+      await writeFile(source, "fake-db-bytes")
+      await seedAccountDb({ ...baseRequest(), opencode_account_db: source }, root)
+      const copied = await readFile(join(root, "data/opencode.db"), "utf8")
+      expect(copied).toBe("fake-db-bytes")
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  test("missing opencode_account_db is a no-op", async () => {
+    const root = await makeRoot()
+    try {
+      await seedAccountDb(baseRequest(), root)
+      let exists = true
+      try {
+        await lstat(join(root, "data/opencode.db"))
+      } catch {
+        exists = false
+      }
+      expect(exists).toBe(false)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  test("non-file opencode_account_db raises a runner error", async () => {
+    const root = await makeRoot()
+    try {
+      await expect(
+        seedAccountDb({ ...baseRequest(), opencode_account_db: join(root, "missing.db") }, root),
+      ).rejects.toMatchObject({ code: "state_isolation_failed" })
+    } finally {
+      await rm(root, { recursive: true, force: true })
     }
   })
 })

@@ -38,6 +38,7 @@ from utils.opencode_runner import (
     resolve_bun_bin,
     resolve_opencode_bin,
     run_opencode_rollout,
+    seed_opencode_account_db,
     validate_opencode_host_primitives,
 )
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -1965,6 +1966,63 @@ class OpenCodeRunnerTests(unittest.TestCase):
             self.assertEqual(result["status"], "completed")
             self.assertTrue((root / "workdir/fake_descendant.pid").is_file())
             self._assert_pid_gone(self._runtime_pid(result))
+
+
+class TestSeedOpencodeAccountDb(unittest.TestCase):
+    def _make_source_db(self, root: Path) -> Path:
+        import sqlite3
+
+        source = root / "source.db"
+        connection = sqlite3.connect(source)
+        try:
+            connection.execute("CREATE TABLE account (id TEXT PRIMARY KEY, email TEXT)")
+            connection.execute(
+                "CREATE TABLE account_state (id INTEGER PRIMARY KEY, active_account_id TEXT)"
+            )
+            connection.execute("CREATE TABLE migration (id TEXT PRIMARY KEY)")
+            connection.execute("CREATE TABLE session (id TEXT PRIMARY KEY)")
+            connection.execute("CREATE TABLE message (id TEXT PRIMARY KEY)")
+            connection.execute(
+                "INSERT INTO account (id, email) VALUES ('acc-1', 'user@example.com')"
+            )
+            connection.execute(
+                "INSERT INTO account_state (id, active_account_id) VALUES (1, 'acc-1')"
+            )
+            connection.execute("INSERT INTO migration (id) VALUES ('m1')")
+            connection.execute("INSERT INTO session (id) VALUES ('sess-1')")
+            connection.execute("INSERT INTO message (id) VALUES ('msg-1')")
+            connection.commit()
+        finally:
+            connection.close()
+        return source
+
+    def _rows(self, db: Path, table: str):
+        import sqlite3
+
+        connection = sqlite3.connect(db)
+        try:
+            return connection.execute(f'SELECT * FROM "{table}"').fetchall()
+        finally:
+            connection.close()
+
+    def test_keeps_only_subscription_tables(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = self._make_source_db(root)
+            dest = root / "seeded.db"
+            seed_opencode_account_db(source, dest)
+            self.assertEqual(len(self._rows(dest, "account")), 1)
+            self.assertEqual(len(self._rows(dest, "account_state")), 1)
+            self.assertEqual(len(self._rows(dest, "migration")), 1)
+            self.assertEqual(self._rows(dest, "session"), [])
+            self.assertEqual(self._rows(dest, "message"), [])
+            self.assertEqual(oct(dest.stat().st_mode & 0o777), "0o600")
+
+    def test_missing_source_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with self.assertRaises(FileNotFoundError):
+                seed_opencode_account_db(root / "nope.db", root / "seeded.db")
 
 
 if __name__ == "__main__":

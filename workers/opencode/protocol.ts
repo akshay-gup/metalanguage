@@ -80,6 +80,7 @@ export type RunnerRequest = {
   timeout_seconds?: number | null
   startup_timeout_seconds?: number | null
   auth_file?: string | null
+  opencode_account_db?: string | null
   provider_env_names?: string[]
   custom_provider?: CustomProviderInput | null
   spawn_child_handler_command?: string[] | null
