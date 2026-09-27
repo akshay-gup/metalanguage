@@ -23,6 +23,36 @@ mathematical evaluator.
 | v3.6 | **Valid through tasks 0–10; task 9 has a disclosed checkpointed retry outside the matched horizon** | Keeps the v3.5 research turn, README, lineage, backend and linked-worktree behavior unchanged. Only when deterministic Codex/open-ended integration conflicts, the supervisor reconstructs the conflict at the same `archive/` path in a remote-free disposable repository and resumes that exact original session once for a merge-only turn. | At the matched tasks 0–4 horizon, 40/40 turns produced 31 children and 39 committed rollouts. Thirty-two integrated cleanly; seven conflicted, with three resolver integrations and four safe fallbacks; 36 committed heads reached canonical ancestry after one later recovery. Relative to v1 it was similar or better overall in activity and retention, while v1 retained the narrower RH executable/checkability advantage. |
 | v3.7 private inbox | **Valid through tasks 0–4** | Preserves v3.6 behavior and adds a pull-based private `messages/` inbox only to Codex/open-ended research turns. One supervisor-backed `send_message(recipient, message)` tool performs direct atomic delivery without supervisor message-size or send-count quotas; sibling inbox reads are denied, and there is no automatic context delivery, broadcast, polling, read API, or peer-bus state. | The matched five-iteration run completed 40/40 turns with 27 children and 39 committed rollouts. Thirty-three integrated cleanly; six conflicted, with three resolver integrations and three safe fallbacks; 36 committed heads reached canonical ancestry. Five task-0 messages were delivered but observably unread, and tasks 1–4 sent none, so no causal inbox benefit was demonstrated. |
 
+## The maintenance attractor
+
+The clearest observed failure of uncoupled propagation comes from outside the
+RH variant sequence: a real-task pilot in which rollouts were asked to build a
+US researcher outreach list (25 candidates, CSV + report). Over 12 iterations,
+rollouts converged on maintaining and extending validator tooling rather than
+performing the outreach task itself.
+
+A read-only audit of the run found the pattern was locally rational rather
+than random:
+
+- The task as given conflicted with the environment's standing instruction of
+  no assigned objective; in the absence of a clear objective gradient, rollouts
+  defaulted to the most legible available work — improving the machinery.
+- An early lineage's validator artifacts became a self-reinforcing attractor:
+  they were referenced in lineage seeds, re-touched through merge conflicts
+  (which replenished their recency and visibility), and re-emitted into
+  descendant seeds because they were prominent — not because they advanced the
+  task.
+- Activity measures confirm the shift: 133 network calls in tasks 0–2
+  (genuine outreach work), zero in tasks 3–11 (tooling maintenance only).
+
+This is propagation decoupled from usefulness in its pure form: deep
+re-emission chains, zero task advancement. It is the empirical case that
+motivates the selection-by-uptake account in the theory paper — the system had
+amplification (recall → use → re-emission) with no coupling between
+amplification and demonstrated helpfulness. Any future selection mechanism must
+be tested against this case: it must be able to starve the attractor, not
+merely outgrow it.
+
 ## What the sequence indicates
 
 - Instruction placement materially changes behavior. Rich system-level
@@ -50,6 +80,77 @@ mathematical evaluator.
   14 of 31 live conflict-resolution attempts passed the clean exact-parent
   merge checks, while the other 17 safely preserved their original refs and
   did not prevent later integrations.
+
+## Growth metrics: four separate measures
+
+Artifact and event counts in the chronology above are reported with the caveat
+that they are not token measures, scores, or correctness evidence. That caveat
+should be sharpened into a standing measurement plan: growth is not one
+quantity, and the components must be tracked separately.
+
+1. **Artifact volume**: how much is produced (files, commits, lines). Measures
+   activity, nothing more.
+2. **Approach diversity**: how many distinct directions are pursued (distinct
+   proof routes, distinct tooling strategies, distinct task framings). Measures
+   breadth; convergent chatter scores low here even at high volume.
+3. **Depth**: how far the deepest lines go (multi-generation chains, executable
+   certificates, countermodels that survive scrutiny). Measures cumulative
+   building rather than restarting.
+4. **Useful progress**: task-advancing outcomes measured independently of
+   propagation — under ablation (does removing the artifact harm descendants?),
+   under perturbation, and against held-out assays. Measures what the other
+   three do not: whether any of it helped.
+
+The four can diverge sharply, and the divergences are diagnostic. High volume
+with low diversity is chatter or ritual documentation. High diversity with low
+depth is exploration without accumulation. High depth with low useful progress
+is the maintenance attractor — cumulative building on a foundation that serves
+the machinery rather than the task. The organizational-transition claim in the
+theory paper is a claim about the joint behavior of (2), (3), and (4) with (1)
+held bounded: new organizational levels should appear as diversity and depth
+converting into useful progress, not merely as more artifacts.
+
+## Generality as a task objective
+
+The variant chronology above concerns object-level tasks: solve these problems,
+advance this proof. A distinct task class is the generality task: build a
+system that is broadly capable across a problem class, where the agents
+discover the necessary organization themselves. The ProgramBench meta-task
+("build a reusable system for solving ProgramBench-style tasks") is the first
+instance: the objective is not a set of solved examples but a reusable solver,
+and the organizational structure — what tools to build, what conventions to
+adopt, how to divide the work — is left for the rollouts to invent.
+
+This is a different game from accumulating solutions to supplied examples, and
+it must be scored differently. Object-level tasks measure outputs; generality
+tasks measure the reusability and breadth of what was built. The ProgramBench
+pilot ran two iterations but was never officially scored (the container
+dependency was never installed), so it stands as a task-design proposal with
+preliminary evidence, not a result. Future generality tasks should be specified
+with the same care as the benchmark drivers: what counts as "reusable," on
+what held-out distribution, judged by whom.
+
+## Two levels of self-correction
+
+Evaluation must distinguish two levels of correction that the current
+measurements conflate:
+
+- **Level 1 — local correction**: a rollout fixes its own errors — failed
+  tests, invalid proofs, broken tooling. Visible within a single episode;
+  largely a function of base-model capability.
+- **Level 2 — agenda correction**: the population abandons unproductive
+  directions across generations — drops a dead proof route, retires a tooling
+  obsession, reallocates effort. Visible only across lineages; a function of
+  the inheritance machinery.
+
+A lineage can be perfect at level 1 and stuck at level 2 indefinitely: every
+rollout correctly maintains the validator, and the validator never helps. The
+maintenance attractor is exactly this pattern. Falsifiers that test only
+level 1 (did descendants fix the errors?) will pass while the system fails at
+the thing that matters. Agenda-correction measures — direction turnover across
+generations, retirement rate of propagated artifacts, reallocation of effort
+after negative evidence — should be tracked alongside local-correctness
+measures and reported separately.
 
 ## Current source
 

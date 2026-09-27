@@ -1,8 +1,8 @@
 # Cognitive Language and Artificial Cultural Evolution
 
-Integrated draft v0.2 - paperization pass
+Integrated draft v0.3
 
-*Editorial status:* This version keeps the constructive theory as the center of the paper and moves most analogy, tooling, landscape, and experiment-ledger material into appendices. The main text should now read as a paper rather than a notebook. The controlling terminology is: **four-layer architecture** plus **two inheritance channels**.
+*Editorial status:* v0.3 merges the theory additions (organizational transition, selection by uptake, uptake-specific falsifiers) into the v0.2 paperization. This version keeps the constructive theory as the center of the paper and moves most analogy, tooling, landscape, and experiment-ledger material into appendices. The main text should now read as a paper rather than a notebook. The controlling terminology is: **four-layer architecture** plus **two inheritance channels**.
 
 ## Abstract
 
@@ -11,6 +11,8 @@ Recursive AI improvement is often framed as a single model modifying itself, its
 This paper develops a selection-theoretic account of **autonomous recursive accumulation**. The central claim is that recursive improvement requires more than storage, memory, or automated labor. It requires heritable process structures that cross transmission gaps and gain future representation because they improve downstream continuation. Storage becomes heredity only when later fresh-context agents depend on it, reconstruct from it, modify it, and preserve it because it helps.
 
 The paper then applies this account to LLM systems. Modern LLMs already have strong interpreter machinery: in-context adaptation, tool use, code generation, critique, summarization, and procedural reconstruction from written cues. What they mostly lack is an AI-native transmission ecology in which model-generated process artifacts persist, compete for scarce attention, shape later fresh rollouts, and are selected by downstream usefulness rather than by producer self-description or human curation.
+
+The stronger claim motivating this work is organizational. The question is not only whether inherited process structure improves descendant performance at the margin, but whether a hereditary process ecology can produce a qualitative transition in what a population of fixed-weight agents can do: new organizational levels — division of labor, shared conventions, cumulative tooling, regulatory structure — emerging from inheritance alone, without changes to the underlying model weights. That memory improves scores is the weak form of the thesis. The strong form is that organization itself becomes the locus of capability gains, and that the transition is observable as distinct from gradual improvement on existing measures. The mechanism sections of this paper describe the machinery the strong form would require; the experiments section describes how to tell the two forms apart.
 
 The constructive proposal is a **four-layer architecture for artificial cultural evolution**: a fixed constructor, an ephemeral workspace, a bounded lineage seed, and a public archive. The lineage seed is vertical culture; the public archive is cross-lineage culture. Selection occurs through protected scoring, bounded context, token or compute costs, archive uptake, descendant performance, and differential continuation. The near-term empirical target is not full open-ended recursive self-improvement, but domain-specific cumulative process evolution tested through fresh-context resets, costly retrieval, lineage/archive baselines, and artifact ablations.
 
@@ -49,6 +51,7 @@ The argument should be read as a ladder, not as a single maximal assertion.
 5. **Empirical prediction.** Under bounded context, costly attention, and descendant-based selection, lineage seeds and archive artifacts should become more compact, reconstructible, modular, and uptake-sensitive over generations.
 6. **Near-term scope.** The first empirical target is domain-specific cumulative process evolution, not immediate open-ended recursive self-improvement.
 7. **Stronger future claim.** A human-free recursive AI system would require replacing human selection with protected artificial consequence, not merely automating research labor.
+8. **Organizational transition.** The payoff of a working hereditary process ecology would not be marginal performance gains but a qualitative change in collective capability at fixed model weights — new organizational levels produced by inheritance alone. This is the central hypothesis. The preceding claims describe the machinery it would require; the falsifiers in §7 describe how to distinguish it from mere accumulation.
 
 ## 2. The Two-Loop Structure of Cumulative Systems
 
@@ -178,6 +181,8 @@ The two inheritance channels are the lineage seed and the public archive. They s
 
 Vertical inheritance without cross-lineage borrowing risks narrow depth. Cross-lineage borrowing without vertical continuity risks shallow novelty. Together they create a cultural system with both depth and breadth.
 
+A clarification about the layers: the lineage seed and the public archive are often described as memory, and the guidance documents governing retrieval as regulation. The distinction is analytical, not architectural. In practice the same structure does both jobs, and the consequential layer in any hereditary system is the one where memory and regulation coincide — the structure that both persists across generations and decides what else gets recalled into live contexts. In the architecture proposed here that layer is the guidance substrate: the root and directory guidance documents that are automatically loaded into every fresh context and rewritten by every generation. It is the only persistent structure that is both inherited and interpretive, both remembered and governing. This is why changes to the guidance substrate are the highest-leverage interventions in the system, and why its evolution across generations is the primary thing to measure.
+
 ### 5.2 Primitive physics versus evolved filters
 
 The architecture should fix consequence, not doctrine. If every trust rule, archive filter, reputation mechanism, artifact format, evaluator convention, role, and review practice is specified in advance, the result is a human-designed institution rather than an evolving process culture. But if nothing is fixed, agents can drift, self-certify, preserve useless artifacts, or redefine success.
@@ -259,6 +264,12 @@ constraints.
 
 Selection acts on whatever has heritable variation and affects its future representation in the system. Depending on the layer, this can be lineages, seeds, tools, archive artifacts, evaluators, naming conventions, trust markers, retrieval policies, or broader process strategies.
 
+In systems with explicit fitness functions, selection is score-driven: variants are ranked and the top-ranked reproduce. The artificial cultural ecology proposed here has no such scorer for process artifacts. No verifier grades a seed's doctrine; no benchmark scores an archive entry's elegance. Selection, if it occurs, must therefore be **selection by uptake**: an artifact's future representation grows exactly to the extent that later agents take it up — read it, use it, adapt it — and re-emit it into the substrate their own descendants will inherit. Uptake and re-emission are the judge, and there is no other judge. This is not a limitation to be patched with a better metric. It is the mechanism, and the theory must describe it on its own terms rather than borrowing justification from explicit fitness selection.
+
+Differential persistence in all three reference systems runs through recall. In biology, a gene that is never expressed is invisible to selection; expression is what exposes a variant to consequence. In human culture, an idea that is never recalled is never retransmitted; a book no one opens is stored, not spread. In an artificial ecology, an artifact that never enters a live context cannot shape behavior. Recall — the movement of structure from persistent substrate into active process — is the engine of differential persistence, and whatever governs recall is therefore the locus of selection.
+
+This is also why the distinction between memory and regulation collapses on inspection. Memory is what persists; regulation is what decides what persists into the present moment; every act of retrieval is already a regulatory act. DNA is simultaneously the species' memory and its control system. A lineage seed's operating doctrine is simultaneously what the lineage remembers and what governs the descendant. Storage becomes heredity only when memory is regulated — when there is a mechanism deciding what gets recalled, by whom, and when. A persistent store with no regulatory layer is a library no one visits.
+
 The basic operational questions are:
 
 ```text
@@ -287,6 +298,12 @@ The archive should distinguish exposure, attention, and uptake.
 Only uptake should strongly affect artifact fitness. Search hits, brief reads, producer-written claims, and string mentions are weak signals. A practical first rule is that an artifact counts as adopted only if it is carried into a child seed, copied or modified into a derivative artifact, imported as a dependency, used by an evaluator or workflow, or nominated by a downstream consumer with evidence.
 
 This does not require perfect causal attribution. Natural selection does not know perfect causal credit; it uses repeated consequence. The archive can start with noisy but grounded association: artifacts carried forward by successful unrelated lineages gain visibility; artifacts carried forward by failing lineages lose visibility; artifacts marked misleading by consumers decay; artifacts that are only exposed or mentioned gain little standing.
+
+### What uptake selects for
+
+The uptake judge has a characteristic pathology, and it must be stated plainly: **uptake selects for propagatability, not for quality.** An artifact that is easy to find, easy to understand, and prominently recommended will be taken up and re-emitted more often than a subtle artifact that would help more. Depth of re-emission chains measures spread, not usefulness. This is not a hypothetical failure mode; it is the default outcome of any selection-by-uptake system. The memetic analogue is familiar: ideas spread because they are memorable, not because they are true.
+
+The consequence is that re-emission must be coupled to demonstrated helpfulness, or the system will reliably converge on self-reinforcing lineages of artifacts that persist because they are referenced, not because they help — the maintenance-attractor pattern, in which rollouts converge on maintaining inherited tooling rather than advancing the task. The coupling cannot come from producer claims; those are the cheapest signal to fake. It must come from the consumer side: uptake associated with downstream success, where success is measured independently of the artifact's own propagation. Where this coupling is absent, the system has memetic spread without heredity — propagation decoupled from usefulness — and the organizational-transition claim fails even where weak accumulation succeeds.
 
 ### Failure modes as design tests
 
@@ -358,8 +375,12 @@ Additional falsifiers:
 - If uptake-sensitive selection produces more artifacts but not better descendants, the attribution mechanism is likely selecting popularity, self-promotion, or ritual use.
 - If inherited artifacts help only when tasks repeat exactly and fail under modest perturbation, the system is memorizing task instances rather than accumulating reusable process.
 - If retrieval cost eliminates artifact use entirely, the archive has not produced value high enough to overcome bounded attention.
+- If the artifacts with the deepest re-emission chains show no causal benefit under ablation — if removing or corrupting the most-propagated artifacts does not harm descendants — then the system has memetic spread without heredity: propagation decoupled from usefulness, and uptake-selection is selecting propagatability rather than quality.
+- If behaviorally measured uptake (what agents actually reuse under scarcity — for example, what survives context eviction on leaving a directory) does not predict re-emission into descendant seeds, then the uptake-to-re-emission link is broken. The system has drift and accumulation, not selection.
+- If enforcing genuine scarcity — bounded guidance budgets, eviction of unengaged context — does not change which artifacts persist relative to an unbounded control, then persistence is driven by accumulation rather than competition, and the selection account is not supported in that domain.
+- If re-emission rates respond to prominence and recency but not to demonstrated downstream helpfulness, the judge is uncoupled from quality. The weak accumulation claim may still hold while the strong organizational-transition claim fails; the two must be tested separately.
 
-The strongest positive result would not simply be better one-step benchmark performance. It would be evidence that fresh descendants continue a process more effectively because of bounded inherited seeds, and that unrelated lineages benefit from selected archive artifacts without reading the whole archive.
+The strongest positive result would not simply be better one-step benchmark performance. It would be evidence that fresh descendants continue a process more effectively because of bounded inherited seeds, and that unrelated lineages benefit from selected archive artifacts without reading the whole archive. The strongest positive result would further show that the artifacts which propagate most widely are also the most load-bearing under ablation — that is, that the uptake judge tracks usefulness rather than mere propagatability — and that fresh descendants exhibit qualitatively new organizational capacities (division of labor, shared conventions, cumulative tooling) that no isolated rollout displays, at fixed model weights.
 
 ## 8. Discussion: Scope, Limits, and Relation to Current AI R&D
 
