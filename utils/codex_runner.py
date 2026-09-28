@@ -334,8 +334,7 @@ def run_codex_rollout(
     if spawn_child_handler_context_path is not None:
         request["spawn_child_handler_command"] = [
             sys.executable,
-            str(PROJECT_ROOT / "main_loop.py"),
-            "--child-tool-handler",
+            str(PROJECT_ROOT / "child_tool_handler.py"),
             str(spawn_child_handler_context_path),
         ]
         resolver_command = [

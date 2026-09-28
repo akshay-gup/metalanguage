@@ -472,6 +472,9 @@ def opencode_python_fingerprint(main_loop_path: Path) -> str:
     for path in (
         Path(__file__).resolve(),
         main_loop_path.resolve(),
+        (PROJECT_ROOT / "child_tool_handler.py").resolve(),
+        (PROJECT_ROOT / "utils" / "child_spawn.py").resolve(),
+        (PROJECT_ROOT / "utils" / "archive_contract.py").resolve(),
         (PROJECT_ROOT / "utils" / "directory_agents_decay.py").resolve(),
         (PROJECT_ROOT / "utils" / "directory_agents_hook.py").resolve(),
     ):
@@ -1047,8 +1050,7 @@ def run_opencode_rollout(
     if continuation_context_path is not None:
         request["spawn_child_handler_command"] = [
             sys.executable,
-            str(PROJECT_ROOT / "main_loop.py"),
-            "--child-tool-handler",
+            str(PROJECT_ROOT / "child_tool_handler.py"),
             str(continuation_context_path),
         ]
         request["directory_agents_handler_command"] = [

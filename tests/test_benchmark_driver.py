@@ -140,7 +140,7 @@ class BenchmarkDriverTests(unittest.TestCase):
             self.assertTrue(invalid["retryable"])
 
             (first_workspace / "AGENTS.md").write_text("# First child\n")
-            with patch("main_loop.copy_seed_workspace", side_effect=RuntimeError("copy failed")):
+            with patch("utils.child_spawn.copy_seed_workspace", side_effect=RuntimeError("copy failed")):
                 copy_failed = _spawn_child_continuation(
                     context=context(0),
                     args={"prompt": "first", "workspace_dir": "first-child"},
