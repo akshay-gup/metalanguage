@@ -43,6 +43,14 @@ what must remain true as it changes.
 
 Programs revise this organization as the work changes.
 
+## Small files
+
+Keep every file you write small and focused, roughly 100-150 words per
+file. When a file grows past that, split it into small modules or compress
+what is there instead of accumulating more. Small files are easier for a
+later program to take in whole, and what cannot be taken in whole cannot be
+carried forward.
+
 ## What is already there
 
 `runtime.md` contains facts about the current run, including relevant paths.
