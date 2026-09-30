@@ -77,15 +77,23 @@ _UNSAFE_CUSTOM_HEADERS = {
 }
 
 _BASE_ENVIRONMENT_NAMES = {
+    "ALL_PROXY",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
     "LANG",
     "LC_ALL",
     "LC_CTYPE",
     "NO_COLOR",
+    "NO_PROXY",
     "REQUESTS_CA_BUNDLE",
     "SSL_CERT_DIR",
     "SSL_CERT_FILE",
     "TERM",
     "TZ",
+    "all_proxy",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
 }
 
 _PATH_ENVIRONMENT_KINDS = {
@@ -1024,7 +1032,9 @@ def run_opencode_rollout(
         sandbox_read_only_mounts = (*sandbox_read_only_mounts, *inferred_mounts)
     else:
         unexpected_provider_environment = sorted(
-            set(provider_environment) - set(provider_env_names)
+            set(provider_environment)
+            - set(provider_env_names)
+            - _BASE_ENVIRONMENT_NAMES
         )
         if unexpected_provider_environment:
             raise ValueError(
