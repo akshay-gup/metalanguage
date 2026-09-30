@@ -15,6 +15,7 @@ import {
 import {
   finalAssistantText,
   initialSystemInstructions,
+  isRetryableWorkerErrorCode,
   opencodeConfig,
   sandboxedServerCommand,
   seedAccountDb,
@@ -1185,6 +1186,34 @@ describe("opencode account db seeding", () => {
       ).rejects.toMatchObject({ code: "state_isolation_failed" })
     } finally {
       await rm(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("retryable worker errors", () => {
+  test("infra flakes are retryable, real failures are not", () => {
+    for (const code of [
+      "opencode_event_closed",
+      "opencode_event_connect_failed",
+      "opencode_event_timeout",
+      "opencode_start_failed",
+      "opencode_start_timeout",
+      "opencode_version_failed",
+      "opencode_version_timeout",
+      "opencode_http_timeout",
+    ]) {
+      expect(isRetryableWorkerErrorCode(code)).toBe(true)
+    }
+    for (const code of [
+      "malformed_opencode_event",
+      "malformed_opencode_response",
+      "ProviderAuthError",
+      "worker_timeout",
+      "worker_cancelled",
+      "opencode_worker_failed",
+      "unknown",
+    ]) {
+      expect(isRetryableWorkerErrorCode(code)).toBe(false)
     }
   })
 })

@@ -53,15 +53,39 @@ const SOURCE_AUDITED_BUN_VERSION = "1.3.14"
 
 class RunnerError extends Error {
   readonly diagnostic?: SafeErrorDiagnostic
+  readonly retryable?: boolean
 
   constructor(
     readonly code: string,
     message: string,
-    options?: ErrorOptions & { diagnostic?: SafeErrorDiagnostic },
+    options?: ErrorOptions & { diagnostic?: SafeErrorDiagnostic; retryable?: boolean },
   ) {
     super(message, options?.cause === undefined ? undefined : { cause: options.cause })
     this.diagnostic = options?.diagnostic
+    this.retryable = options?.retryable
   }
+}
+
+// Reconnect the /event stream when it drops while the server is still alive,
+// instead of killing the rollout on the first hiccup.
+const SSE_MAX_RECONNECT_ATTEMPTS = 5
+const SSE_RECONNECT_BASE_DELAY_MS = 1_000
+const SSE_RECONNECT_MAX_DELAY_MS = 30_000
+
+// Worker errors that mean "the rollout never got to do real work": safe to retry.
+const RETRYABLE_WORKER_ERROR_CODES = new Set([
+  "opencode_event_closed",
+  "opencode_event_connect_failed",
+  "opencode_event_timeout",
+  "opencode_start_failed",
+  "opencode_start_timeout",
+  "opencode_version_failed",
+  "opencode_version_timeout",
+  "opencode_http_timeout",
+])
+
+export function isRetryableWorkerErrorCode(code: string): boolean {
+  return RETRYABLE_WORKER_ERROR_CODES.has(code)
 }
 
 type WorkerEnvironment = Record<string, string>
@@ -822,20 +846,61 @@ async function startServer(
   }
 }
 
-async function startSse(api: ApiClient, queue: AsyncQueue<unknown>, timeoutMs: number): Promise<void> {
-  const response = await api.request("/event", {}, timeoutMs)
-  if (!response.body) throw new RunnerError("opencode_event_connect_failed", "OpenCode event body unavailable")
+async function startSse(
+  api: ApiClient,
+  queue: AsyncQueue<unknown>,
+  timeoutMs: number,
+  server: ServerProcess,
+): Promise<void> {
   void (async () => {
-    const decoder = new SseDecoder()
-    const reader = response.body!.getReader()
-    try {
-      while (true) {
-        const { value, done } = await reader.read()
-        if (done) throw new RunnerError("opencode_event_closed", "OpenCode event stream closed")
-        for (const event of decoder.push(value)) queue.push(event)
+    let attempt = 0
+    for (;;) {
+      try {
+        const response = await api.request("/event", {}, timeoutMs)
+        if (!response.body) throw new RunnerError("opencode_event_connect_failed", "OpenCode event body unavailable")
+        const decoder = new SseDecoder()
+        const reader = response.body.getReader()
+        try {
+          for (;;) {
+            const { value, done } = await reader.read()
+            if (done) throw new RunnerError("opencode_event_closed", "OpenCode event stream closed")
+            for (const event of decoder.push(value)) queue.push(event)
+          }
+        } finally {
+          try {
+            await reader.cancel()
+          } catch {
+            // The stream is already dead; nothing left to clean up.
+          }
+        }
+      } catch (error) {
+        attempt += 1
+        const normalized =
+          error instanceof RunnerError
+            ? error
+            : new RunnerError(
+                error instanceof Error && error.message.startsWith("malformed OpenCode SSE")
+                  ? "malformed_opencode_event"
+                  : "opencode_event_connect_failed",
+                error instanceof Error ? error.message : String(error),
+                { cause: error },
+              )
+        // If the server itself died, reconnecting is pointless: report honestly.
+        // (Bun's exitCode is null until the process has exited.)
+        const serverDead = server.exitCode !== null
+        if (serverDead || attempt > SSE_MAX_RECONNECT_ATTEMPTS) {
+          queue.close(normalized)
+          return
+        }
+        emit({
+          event: "warning",
+          warning_code: "opencode_event_reconnect",
+          attempt,
+          max_attempts: SSE_MAX_RECONNECT_ATTEMPTS,
+          error_code: safeErrorCode(normalized.code),
+        })
+        await sleep(Math.min(SSE_RECONNECT_MAX_DELAY_MS, SSE_RECONNECT_BASE_DELAY_MS * 2 ** (attempt - 1)))
       }
-    } catch (error) {
-      queue.close(asRunnerError("malformed_opencode_event", error))
     }
   })()
 }
@@ -918,6 +983,7 @@ function messageId(): string {
 
 async function runSession(
   api: ApiClient,
+  server: ServerProcess,
   request: RunnerRequest,
   translated: TranslatedMcp,
   providerId: string,
@@ -927,7 +993,7 @@ async function runSession(
 ): Promise<void> {
   const queue = new AsyncQueue<unknown>()
   const startupTimeoutMs = seconds(request.startup_timeout_seconds, 15) * 1000
-  await startSse(api, queue, startupTimeoutMs)
+  await startSse(api, queue, startupTimeoutMs, server)
   const connected = await withTimeout(
     queue.next(),
     startupTimeoutMs,
@@ -1238,7 +1304,7 @@ export async function runRequest(request: RunnerRequest, cancelled: Promise<void
       const sensitiveValues = (request.provider_env_names ?? [])
         .map((name) => env[name])
         .filter((value): value is string => typeof value === "string" && value.length > 0)
-      await runSession(api, request, translated, providerId, modelId, cancelled, sensitiveValues)
+      await runSession(api, server, request, translated, providerId, modelId, cancelled, sensitiveValues)
     } finally {
       await stopServer(server)
     }
@@ -1270,9 +1336,12 @@ export async function main(): Promise<void> {
       error_code: safeErrorCode(normalized.code),
       error_message: safeErrorMessage(normalized.code),
     }
+    const retryable =
+      diagnostic.error_retryable ?? normalized.retryable ?? isRetryableWorkerErrorCode(normalized.code)
     emit({
       event: "error",
       ...diagnostic,
+      ...(retryable ? { error_retryable: true } : {}),
     })
     process.exit(1)
   }

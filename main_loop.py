@@ -2735,6 +2735,16 @@ def parse_args() -> argparse.Namespace:
         help="Maximum retries for transient OpenRouter request failures per model turn.",
     )
     parser.add_argument(
+        "--opencode-worker-max-retries",
+        type=int,
+        default=2,
+        help=(
+            "Maximum retries for an OpenCode rollout that fails with a retryable "
+            "worker error (e.g. the event stream died). Each retry reruns the "
+            "rollout from a clean workdir."
+        ),
+    )
+    parser.add_argument(
         "--fail-on-rollout-error",
         action="store_true",
         help=(
@@ -3062,6 +3072,8 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
         raise ValueError("--bash-timeout-seconds must be > 0")
     if args.openrouter_max_retries < 0:
         raise ValueError("--openrouter-max-retries must be >= 0")
+    if args.opencode_worker_max_retries < 0:
+        raise ValueError("--opencode-worker-max-retries must be >= 0")
     if args.benchmark == "open-ended" and args.problem_pool_size is not None:
         raise SystemExit(
             "error: --problem-pool-size is not valid with --benchmark open-ended"
@@ -4079,135 +4091,157 @@ def _run_main(active_drivers: list[BenchmarkDriver]) -> None:
             )
             try:
                 directory_agents.start()
-                try:
-                    if worker_backend == "codex":
-                        if codex_runner_bin is None:
-                            raise RuntimeError("Codex runner binary was not initialized.")
-                        worker_result = run_codex_worker(
-                            runner_bin=codex_runner_bin,
-                            model=model,
-                            workdir=temp_dir,
-                            control_dir=rollout_control_dir,
-                            worker_state_dir=rollout_state_dir,
-                            codex_home=codex_home,
-                            seed_output_dir=seed_output_dir,
-                            shared_archives_root=shared_archives_root,
-                            shared_workspace_dir=shared_workspace_dir,
-                            rollout_username=rollout_username,
-                            timeout_seconds=args.worker_timeout_seconds,
-                            sandbox_mode=args.codex_sandbox_mode,
-                            initial_user_text=rollout_initial_prompt,
-                            base_instructions=codex_base_instructions,
-                            continuation_context=continuation_context,
-                            continuation_context_path=continuation_context_path,
-                            benchmark_mcp_servers=rollout_benchmark.mcp_servers,
-                            sensitive_mcp_tools=rollout_benchmark.sensitive_mcp_tools,
-                            progress_callback=_progress,
-                            persist_session=(args.benchmark == "open-ended"),
-                        )
-                    elif worker_backend == "opencode":
-                        if (
-                            opencode_worker_script is None
-                            or opencode_bun_bin is None
-                            or opencode_bin is None
-                        ):
-                            raise RuntimeError(
-                                "OpenCode worker, Bun, and CLI were not initialized."
+                worker_max_retries = (
+                    args.opencode_worker_max_retries if worker_backend == "opencode" else 0
+                )
+                worker_attempt = 0
+                while True:
+                    worker_attempt += 1
+                    try:
+                        if worker_backend == "codex":
+                            if codex_runner_bin is None:
+                                raise RuntimeError("Codex runner binary was not initialized.")
+                            worker_result = run_codex_worker(
+                                runner_bin=codex_runner_bin,
+                                model=model,
+                                workdir=temp_dir,
+                                control_dir=rollout_control_dir,
+                                worker_state_dir=rollout_state_dir,
+                                codex_home=codex_home,
+                                seed_output_dir=seed_output_dir,
+                                shared_archives_root=shared_archives_root,
+                                shared_workspace_dir=shared_workspace_dir,
+                                rollout_username=rollout_username,
+                                timeout_seconds=args.worker_timeout_seconds,
+                                sandbox_mode=args.codex_sandbox_mode,
+                                initial_user_text=rollout_initial_prompt,
+                                base_instructions=codex_base_instructions,
+                                continuation_context=continuation_context,
+                                continuation_context_path=continuation_context_path,
+                                benchmark_mcp_servers=rollout_benchmark.mcp_servers,
+                                sensitive_mcp_tools=rollout_benchmark.sensitive_mcp_tools,
+                                progress_callback=_progress,
+                                persist_session=(args.benchmark == "open-ended"),
                             )
-                        if opencode_slot_environment is None:
-                            raise RuntimeError(
-                                "OpenCode provider environment was not initialized."
-                            )
-                        worker_result = run_opencode_worker(
-                            worker_script=opencode_worker_script,
-                            bun_bin=opencode_bun_bin,
-                            opencode_bin=opencode_bin,
-                            model=model,
-                            workdir=temp_dir,
-                            control_dir=rollout_control_dir,
-                            worker_state_dir=rollout_state_dir,
-                            timeout_seconds=args.worker_timeout_seconds,
-                            initial_user_text=rollout_initial_prompt,
-                            system_instructions=opencode_system_instructions,
-                            continuation_context=continuation_context,
-                            continuation_context_path=continuation_context_path,
-                            benchmark_mcp_servers=rollout_benchmark.mcp_servers,
-                            sensitive_mcp_tools=rollout_benchmark.sensitive_mcp_tools,
-                            auth_file=opencode_auth_file,
-                            opencode_account_db=opencode_account_db,
-                            agent=args.opencode_agent,
-                            variant=args.opencode_variant,
-                            allowed_versions=opencode_allowed_versions,
-                            allowed_bun_versions=opencode_allowed_bun_versions,
-                            startup_timeout_seconds=(
-                                args.opencode_server_startup_timeout_seconds
-                            ),
-                            provider_env_names=(
-                                opencode_slot_environment.provider_env_names
-                            ),
-                            provider_environment=(
-                                opencode_slot_environment.provider_environment
-                            ),
-                            custom_provider=(
-                                opencode_slot_environment.custom_provider
-                            ),
-                            sandbox_mode=(
-                                "bubblewrap"
-                                if args.opencode_sandbox_mode == "bubblewrap"
-                                else "none"
-                            ),
-                            sandbox_network=args.opencode_network_mode,
-                            bubblewrap_bin=opencode_bubblewrap_bin,
-                            sandbox_read_only_mounts=(
-                                opencode_slot_environment.credential_mounts
-                            ),
-                            sandbox_writable_roots=tuple(
-                                path
-                                for path in (
-                                    seed_output_dir,
-                                    shared_archives_root,
-                                    shared_workspace_dir,
+                        elif worker_backend == "opencode":
+                            if (
+                                opencode_worker_script is None
+                                or opencode_bun_bin is None
+                                or opencode_bin is None
+                            ):
+                                raise RuntimeError(
+                                    "OpenCode worker, Bun, and CLI were not initialized."
                                 )
-                                if path is not None and path.exists()
-                            ),
-                            sandbox_masked_paths=(
-                                (DEFAULT_ENV_PATH,) if DEFAULT_ENV_PATH.is_file() else ()
-                            ),
-                            progress_callback=_progress,
+                            if opencode_slot_environment is None:
+                                raise RuntimeError(
+                                    "OpenCode provider environment was not initialized."
+                                )
+                            worker_result = run_opencode_worker(
+                                worker_script=opencode_worker_script,
+                                bun_bin=opencode_bun_bin,
+                                opencode_bin=opencode_bin,
+                                model=model,
+                                workdir=temp_dir,
+                                control_dir=rollout_control_dir,
+                                worker_state_dir=rollout_state_dir,
+                                timeout_seconds=args.worker_timeout_seconds,
+                                initial_user_text=rollout_initial_prompt,
+                                system_instructions=opencode_system_instructions,
+                                continuation_context=continuation_context,
+                                continuation_context_path=continuation_context_path,
+                                benchmark_mcp_servers=rollout_benchmark.mcp_servers,
+                                sensitive_mcp_tools=rollout_benchmark.sensitive_mcp_tools,
+                                auth_file=opencode_auth_file,
+                                opencode_account_db=opencode_account_db,
+                                agent=args.opencode_agent,
+                                variant=args.opencode_variant,
+                                allowed_versions=opencode_allowed_versions,
+                                allowed_bun_versions=opencode_allowed_bun_versions,
+                                startup_timeout_seconds=(
+                                    args.opencode_server_startup_timeout_seconds
+                                ),
+                                provider_env_names=(
+                                    opencode_slot_environment.provider_env_names
+                                ),
+                                provider_environment=(
+                                    opencode_slot_environment.provider_environment
+                                ),
+                                custom_provider=(
+                                    opencode_slot_environment.custom_provider
+                                ),
+                                sandbox_mode=(
+                                    "bubblewrap"
+                                    if args.opencode_sandbox_mode == "bubblewrap"
+                                    else "none"
+                                ),
+                                sandbox_network=args.opencode_network_mode,
+                                bubblewrap_bin=opencode_bubblewrap_bin,
+                                sandbox_read_only_mounts=(
+                                    opencode_slot_environment.credential_mounts
+                                ),
+                                sandbox_writable_roots=tuple(
+                                    path
+                                    for path in (
+                                        seed_output_dir,
+                                        shared_archives_root,
+                                        shared_workspace_dir,
+                                    )
+                                    if path is not None and path.exists()
+                                ),
+                                sandbox_masked_paths=(
+                                    (DEFAULT_ENV_PATH,) if DEFAULT_ENV_PATH.is_file() else ()
+                                ),
+                                progress_callback=_progress,
+                            )
+                        else:
+                            if api_key is None:
+                                raise RuntimeError("OPENROUTER_API_KEY is required for the OpenRouter backend.")
+                            worker_result = run_worker(
+                                api_key=api_key,
+                                model=model,
+                                workdir=temp_dir,
+                                seed_output_dir=seed_output_dir,
+                                shared_archives_root=shared_archives_root,
+                                shared_workspace_dir=shared_workspace_dir,
+                                worker_state_dir=rollout_state_dir,
+                                shared_workspace_write_log=shared_workspace_write_log,
+                                task_index=task_index,
+                                task_id=task_id,
+                                rollout_index=rollout_index,
+                                rollout_username=rollout_username,
+                                timeout_seconds=args.worker_timeout_seconds,
+                                bash_timeout_seconds=args.bash_timeout_seconds,
+                                openrouter_max_retries=args.openrouter_max_retries,
+                                continuation_context=continuation_context,
+                                benchmark_driver=benchmark_driver,
+                                rollout_benchmark=rollout_benchmark,
+                                initial_user_text=rollout_initial_prompt,
+                                progress_callback=_progress,
+                            )
+                    except BaseException as exc:
+                        worker_result = WorkerResult(
+                            final_text="",
+                            status="error",
+                            stop_reason=type(exc).__name__,
+                            error_code=None,
+                            error_message=str(exc),
                         )
-                    else:
-                        if api_key is None:
-                            raise RuntimeError("OPENROUTER_API_KEY is required for the OpenRouter backend.")
-                        worker_result = run_worker(
-                            api_key=api_key,
-                            model=model,
-                            workdir=temp_dir,
-                            seed_output_dir=seed_output_dir,
-                            shared_archives_root=shared_archives_root,
-                            shared_workspace_dir=shared_workspace_dir,
-                            worker_state_dir=rollout_state_dir,
-                            shared_workspace_write_log=shared_workspace_write_log,
-                            task_index=task_index,
-                            task_id=task_id,
-                            rollout_index=rollout_index,
-                            rollout_username=rollout_username,
-                            timeout_seconds=args.worker_timeout_seconds,
-                            bash_timeout_seconds=args.bash_timeout_seconds,
-                            openrouter_max_retries=args.openrouter_max_retries,
-                            continuation_context=continuation_context,
-                            benchmark_driver=benchmark_driver,
-                            rollout_benchmark=rollout_benchmark,
-                            initial_user_text=rollout_initial_prompt,
-                            progress_callback=_progress,
-                        )
-                except BaseException as exc:
-                    worker_result = WorkerResult(
-                        final_text="",
-                        status="error",
-                        stop_reason=type(exc).__name__,
-                        error_code=None,
-                        error_message=str(exc),
+                    if (
+                        worker_result.status != "error"
+                        or not worker_result.error_retryable
+                        or worker_attempt > worker_max_retries
+                    ):
+                        break
+                    _progress(
+                        "worker_retry",
+                        worker_attempt=worker_attempt,
+                        worker_max_retries=worker_max_retries,
+                        worker_error_code=worker_result.error_code,
+                        worker_error_message=(worker_result.error_message or "")[:200],
                     )
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                    temp_dir.mkdir(parents=True, exist_ok=True)
+                    time.sleep(min(120.0, 10.0 * worker_attempt) + random.uniform(0, 5.0))
                 directory_agents.stop()
             except BaseException as exc:
                 worker_result = WorkerResult(
