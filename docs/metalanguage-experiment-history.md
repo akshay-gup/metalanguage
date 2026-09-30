@@ -171,3 +171,20 @@ engineering and mathematical tests. V3.7 improved RH focus and conflict rate
 relative to v3.6, but the unused inbox does not establish a communication
 effect. These event and artifact counts are not token measures, mathematical
 scores, correctness evidence, or an RH-proof claim.
+
+## Restored v1 execution contract (moved from README)
+
+The Codex/open-ended compatibility path is restored from outer source commit
+`43ec789` (the last material v1 source used through historical task index 9).
+It uses the bootstrap `seeds/bootstrap/AGENTS.md`, the one-character base
+placeholder `.`, independent linked Git worktrees and
+`rollout/...` branches, copied child workspaces, and serial supervisor merges.
+Uncommitted archive edits are discarded; conflicting branches are retained but
+not merged. There is no peer-message bus, automatic delivery turn, polling
+protocol, private inbox, direct-send tool, broadcast, store, or cursor. The
+v3.7 private-inbox experiment remains documented above, but the
+active rollout contract no longer exposes it.
+
+OpenCode remains an explicitly selected, separate backend. Its adapter,
+protocol metadata, and containment do not alter the Codex request, workspace,
+Git, prompt, completion, or cleanup path.

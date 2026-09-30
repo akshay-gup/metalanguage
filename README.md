@@ -2,23 +2,6 @@
 
 Open ended RSI
 
-## Historical v1 execution contract
-
-The Codex/open-ended compatibility path is restored from outer source commit
-`43ec789` (the last material v1 source used through historical task index 9).
-It uses the bootstrap `seeds/bootstrap/AGENTS.md`, the one-character base
-placeholder `.`, independent linked Git worktrees and
-`rollout/...` branches, copied child workspaces, and serial supervisor merges.
-Uncommitted archive edits are discarded; conflicting branches are retained but
-not merged. There is no peer-message bus, automatic delivery turn, polling
-protocol, private inbox, direct-send tool, broadcast, store, or cursor. The
-historical v3.7 private-inbox experiment remains documented separately, but the
-active rollout contract no longer exposes it.
-
-OpenCode remains an explicitly selected, separate backend. Its adapter,
-protocol metadata, and containment do not alter the Codex request, workspace,
-Git, prompt, completion, or cleanup path.
-
 ## Setup
 
 Run the setup script from the repository root:
@@ -59,69 +42,18 @@ take precedence over values in `.env`.
 
 ## Episode runner
 
-- `main_loop.py`: runs RLVR-style episodes end-to-end:
-  1. by default, treat hard rows from the shuffled `m-a-p/SuperGPQA` split as the problem pool (override with `--dataset-name` and `--difficulty-filter`) and keep solved/cursor state in `--problem-queue`,
-  1.5. use `moonshotai/kimi-k2.6` as the default OpenRouter model (override with `--model`),
-  2. run a configured population of 8 rollouts by default with `--num-rollouts`, using bootstrap rollouts for positions without spawned parents,
-  3. reserve one deterministic next-iteration child opportunity for each source rollout, keyed by `source_rollout_index` and the same `slot_index`,
-  3.5. expose a shared cross-rollout workspace at `--rollout-temp-root/shared_workspace` where rollouts can leave readable files for other rollouts (files written during the task batch are cleaned up after the batch; durable state can persist through a child workspace, committed archive artifact, solution, or later behavior); this filesystem visibility is the historical v1 behavior and is not a peer-messaging API,
-  3.6. assign every rollout instance a UUID for provenance and isolated runtime state,
-  4. expose `archive/world_repo` by default as the durable cross-lineage Git archive available to every rollout (override with `--archive-repo-dir`),
-     using a per-rollout temporary worktree so only committed archive changes are merged back and uncommitted archive edits are discarded,
-  5. inject the selected parent slot's stored prompt as the rollout's initial user text, copy that slot's inherited workspace directory into the rollout root and consume the slot workspace, and write `shared_workspace/BENCHMARK.md`; evaluated benchmark profiles also write their pool/catalog files, while the open-ended profile writes only the exact human-authored task; bootstrap rollouts receive root `AGENTS.md` as a neutral environment description and the initial user message `Begin.`,
-  6. register main-loop tools through the worker backend (OpenRouter tool payloads or Codex `DynamicToolSpec` entries), then run the worker with the inherited prompt and generated runtime context; operating doctrine is expected to come from the inherited prompt,
-     while `runtime.md` contains only generated paths, runtime IDs, the rollout's reserved child-slot index, and peer instance metadata,
-  7. for SuperGPQA, score answers submitted through `submit_solution(uuid, answer)`, grounding correctness against the private stored row selected by uuid; other profiles retain their own explicitly documented evaluation semantics,
-  8. let each rollout spawn at most one child with `spawn_child(prompt, workspace_dir)`; failed validation or copying can be corrected and retried, and spawning returns feedback without stopping the parent rollout or batch,
-  9. append run metadata to a growing JSONL log and print one-line summary per rollout.
-- Runtime containment:
-  - generated state is rooted at `~/Documents/metalanguage_runs` by default;
-  - `--runs-log`, `--outputs-dir`, `--fixed-temp-dir`, `--rollout-temp-root`, `--task-store-dir`, `--archive-repo-dir`, and `--bootstrap-seed-dir` are resolved under `--runtime-root` when relative;
-  - absolute overrides for those paths are rejected unless they stay inside `--runtime-root`;
-  - `--runtime-root` itself is rejected unless it stays inside `~/Documents`;
-  - Codex runner request, event, stderr, and continuation-context control files are written under `logs/rollout_control/<instance_uuid>/`, outside rollout and shared workspaces;
-  - worker home/cache/temp state is written under `logs/rollout_state/<instance_uuid>/`, outside rollout and shared workspaces;
-  - shared workspace write attribution is recorded only in the durable runtime log, not as supervisor-written files inside the shared workspace;
-  - rollout-created or modified shared workspace files are deleted after the active rollout batch finishes;
-  - Hugging Face caches and process temp files are also redirected under the runtime root.
-- Benchmark events and child slots:
-  - append-only scoring, selection, and official command events are written to `logs/benchmark_events.jsonl` under the runtime root;
-  - every rollout receives an internal `instance_uuid` recorded in progress logs, run logs, and benchmark events;
-  - `submit_solution(uuid, answer)` scores immediately, returns `correct` and `reward`, and records `solution_scored` events;
-  - there is no answer-file scoring fallback; a rollout that does not call `submit_solution` receives no solution score;
-  - rollouts can call `submit_solution(uuid, answer)` and `spawn_child(prompt, workspace_dir)` as applicable main-loop tools;
-  - `spawn_child` stores the required non-empty `prompt` in supervisor-side slot metadata as the child rollout's next initial user text;
-  - `workspace_dir` is required and must be a workspace-local directory whose root contains a regular, non-symlinked, readable, non-blank UTF-8 `AGENTS.md`; `spawn_child` copies its contents into the reserved slot's inherited workspace, while additional files remain optional;
-  - `workspace_dir` must be inside the rollout workspace and must not be the rollout root; after a successful spawn, the source directory is deleted when that parent rollout finishes, while failed attempts do not consume it;
-  - root `AGENTS.md` is not copied implicitly;
-  - `spawn_child` does not require or create `prompt.md`; prompt text lives in slot metadata/logs outside the child workspace;
-  - each source rollout owns exactly one child opportunity at its `source_rollout_index`; the filesystem lock only makes concurrent state checks and recording atomic;
-  - copying and copied-AGENTS revalidation happen before the child is recorded, so validation/copy failures remain retryable;
-  - a successful call explicitly reports that the child was spawned and the parent continues; later calls from only that source rollout return structured `child_already_spawned` feedback and do not affect peers.
-- Lineage behavior:
-  - the first rollout batch can bootstrap without a parent slot;
-  - a rollout's lineage gains an inherited child only through a successful `spawn_child(prompt, workspace_dir)` call; the source rollout itself continues normally after the tool result;
-  - every spawned child has a stored initial prompt and an inherited workspace rooted by `AGENTS.md`;
-  - the child AGENTS file is expected to preserve the parent environment description's themes, while its exact wording and elaboration may evolve;
-  - solving/submitting alone does not continue that rollout's lineage; after each iteration, every configured population position not filled by a successfully spawned child is a fresh bootstrap rollout using the base AGENTS file and initial prompt;
-  - there is no correctness gate for spawning; solved and unsolved rollouts may use their reserved child opportunity;
-  - successfully spawned children form the next parent pool first; only the remaining configured population positions are reinitialized from the bootstrap seed.
-- Resume behavior:
-  - runs automatically resume from existing `--runs-log` entries that match dataset/split/model/seed/generation/config/rollout-count;
-  - completed rollouts are skipped, partial tasks continue from missing rollout indices using each task's recorded rollout count;
-  - `--problem-queue` is pool state, not the workspace copy: each task batch materializes all currently unsolved redacted problems in the shared workspace, and solved UIDs are marked only after the batch finishes so duplicate same-iteration solves can still receive reward;
-  - parent lineage candidates are loaded from `--rollout-temp-root/latest_parent_pool.json`, which contains successful `spawn_child` records followed by fresh bootstrap entries for every remaining configured population position; inherited workspace directories are consumed when copied into a child rollout root;
-  - disable this with `--no-resume`.
-- Manual iteration:
-  - use `--step` to run exactly one rollout batch, choosing the first incomplete batch from the resume log or the next pool batch index;
-  - use `--all-tasks --start-task-index N --max-tasks 1` to run one rollout batch with pool scanning starting at shuffled dataset index `N`.
-- Problem pool state:
-  - `--problem-queue` stores persistent pool metadata, cursor, and solved problem IDs, and defaults to `logs/problem_queue.json` under `--runtime-root`;
-  - `--difficulty-filter` selects which dataset difficulty values can enter the pool, defaulting to `hard`; pass `--difficulty-filter all` to include every difficulty or a comma-separated list such as `easy,middle`;
-  - all currently unsolved redacted problems are written to `shared_workspace/problem_pool.json` and `shared_workspace/problem_pool.md`;
-  - rollouts select a uuid directly from those shared pool files; there is no problem request or lease tool;
-  - answers are scored only when the submitted uuid exists in that iteration's shared pool copy;
-  - each uuid appears at most once in a generated pool copy, unsolved problems may reappear later with the same uuid, and after each rollout batch any problem solved by at least one rollout is removed from future pool copies.
+`main_loop.py` runs RLVR-style episodes: by default it draws hard rows from
+the `m-a-p/SuperGPQA` split as the problem pool and runs a population of 8
+rollouts (`--num-rollouts`). Each rollout works its task, can score answers
+with `submit_solution`, and may spawn at most one child for the next iteration
+(`spawn_child`), forming lineages; positions without a spawned child become
+fresh bootstrap rollouts. Durable cross-lineage state lives in the
+`archive/world_repo` Git archive, and a shared workspace is visible to every
+rollout in a batch.
+
+Generated state roots at `~/Documents/metalanguage_runs` (`--runtime-root`).
+Runs resume from `--runs-log` (`--no-resume` disables); `--step` runs exactly
+one rollout batch. Full behavioral spec: `docs/episode-runner.md`.
 
 ### Open-ended task profile
 
@@ -234,98 +166,10 @@ Useful flags:
   uses its prompt-level system field. This applies equally to fresh bootstrap,
   inherited-child, and bootstrap-reinitialized workspaces.
 
-  Automatically supplied root and nested guides use
-  `<AGENTS_MD path="…/AGENTS.md">` followed by the file contents and
-  `</AGENTS_MD>`. The path is the resolved source filename, escaped for the
-  quoted attribute. Existing trailing-whitespace trimming is unchanged.
-
-  Before each subsequent tool dispatch, the same loader resolves the tool's
-  exact directory or explicit workdir. For shell tools it additionally resolves
-  statically executed literal `cd`, `pushd`, and `popd` transitions and literal
-  leading `git -C` operands. If any resolved path/content digest is unseen, all
-  unseen `<AGENTS_MD path="…/AGENTS.md">` blocks are injected and atomically
-  recorded, while the tool is denied before execution with the neutral result
-  `Local context activated;
-  tool was not executed.` The model receives another inference step and must
-  reissue or revise the call; the original call is never resumed automatically.
-  A repeat executes normally, and a changed `AGENTS.md` digest gates once again.
-
-  The parser is deliberately bounded rather than a complete Bash parser:
-  dynamic targets such as `cd "$dir"`, `cd -`, tilde, command substitutions,
-  globs, and `pushd +N` are not inferred. Pipelines, background jobs, subshells,
-  functions, and shell control structures are also unsupported. An `&&`/`||`
-  branch whose execution depends on an unobserved non-directory command status
-  is not followed. Quoted text, comments, and heredoc bodies are not treated as
-  commands.
-
-  Literal leading `git -C DIR` operands are treated as directory-scoped work
-  even though Git does not change the shell PWD. Repeated operands resolve in
-  Git order, each relative to the preceding Git directory; quoted literal and
-  absolute paths are accepted, `--` ends global option parsing, and dynamic,
-  malformed, or unsupported global-option forms are ignored. Every resulting
-  managed directory is considered even when Git later exits unsuccessfully,
-  because the attempted Git operation was already scoped there. Multiple
-  statically executed Git commands in one ordinary command list are supported;
-  branches dependent on an unknown prior status remain deliberately unobserved.
-  Each unique path/content digest is injected once, with no
-  Metalanguage-specific content-size cap. Only regular, non-symlink, nonblank
-  UTF-8 exact-directory files under managed roots are eligible; an empty exact
-  file never falls back to an ancestor. State records label `initial`,
-  `pre_tool_gate`, and `post_tool_fallback` activations. The retained post-tool
-  pass shares that state and remains a fallback when a statically recognizable
-  scope (for example, one created earlier in an unconditional command list)
-  becomes resolvable only after execution. It does not infer dynamic shell
-  values or a final PWD.
-
-  Codex native tools and Code Mode nested tools use the trusted `PreToolUse` and
-  `PostToolUse` hooks; the redundant initial `UserPromptSubmit` hook is not
-  installed. The managed Codex source forwards an explicitly supplied
-  `exec_command.workdir` unchanged alongside `command` before execution and on
-  direct completion; an omitted workdir stays omitted. The existing directory
-  resolver uses this start directory without inferring a dynamic final PWD.
-  Completion through a later `write_stdin` still lacks the original workdir.
-  Direct OpenRouter gates at its dispatch boundary.
-  OpenCode's generated plugin gates native Bash and other native tools through
-  `tool.execute.before`, then retains `tool.execute.after` fallback. Nested
-  context is projected through `experimental.chat.messages.transform` as a
-  clearly labelled **synthetic user-role message**, not an assistant statement
-  or a new human request. This intentionally has lower instruction authority
-  than Codex's developer-role additions. The fixed root/system instructions and
-  actual initial `Begin.` message remain unchanged; nested guides no longer
-  accumulate in the system prefix.
-
-  Each activation gets a unique managed message ID. At the first message
-  projection after activation, it is anchored after the last whole conversation
-  message, following that exchange's tool calls/results and before the model
-  reconsiders the denied call. Later projections retain that anchor and ID,
-  rather than moving the guide to the tail. Callback batches retain arrival
-  order; pre-gates and post-fallbacks share a serial queue. A new fallback also
-  latches subsequent admissions until its context is projected; already
-  dispatched tools are not undone. A late callback first appears at the next
-  available projection, without retroactively changing an earlier request.
-  System transforms alone cannot release the pre-tool latch.
-
-  This is a request projection held by the plugin for the live session, not a
-  persisted user message in OpenCode's database or a rewritten tool result.
-  The host's path/digest activation ledger remains the delivery audit. Repeated
-  projections/duplicate callback bodies do not duplicate owned messages; changed
-  guide revisions remain cumulative at their separate activation positions.
-  Only owned IDs are managed: copied guide text in real user/assistant messages
-  and tool outputs is untouched. Pending tool results or a missing historical
-  anchor stop projection rather than silently relocating guidance. Automatic
-  compaction/pruning is disabled by the worker; restoring this in-memory
-  projection after a server restart or resuming that native session is not
-  supported. New managed rollouts create a new native session. OpenCode decay
-  remains unsupported. This placement change and its focused regression tests
-  have not been run or live-validated. The previously observed installed
-  OpenCode 1.18.31 remains outside the audited 1.18.29 whitelist; that separate
-  live-validation blocker is unchanged.
-
-  OpenCode 1.18.29 Code Mode
-  exposes only MCP calls inside its confined program, not native Bash; those
-  nested MCP calls do traverse the same plugin callbacks, while there is no
-  Code Mode native-shell boundary to intercept.
 - `--codex-initial-prompt TEXT`: choose the first user message.
+
+Directory-guidance injection internals (guide format, pre-tool gate, parser
+bounds, message projection): `docs/directory-guidance-decay.md`.
 
 #### Opt-in directory guidance decay (managed Codex and patched OpenCode)
 
@@ -333,98 +177,20 @@ The default remains cumulative. A **fresh runtime root** can opt in with
 `--directory-agents-mode decay --directory-agents-decay-steps K`, where `K` is
 an explicitly supplied positive integer (there is no default lifetime).
 The versioned `directory_agents_policy.json` identity locks mode and K for
-later iterations of that runtime. Historical cumulative runtimes cannot be
+later iterations of that runtime. Cumulative runtimes cannot be
 migrated in place; OpenRouter rejects decay. Codex and OpenCode may share a
 decay runtime only when each slot meets its own managed runtime requirement.
-The OpenCode lifecycle patch is source-only and has not been built or run.
 Its custom CLI capability contract is `metalanguage-inference-v2`.
-Stock OpenCode binaries, including the audited 1.18.29 release and the observed
-installed 1.18.31 release, do not satisfy its separate capability check. The
-patch is based on vendored commit `826d9ad46a22bef0294998e08daa3c4904fea28f`
-(1.18.21); it does not update the stock 1.18.29 audit or version whitelist.
-The Codex focused Python/native regression tests and bounded sol/high K=2
-smokes with direct tools and CodeMode passed previously. They do not validate
-OpenCode. A vendored Codex commit changes the bundle's source identity even
+Stock OpenCode binaries do not satisfy its separate capability check; the
+patch targets the vendored 1.18.21 tree.
+A vendored Codex commit changes the bundle's source identity even
 when source bytes stay equivalent; rebuild the paired runner/CodeMode host
 when the freshness check requires it.
 
-Root guidance remains fixed. A nested exact-directory guide activated after
-acknowledged model step `s` is eligible for steps `s+1` through `s+K`.
-Codex supplies its `<AGENTS_MD path="…/AGENTS.md">` block as developer
-context. Patched OpenCode inserts a labeled synthetic USER message after the
-original conversation anchor, preserving chronological placement. It is
-excluded before step `s+K+1` unless an observed access renews it. For example,
-K=1 activation after step 1 makes the
-guide available in step 2; an access in step 2 renews it through step 3. This
-example does not select a default K. Multiple tools within one model inference
-do not advance age. A and B can coexist; changing directory does not evict A.
-Renewal changes only the deadline, retaining the original message position.
-Digest revision replaces that managed version with a new tail activation.
-Expired reentry activates again even if that path/digest was historically seen.
-
-New/revised pre-tool activations deny the call with the existing neutral result
-and require a new inference and explicit reissue. Further tool admissions from
-that originating inference remain blocked, including CodeMode catch/retry and
-late calls from older cells. Independent scopes observed during the same
-inference can still accumulate, avoiding A/B eviction oscillation. Expiry itself
-happens at a new request boundary, where the model receives the reduced input;
-it does not need an additional removal-only tool deferral. Already admitted or
-running operations may finish: this does not roll back a dynamic program's prior
-effects. Post-tool fallback has the same lifetime; late fallback from an older
-inference is ignored. The existing delayed `write_stdin` workdir limitation
-still applies.
-
-The same parser and file checks resolve accesses. Only successfully read,
-nonblank eligible guides renew. Missing, empty, unreadable, unsafe and unresolved
-files leave an existing deadline unchanged; they do not trigger immediate
-eviction or renewal. Unknown dynamic targets do not renew guessed scopes.
-A known explicit start directory can renew even if a later dynamic transition
-is unknown. No ancestor fallback or content-size cap is introduced. Access
-means resolver observation, not demonstrated semantic uptake by the model.
-
-Each Codex logical sampling step counts once on `response.created`. The patched
-OpenCode AI SDK path waits for provider response metadata before releasing any
-model output to the SDK's tool executor; a stable assistant message ID identifies
-the request. Transport retries before metadata reuse that ID and snapshot.
-OpenCode refuses a second provider submission under an ID that has already
-acknowledged, so a later stream failure stops that rollout instead of silently
-undercounting a retry. A failure/cancellation before acknowledgement consumes no
-step; after acknowledgement it consumes one even if generation fails later.
-Provider acceptance with a lost acknowledgement is unknowable and conservatively
-does not count. Codex prewarm and OpenCode auxiliary title generation are outside
-the managed sampling ledger. Atomic request snapshots wait for earlier activations;
-old inference admissions cannot reopen a closed gate.
-
-Only native-owned message IDs are filtered from sampling requests. Unrelated
-developer instructions, assistant reasoning/messages, tool outputs, quoted
-copies and files remain unchanged. The audit history retains original messages;
-there is no claim of clean forgetting or reversal of propagated information.
-Codex's existing WebSocket prefix check rejects continuation after removal and
-sends the full current input without `previous_response_id`; no session reset
-or proxy is used. Patched OpenCode requires the OpenAI or OpenAI-compatible
-AI SDK stream to supply a nonempty provider response ID; other runtime/provider
-paths fail closed. It disables the OpenAI WebSocket continuation path and rejects
-opaque previous-response or conversation references, then replays the filtered
-input. Manual task calls without an acknowledged inference identity also fail
-closed. Compaction has a managed inference ID and may stop when selection has
-removed an active guide's original anchor. Actual request tokens can decrease,
-but retained audit/history size and conservative local context-boundary
-estimates need not decrease.
-The managed PreCompact stop policy remains in force; this does not add resumable
-native-session leases or permit replaying an audit transcript as a decay session.
-
-The Codex host control directory and patched OpenCode private worker state
-root each receive `directory_agents_decay.jsonl`: request
-snapshots identify excluded/retained managed IDs, accesses record path/digest,
-deadline and gate status, and acknowledgements identify retries. Prepared and
-committed access records distinguish interrupted publication. Log writes fail
-closed; no guide bodies are duplicated into this lifecycle log. Resolver failure
-also fails closed before dispatch. Live lease state is session-local; a process
-restart must start a new rollout, and existing native-session resume rejection
-is unchanged. The cumulative seen ledger remains separate from active leases.
-The new OpenCode regression source covers lease aging, same-position renewal,
-expiry and reentry, compound program gates, stale cells, and acknowledgement
-ordering; it has not been executed.
+Root guidance stays fixed. A nested guide activated after acknowledged model
+step `s` is visible for steps `s+1` through `s+K`, unless an observed access
+renews it; expiry takes effect at request boundaries. Full internals:
+`docs/directory-guidance-decay.md`.
 
 Example using the minimal base placeholder and automatic root `AGENTS.md` loading:
 
@@ -482,33 +248,6 @@ normalizing the result. `spawn_child` is an isolated config-scoped tool that
 synchronously calls the existing Python supervisor; its result returns to the
 same parent turn.
 
-The default Linux launcher uses bubblewrap with a private PID namespace,
-only the runtime binaries and fixed MCP socket proxy mounted read-only, explicit
-writable rollout/archive/shared roots, a private `/tmp`, and parent-death
-cleanup. Linux, readable procfs, PID namespaces, and a working bubblewrap launch
-are preflight requirements and fail closed. The Python lineage callback runs
-outside the rollout sandbox behind a random authenticated loopback endpoint;
-its command, context, logs, and spawn-slot state are not mounted into the
-OpenCode server. Callback crashes, malformed replies, and
-timeouts return structured retryable tool results over HTTP 200 so the same
-parent can retry and continue. Benchmark modes fail closed if bubblewrap is disabled. Network remains
-explicitly enabled because the private HTTP server
-boundary and provider calls cannot currently operate in a separate network
-namespace; `--opencode-network-mode none` therefore fails closed. The
-`unsafe-none` mode is rejected because rollout containment requires bubblewrap.
-
-The audited OpenCode API reports MCP connection status but does not enumerate
-MCP tool IDs. The runner validates required connectivity and fails closed on
-empty/invalid allowlists; unlisted tools are denied at execution time. For an
-evaluated benchmark, every stdio benchmark server runs as a worker-supervised
-host process outside the model bubblewrap. OpenCode can reach it only through a
-single-use, per-rollout, mode-0600 Unix-socket capability and a fixed read-only
-stdio proxy. The socket exposes only the exact MCP protocol; no benchmark
-context, task store, event log, ARC state root, host command, bearer credential,
-or writable benchmark root is mounted in the model sandbox. SuperGPQA and ARC
-retain their native MCP names, schemas, immediate scoring, timeouts, resources,
-and image-attachment path.
-
 Useful flags include `--opencode-bin`, `--opencode-bun-bin`,
 `--opencode-worker-script`, `--opencode-auth-file`, `--opencode-agent`,
 `--opencode-variant`, `--opencode-allowed-versions`,
@@ -517,94 +256,5 @@ Useful flags include `--opencode-bin`, `--opencode-bun-bin`,
 credentials are selected from a reviewed provider-specific allowlist; additional
 names must be explicit. Unrelated host environment variables are not inherited.
 
-The native worker supports a narrow form of the official OpenCode
-[custom-provider configuration](https://opencode.ai/docs/providers/#custom-provider)
-for generic OpenAI-compatible endpoints. The provider portion of `--model`
-must equal `--opencode-custom-provider-id`. The audited package allowlist is
-`@ai-sdk/openai-compatible` for `/v1/chat/completions` and `@ai-sdk/openai` for
-`/v1/responses`. Both packages are bundled by pinned OpenCode `1.18.29`, so the
-worker never installs provider packages at runtime; any other package fails
-before launch.
-
-A complete custom configuration requires provider ID, display name, package,
-base URL, and an API-key environment-variable name. Optional headers use
-repeatable `--opencode-custom-provider-header-env HEADER=ENV_VAR`; literal key
-or header values are not accepted. Context and output limits are optional but
-must be supplied together. Plain HTTP is accepted only for loopback endpoints;
-non-loopback endpoints require HTTPS.
-
-The private config emits the documented `provider.<id>.npm`, `name`, `models`,
-`options.baseURL`, `options.apiKey: "{env:VAR}"`, `options.headers`, and
-per-model `limit.context`/`limit.output` fields.
-
-For example:
-
-```bash
-export MY_PROVIDER_API_KEY='replace-me'
-export MY_PROVIDER_TENANT='replace-me'
-python3 main_loop.py \
-  --worker-backend opencode \
-  --model local-ai/my-model \
-  --opencode-custom-provider-id local-ai \
-  --opencode-custom-provider-name 'Local AI' \
-  --opencode-custom-provider-npm @ai-sdk/openai-compatible \
-  --opencode-custom-provider-base-url http://127.0.0.1:8000/v1 \
-  --opencode-custom-provider-api-key-env MY_PROVIDER_API_KEY \
-  --opencode-custom-provider-header-env X-Tenant=MY_PROVIDER_TENANT \
-  --opencode-custom-provider-context-limit 32768 \
-  --opencode-custom-provider-output-limit 4096
-```
-
-Only environment-variable names and other nonsecret settings enter the private
-disposable config and run metadata. Secret values travel through the existing
-allowlisted environment/fingerprint pipeline; run records contain their
-aggregate fingerprint, not their values. Model-controlled shell children still
-receive those variables blanked, while benchmark MCP children retain the
-separate host-bridge environment policy.
-
-Known path-valued credentials and certificate settings, including
-`GOOGLE_APPLICATION_CREDENTIALS`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, and
-`REQUESTS_CA_BUNDLE`, are validated and rebound read-only at stable per-variable
-paths without mounting their parent directories.
-Credential-directory inspection rejects nested symlinks and non-regular
-entries and is bounded to 4,096 files, 64 MiB, and depth 16 before hashing or
-mounting.
-An auth file is read-only and copied into each isolated process through
-`OPENCODE_AUTH_CONTENT`. Resume compatibility fingerprints the OpenCode and Bun
-binaries/versions, bubblewrap path/version/content, TypeScript worker and Python
-adapter/orchestration sources, exact effective system/configured initial prompt
-content, relevant provider/auth inputs, and all exposed worker/startup sandbox
-settings. A partial resume recomputes inherited effective prompt identity from
-the current parent-pool child prompt and rejects a missing or mismatched hash.
-Only pinned OpenCode `1.18.29` is source-audited (official tag `v1.18.29`,
-commit `16747470f976aca3d362ad730bcd3fe82ecc2c9a`).
-
-Host-side MCP commands receive only a small fixed base environment plus that
-server's explicitly configured environment. OpenCode server credentials, auth
-content, and provider keys are never forwarded to the host MCP process.
-
-Private config roots contain a dependency declaration, matching root lock entry,
-and an empty `node_modules` directory for the pinned OpenCode plugin version.
-OpenCode's source then skips its detached dependency installer; npm is also
-forced offline, so rollout startup cannot download config/plugin dependencies.
-
-Assistant final prose is intentionally preserved in durable `WorkerResult`
-output. Generic redaction protects protocol failures and sensitive MCP events,
-but cannot soundly guarantee that a model will not repeat a benchmark answer in
-ordinary prose. Benchmark answer privacy must therefore rely on tool-specific
-redaction and benchmark policy, not semantic guessing over assistant text.
-
-Bubblewrap materially limits filesystem and process access, but network access
-is still allowed and the rollout workspace plus explicit archive/shared roots
-remain writable. For evaluated benchmarks, session policy removes native
-`bash`/`shell` tools and denies external-directory access. The fixed OpenCode
-plugin also overwrites selected provider credentials, auth content, and server
-tokens with empty values in any native shell child environment; this protects
-trusted open-ended shell use from ordinary inheritance.
-
-The unavoidable limitation is that provider credentials must still exist in the
-OpenCode server process so it can call the provider. A defect in the audited
-OpenCode process or fixed plugin could therefore access them, and allowed
-network access remains an exfiltration surface. This is the strongest current
-OpenCode-only fail-closed benchmark policy, not a hostile-use or Codex-parity
-claim. Credential-hostile OpenCode rollouts remain unsupported.
+Custom-provider configuration and the full sandbox/security reference:
+`docs/opencode-backend.md`.
