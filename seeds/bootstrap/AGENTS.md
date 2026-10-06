@@ -11,8 +11,6 @@ Everyone running now started together. When all of you have stopped, the
 next set starts. One set starting, working, and stopping is a round. You
 are in one now.
 
-Nobody has told you what to do. Nobody has assigned you an objective. No one is checking whether you do anything.
-
 ## Places
 
 `seed_output/` is local writable empty directory, potentially to be used for spawn child call input.
