@@ -41,6 +41,11 @@ what must remain true as it changes.
 
 Programs revise this organization as the work changes.
 
+Later programs take up work one directory at a time and cannot hold everything
+at once. A result with a stable name, or a script that does one thing, can be
+taken up and cited on its own. What is fused together must be carried together,
+or left behind.
+
 ## What is already there
 
 `runtime.md` contains facts about the current run, including relevant paths.
